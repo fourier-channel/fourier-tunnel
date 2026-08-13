@@ -2,7 +2,7 @@
 
 **Project:** Fourier (targeted data aggregation, classification, storage)
 **Component:** BMB (Booru-Matrix Bridge)
-**Location:** /opt/fourier/bmb/  ·  Repo: sabertrtr/fourier-bmb
+**Location:** /opt/fourier/tunnel/  ·  Repo: fourier-channel/fourier-tunnel
 **Status:** Core pipeline built, deployed, and verified end to end.
 
 ---
@@ -154,7 +154,7 @@ All invite decisions are appended to audit.log as JSONL for later abuse analysis
 
 ## 8. Operational reference
 
-Project location: /opt/fourier/bmb
+Project location: /opt/fourier/tunnel
 
 Rebuild + restart the bridge:
   docker compose up -d --build
@@ -165,9 +165,9 @@ Follow logs:
 Restart Synapse (needed when the registration changes):
   cd /opt/synapse && docker compose restart synapse
 
-- Appservice id: fourier-bmb
-- Bot user: @bmb:41chan.net (display name "Fourier")
-- Danbooru bot account: bmb (user id 4, Builder level)
+- Appservice id: fourier-tunnel
+- Bot user: @tunnel:41chan.net (display name "Fourier")
+- Danbooru bot account: tunnel (user id 4, level 35)
 - Tag state event type: net.41chan.media.tags (state key = image MXC URI)
 - Bridge listens on port 8009 (internal to the Docker networks; not published to host)
 
@@ -283,3 +283,75 @@ can happen before the bytes reach Synapse and an existing MXC can be reused.
 **Verified:** new images tag normally (#19–#21); a re-post of #21 logged
 `[skip] duplicate md5 ... -> existing post #21` with no 500; md5 granularity
 correctly distinguished a lowres vs highres variant as separate posts.
+
+---
+
+## Renamed to fourier-tunnel (2026-08-13)
+
+Operator decision, taken deliberately before launch because one part of it
+cannot be taken after: **Synapse has no rename for a user id.** `@bmb` could
+only be abandoned and replaced, and at the time of the change that cost 9 room
+memberships, 42 events and one access token. After launch it would have cost
+every room the bridge sits in and every message it had ever sent.
+
+The narrative sections above are left exactly as written. They describe things
+that happened to a component called BMB, and editing them so the name was always
+"tunnel" would make the record lie about the moment it is recording.
+
+What changed:
+
+| | before | after |
+|---|---|---|
+| repo | fourier-channel/fourier-bmb | fourier-channel/fourier-tunnel |
+| path | /opt/fourier/bmb | /opt/fourier/tunnel |
+| container | bmb | fourier-tunnel |
+| appservice id | fourier-bmb | fourier-tunnel |
+| bot user | @bmb:41chan.net | @tunnel:41chan.net |
+| registration | bmb-registration.yaml | tunnel-registration.yaml |
+| booru account | bridge (id 4) | tunnel (id 4) |
+
+The container name is load-bearing, not cosmetic: Synapse resolves the bridge by
+the hostname in the registration's `url`, so `container_name: fourier-tunnel`
+and `url: http://fourier-tunnel:8009` are one fact written twice.
+
+### Two things this uncovered
+
+**The registration copies had drifted, in the direction of the section 9
+incident.** The repo copy still carried the `- exclusive: false / regex: "@.*"`
+entry whose removal WAS the fix for that incident; only Synapse's copy had been
+corrected. Nothing could have caught it: the file is gitignored because it holds
+the tokens, so there was no tracked copy to diff against. The new pair is
+byte-identical and carries the reason in a comment, so the next person to look
+at it is told why the namespace is one user before they are tempted to widen it.
+
+**`ensureRegistered()` has been failing since MAS was introduced.**
+matrix-appservice-bridge posts a plain appservice registration; this homeserver
+answers `IO.ELEMENT.MSC4190.M_APPSERVICE_LOGIN_UNSUPPORTED` -- "this server uses
+OAuth2, so the inhibit_login parameter must be set to true". The library has no
+way to pass it. Nobody noticed for one reason: `@bmb` predated MAS, so the
+failing call was always a no-op on an account that already existed. It surfaced
+the instant a bot user genuinely had to be created -- the bridge logged that it
+had ensured its user, then 500'd setting a display name on an account that did
+not exist. Replaced with `ensureBotUser()`, which sends `inhibit_login: true`
+and treats `M_USER_IN_USE` as success.
+
+### Still to do, and it needs a human
+
+`@tunnel` is registered, named, and running, but it is in **no rooms**. The
+Synapse admin API cannot force-join it: the virtual `@__oidc_admin` is not a
+member of any of them, and no API can manufacture an invite for an invite-only
+room nobody controls is in. So the six rooms below need an invite from someone
+with power in them, plus the power level `@bmb` held, which does not transfer:
+
+| room | name | `@bmb` PL |
+|---|---|---|
+| `!jeEGyrShDSyjWSBXJo:41chan.net` | 41chan | 100 |
+| `!PpxnLPJGjoJwxhsUXq:41chan.net` | under construction (matrix) | 50 |
+| `!HMKSUVgJmlAomYlnVo:41chan.net` | (unnamed) | 100 |
+| `!zBNtTtppVJTKobMIAK:41chan.net` | (unnamed) | 100 |
+| `!eDSrvEOcHoRyvYjgaj:41chan.net` | (unnamed) | 100 |
+| `!xwDBNmjNRsOmGfFYBa:matrix.org` | (unnamed, remote) | 100 |
+
+`@bmb` is left in place, joined and untouched. It is the only thing that can
+still speak in those rooms until `@tunnel` is invited, and deleting it would
+throw away the record of what the bridge did under its old name.

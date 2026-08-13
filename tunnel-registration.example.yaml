@@ -1,0 +1,23 @@
+# Appservice registration. Copy to tunnel-registration.yaml, fill the tokens
+# with two independent secrets, and place a BYTE-IDENTICAL copy in Synapse's
+# data dir -- Synapse reads its own copy, and the two drifting is a class of
+# bug that has already cost this bridge an incident (DEVLOG section 9).
+#
+# THE NAMESPACE IS ONE USER, AND MUST STAY THAT WAY. There was once a second
+# entry here, `- exclusive: false / regex: "@.*"`, which claims an interest in
+# every user on the homeserver: appservice routing then delivered EVERY event
+# on the server to the bridge, and it created booru posts for images in rooms
+# it had never been invited to. The invite gate was never involved, because no
+# invite ever happened. Removing that entry was the fix. Do not add it back.
+id: fourier-tunnel
+url: http://fourier-tunnel:8009
+as_token: "CHANGE_ME"
+hs_token: "CHANGE_ME"
+sender_localpart: tunnel
+namespaces:
+  users:
+    - exclusive: true
+      regex: "@tunnel:example\\.net"
+  aliases: []
+  rooms: []
+rate_limited: false

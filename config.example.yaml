@@ -4,7 +4,7 @@ homeserver:
 danbooru:
   url: "http://danbooru:3000"
   # Dedicated Danbooru bot account and its API key (keep the real key out of git)
-  username: "bmb"
+  username: "tunnel"
   api_key: "YOUR_DANBOORU_API_KEY"
 autotagger:
   # fourier-spectrum autotagger service (image bytes in, Danbooru tags out).

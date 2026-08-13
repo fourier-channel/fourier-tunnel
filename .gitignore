@@ -8,5 +8,10 @@ config.yaml
 # NEVER be committed still shows as drift on every sweep, which trains you to
 # ignore the light. Ignored, not committed.
 config.yaml.bak.*
+tunnel-registration.yaml
+# The pre-rename name. The file still exists on disk and still holds live
+# tokens: renaming the ignore entry alone un-ignored it, and `git add -A`
+# promptly staged it as a rename of the EXAMPLE file. Both names stay listed
+# for as long as the old file exists.
 bmb-registration.yaml
 .env

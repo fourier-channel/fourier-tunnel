@@ -12,9 +12,9 @@ RUN npm install --omit=dev
 # kept out via .dockerignore (*.test.js, dev-autotag.js), so this ships exactly
 # the same set as the old allowlist, but stays correct as modules are added.
 COPY *.js ./
-COPY config.yaml bmb-registration.yaml ./
+COPY config.yaml tunnel-registration.yaml ./
 
 # The bridge listens on 8009 for Synapse's appservice traffic
 EXPOSE 8009
 
-CMD ["node", "index.js", "-p", "8009", "-f", "bmb-registration.yaml"]
+CMD ["node", "index.js", "-p", "8009", "-f", "tunnel-registration.yaml"]

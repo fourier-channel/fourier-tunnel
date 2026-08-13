@@ -1,11 +1,11 @@
-# Fourier — BMB (Booru-Matrix Bridge)
+# fourier-tunnel (Booru-Matrix Bridge)
 
 A Matrix **application service** that mirrors images posted in Matrix rooms into a
 [Danbooru](https://github.com/danbooru/danbooru) instance, auto-tags them, and writes the
 resulting tags back into the Matrix room as a queryable state event.
 
 Fourier is an umbrella project for targeted data aggregation, classification, and storage;
-**BMB** (Booru-Matrix Bridge) is its first component.
+**fourier-tunnel** (formerly BMB, the Booru-Matrix Bridge) is its first component.
 
 ---
 

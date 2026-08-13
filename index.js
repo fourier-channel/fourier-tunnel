@@ -12,7 +12,51 @@ const danbooru = new DanbooruClient(config.danbooru);
 
 // Load the appservice token from the registration file for authenticated
 // media downloads from Synapse.
-const _reg = yaml.load(fs.readFileSync(require("path").join(__dirname, "bmb-registration.yaml"), "utf8"));
+/**
+ * Register the bot user, on a homeserver that speaks OAuth2.
+ *
+ * NOT bridge.getIntent().ensureRegistered(). matrix-appservice-bridge posts a
+ * plain appservice registration, and this homeserver runs MAS -- so it answers
+ * IO.ELEMENT.MSC4190.M_APPSERVICE_LOGIN_UNSUPPORTED: "this server uses OAuth2,
+ * so the inhibit_login parameter must be set to true for appservice
+ * registrations". The bridge library has no way to pass it.
+ *
+ * That call has therefore been failing since MAS was introduced, and nobody
+ * noticed for one reason: @bmb was registered BEFORE MAS, so the failure was
+ * always a no-op on an account that already existed. It surfaced the moment the
+ * bot was renamed and the user genuinely had to be created -- the bridge came
+ * up, logged that it had ensured its user, and then 500'd setting a display
+ * name on an account that did not exist.
+ *
+ * M_USER_IN_USE is success here: the account is what we wanted, and a restart
+ * must not be an error.
+ */
+async function ensureBotUser(config, reg) {
+  const localpart = reg.sender_localpart;
+  const url = `${config.homeserver.url.replace(/\/+$/, "")}/_matrix/client/v3/register`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${reg.as_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type: "m.login.application_service",
+      username: localpart,
+      // The whole point. Without it, MAS refuses the registration outright.
+      inhibit_login: true,
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.ok) {
+    console.log(`[startup] bot user @${localpart} registered`);
+    return;
+  }
+  if (body.errcode === "M_USER_IN_USE") {
+    console.log(`[startup] bot user @${localpart} already exists`);
+    return;
+  }
+  throw new Error(`${body.errcode || res.status}: ${body.error || "register failed"}`);
+}
+
+const _reg = yaml.load(fs.readFileSync(require("path").join(__dirname, "tunnel-registration.yaml"), "utf8"));
 const AS_TOKEN = _reg.as_token;
 
 const TAG_STATE_TYPE = "net.41chan.media.tags";
@@ -115,7 +159,7 @@ async function handleImageEvent(bridge, event) {
       tags: projection.tags,
       rating: existing.rating || config.bridge.default_rating,
       sources: projection.sources,
-      updated_by: "bmb",
+      updated_by: "tunnel",
       updated_at: Date.now(),
     });
     console.log(`[skip] duplicate md5 ${md5} -> existing post #${existing.id}`);
@@ -149,7 +193,7 @@ async function handleImageEvent(bridge, event) {
   }
   // Provenance partition (UI: creator=green, auto=orange, both=gradient; meta =
   // de-emphasised quality/meta section). Creator-only display is privacy-gated
-  // chanbooru-side (hidden by default); bmb still records it.
+  // chanbooru-side (hidden by default); the bridge still records it.
   const creatorSet = new Set(creatorTags);
   const autoSet = new Set(autoTags);
   const both = autoTags.filter((t) => creatorSet.has(t));
@@ -197,7 +241,7 @@ async function handleImageEvent(bridge, event) {
     // PUBLIC-SAFE provenance for the redesigned tag buckets. Creator-only tags are
     // withheld by the booru and surface only via its identity-gated read.
     sources: projection.sources,
-    updated_by: "bmb",
+    updated_by: "tunnel",
     updated_at: Date.now(),
   });
   console.log(`[done] post #${post.id} tagged (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta)`);
@@ -242,7 +286,7 @@ async function handleJoinCommand(bridge, event) {
   if ((await joinedMemberCount(bridge, roomId)) !== 2) return false;
   // Local-only gate: sender MXID must be on this homeserver. This is a
   // deliberate policy choice (local users self-serve; remote users need a
-  // human invite), NOT a technical constraint -- @bmb can invite any MXID
+  // human invite), NOT a technical constraint -- @tunnel can invite any MXID
   // regardless of server. Revisit this gate if the server privacy model opens
   // up (e.g. self-service on-ramp for all users).
   const domain = config.homeserver.domain;
@@ -256,7 +300,7 @@ async function handleJoinCommand(bridge, event) {
     return true;
   }
   const targetRoom = config.bridge.onramp_room;
-  // @bmb (PL 100, seated in the space) invites the user. The user accepts the
+  // @tunnel (PL 100, seated in the space) invites the user. The user accepts the
   // invite in their client to enter. We do NOT force-join: the Synapse admin
   // join endpoint acts as @__oidc_admin (not in the room) and refuses, so
   // invite-and-accept is the mechanism. Tolerate "already invited/joined".
@@ -373,12 +417,12 @@ async function handleAvatarFlow(bridge, event) {
 }
 
 new Cli({
-  registrationPath: "bmb-registration.yaml",
+  registrationPath: "tunnel-registration.yaml",
   generateRegistration: function (reg, callback) {
-    reg.setId("fourier-bmb");
+    reg.setId("fourier-tunnel");
     reg.setHomeserverToken(AppServiceRegistration.generateToken());
     reg.setAppServiceToken(AppServiceRegistration.generateToken());
-    reg.setSenderLocalpart("bmb");
+    reg.setSenderLocalpart("tunnel");
     reg.addRegexPattern("users", "@.*", false);
     callback(reg);
   },
@@ -386,7 +430,7 @@ new Cli({
     const bridge = new Bridge({
       homeserverUrl: config.homeserver.url,
       domain: config.homeserver.domain,
-      registration: "bmb-registration.yaml",
+      registration: "tunnel-registration.yaml",
       controller: {
         onUserQuery: function () {
           return {};
@@ -394,7 +438,7 @@ new Cli({
         onEvent: async function (request) {
           const event = request.getData();
           // The robot wanted me to erase this, but I think it's funny, so I'm leaving it here
-          const botUserId = `@${config.homeserver.domain ? "bmb" : "bmb"}:${config.homeserver.domain}`;
+          const botUserId = `@tunnel:${config.homeserver.domain}`;
 
           try {
             // Invite directed at the bot
@@ -443,11 +487,10 @@ new Cli({
         },
       },
     });
-    console.log(`fourier-bmb listening on port ${port}`);
+    console.log(`fourier-tunnel listening on port ${port}`);
     bridge.run(port).then(async () => {
       try {
-        await bridge.getIntent().ensureRegistered();
-        console.log("[startup] bot user @bmb ensured/registered");
+        await ensureBotUser(config, _reg);
         await bridge.getIntent().setDisplayName("Fourier");
         console.log("[startup] display name set to Fourier");
       } catch (e) {

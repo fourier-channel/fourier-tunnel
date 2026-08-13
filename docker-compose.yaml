@@ -1,15 +1,18 @@
-name: bmb
+name: fourier-tunnel
 services:
-  bmb:
+  tunnel:
     build: .
-    container_name: bmb
+    # container_name is load-bearing, not cosmetic: Synapse resolves the bridge
+    # by the hostname in the registration's `url`, so this name and
+    # `url: http://fourier-tunnel:8009` must agree.
+    container_name: fourier-tunnel
     env_file:
       - .env
     restart: unless-stopped
     networks:
       - synapse_default
       - danbooru_default
-    # No ports published to host — Synapse reaches it internally on 8009
+    # No ports published to host -- Synapse reaches it internally on 8009
 networks:
   synapse_default:
     external: true
