@@ -3,5 +3,10 @@ strikes.json
 audit.log
 *.tmp
 config.yaml
+# ...and its dated backups. config.yaml holds the appservice tokens, so a
+# timestamped copy of it holds them too -- and an untracked file that must
+# NEVER be committed still shows as drift on every sweep, which trains you to
+# ignore the light. Ignored, not committed.
+config.yaml.bak.*
 bmb-registration.yaml
 .env
