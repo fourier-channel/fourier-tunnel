@@ -335,6 +335,25 @@ had ensured its user, then 500'd setting a display name on an account that did
 not exist. Replaced with `ensureBotUser()`, which sends `inhibit_login: true`
 and treats `M_USER_IN_USE` as success.
 
+### The booru login broke, silently, the moment the account was renamed
+
+Danbooru authenticates every API call on `login` + `api_key`, and `login` is the
+account NAME, not its id. So renaming user id 4 from `bridge` to `tunnel` --
+which the audit trail records properly and which leaves every existing post
+attributed correctly, because attribution follows the id -- invalidated the
+credentials of the one service authenticating as it. `config.yaml` still said
+`username: "bridge"`, and the booru answered `401 Invalid API key` to everything
+the bridge asked: image upload, post creation, tag write-back, all of it.
+
+Nothing would have reported this. The bridge starts cleanly, joins nothing,
+logs nothing at boot about the booru, and only fails at the moment an image is
+posted in a room -- and it is in no rooms yet. fourier-sampling's health board
+watches the sampling pipeline's own booru account, which was never involved.
+
+The rule worth keeping: **a danbooru rename is a credential change for anything
+logging in as that account.** Grep for the old name in every config on the box
+before considering the rename done.
+
 ### Still to do, and it needs a human
 
 `@tunnel` is registered, named, and running, but it is in **no rooms**. The
@@ -351,6 +370,17 @@ with power in them, plus the power level `@bmb` held, which does not transfer:
 | `!zBNtTtppVJTKobMIAK:41chan.net` | (unnamed) | 100 |
 | `!eDSrvEOcHoRyvYjgaj:41chan.net` | (unnamed) | 100 |
 | `!xwDBNmjNRsOmGfFYBa:matrix.org` | (unnamed, remote) | 100 |
+
+All three bot commands -- `!join`, `!resetstrikes`, `!setavatar` -- are DM-only,
+and a DM is a room. Four of the six above ARE those DMs, with `@notsaber`,
+`@glorpodorpo` and `@saber`. They cannot be migrated: `@tunnel` is not in them,
+and `@bmb` no longer receives anything either now that the `fourier-bmb`
+appservice is unloaded, so they are dead in both directions. Those conversations
+have to be restarted as fresh DMs with `@tunnel`.
+
+`!join` needs the room work on top of that: `onramp_room` is the 41chan room, so
+the bot must be joined there AND hold invite power before the command can do
+what it says.
 
 `@bmb` is left in place, joined and untouched. It is the only thing that can
 still speak in those rooms until `@tunnel` is invited, and deleting it would
