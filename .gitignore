@@ -21,3 +21,7 @@ bmb-registration.yaml
 # file. A public repo carrying one in-tree is a policy breach; this is the
 # guard technetium has had since 2026-08-25 and chanbooru did not.
 CLAUDE.md
+
+# The hydration pointer for the ignored CLAUDE.md above. It carries the hash
+# of what was delivered, so it is ignored alongside the file it describes.
+.coherence/
