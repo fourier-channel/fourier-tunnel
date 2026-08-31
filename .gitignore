@@ -25,3 +25,6 @@ CLAUDE.md
 # The hydration pointer for the ignored CLAUDE.md above. It carries the hash
 # of what was delivered, so it is ignored alongside the file it describes.
 .coherence/
+docs/VERIFICATION-DOCTRINE.md
+docs/WORKING-RULES.md
+docs/CLAUDE-HEADER.md
