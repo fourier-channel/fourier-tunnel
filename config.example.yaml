@@ -1,6 +1,9 @@
 homeserver:
   url: "http://synapse:8008"
   domain: "example.net"
+  # Synapse admin API token, used ONLY by the onboarding new-user watch.
+  # Absent: the watch stays off (logged once) and !join still works.
+  admin_token: "YOUR_SYNAPSE_ADMIN_TOKEN"
 danbooru:
   url: "http://danbooru:3000"
   # Dedicated Danbooru bot account and its API key (keep the real key out of git)
@@ -31,3 +34,16 @@ bridge:
   invite_power_level: 100
   # Room/space a local user is invited to via the !join on-ramp command (a room ID)
   onramp_room: "!yourspace:example.net"
+  # The bot's display name (the MXID comes from the registration's
+  # sender_localpart -- rename to @fourier there, not here).
+  display_name: "Fourier-chan"
+  # Fourier-chan's onboarding: DM every new local user the rules; "Yes"
+  # earns the invite to onramp_room. See onboarding.js for the defaults.
+  onboarding:
+    enabled: true
+    poll_interval_ms: 60000
+    # rules_text: |-
+    #   Welcome. The rules: ...
+    #   Do you agree? Type Yes to accept.
+    # accept_hint: |-
+    #   Invite sent! Check the top of your room list and accept.

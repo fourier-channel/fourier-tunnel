@@ -6,6 +6,7 @@ const { DanbooruClient } = require("./danbooru");
 const { autotag } = require("./autotagger");
 const { extractCreatorTags } = require("./prompt-tags");
 const invites = require("./invites");
+const { Onboarding } = require("./onboarding");
 
 const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
 const danbooru = new DanbooruClient(config.danbooru);
@@ -438,7 +439,9 @@ new Cli({
         onEvent: async function (request) {
           const event = request.getData();
           // The robot wanted me to erase this, but I think it's funny, so I'm leaving it here
-          const botUserId = `@tunnel:${config.homeserver.domain}`;
+          // Derived from the registration, not spelled out: the rename to
+          // @fourier is a sender_localpart change and nothing else.
+          const botUserId = `@${_reg.sender_localpart}:${config.homeserver.domain}`;
 
           try {
             // Invite directed at the bot
@@ -462,7 +465,10 @@ new Cli({
             }
 
             if (event.type === "m.room.message" && event.content) {
-              // Local on-ramp command (DM only)
+              // Fourier-chan's onboarding DM (rules -> "Yes" -> invite)
+              if (onboarding && (await onboarding.handleReply(event))) return;
+              // Local on-ramp command (DM only) -- the fallback for anyone
+              // who closed the onboarding DM.
               if (await handleJoinCommand(bridge, event)) return;
               // Admin reset command (DM only)
               if (await handleResetCommand(bridge, event)) return;
@@ -487,15 +493,18 @@ new Cli({
         },
       },
     });
+    const onboarding = new Onboarding(bridge, config, `@${_reg.sender_localpart}:${config.homeserver.domain}`, invites.audit);
     console.log(`fourier-tunnel listening on port ${port}`);
     bridge.run(port).then(async () => {
       try {
         await ensureBotUser(config, _reg);
-        await bridge.getIntent().setDisplayName("Fourier");
-        console.log("[startup] display name set to Fourier");
+        const displayName = (config.bridge && config.bridge.display_name) || "Fourier-chan";
+        await bridge.getIntent().setDisplayName(displayName);
+        console.log(`[startup] display name set to ${displayName}`);
       } catch (e) {
         console.error("[startup] failed to register bot user:", e.message);
       }
+      onboarding.start();
     });
   },
 }).run();

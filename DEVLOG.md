@@ -389,3 +389,34 @@ what it says.
 `@bmb` is left in place, joined and untouched. It is the only thing that can
 still speak in those rooms until `@tunnel` is invited, and deleting it would
 throw away the record of what the bridge did under its old name.
+
+## 2026-09-04 -- Fourier-chan greets every new user
+
+Operator ask: "@fourier:41chan.net, Fourier-chan to start a fresh DM with
+every new user to the site. Wherein she tells them the server's rules and
+asks them if they agree." She assumes the old "message the bot !join" step;
+!join stays as the fallback for anyone who closes the DM.
+
+`onboarding.js`: a poll of the Synapse admin users API (nothing pushes "a
+user registered" at an appservice) ordered by creation, watermarked in
+onboarding-state.json -- first run seeds the watermark to NOW so an empty
+state file means "greet arrivals from here on", never "DM the backlog".
+New local users get a fresh DM with the rules; "Yes" (the one GO -- anything
+else re-asks and never invites) earns the invite to onramp_room plus the
+accept hint pointing at where the invite lands in the client. Fail-soft: no
+admin_token means the watch logs once and stays off; a failed greet retries
+next poll; the tagging pipeline is untouched by any of it.
+
+Smoke-tested with stubbed intent + fetch: watermark skip, bot-account skip,
+rules DM, non-yes re-ask (no invite), wrong-room ignore, Yes -> invite,
+pending cleared, audit trail complete.
+
+DEPLOY notes (gated, not done here):
+- The rename to @fourier is the REGISTRATION's sender_localpart -- index.js
+  now derives botUserId from it instead of hardcoding @tunnel. On next boot
+  ensureBotUser creates @fourier via the MAS inhibit_login path (the same
+  machinery that bit us when @bmb was renamed).
+- config.yaml needs homeserver.admin_token (see config.example.yaml) or the
+  watch stays off.
+- Dockerfile already ships *.js, so onboarding.js rides along (the per-file
+  COPY foot-gun that bit three times does not bite here).
