@@ -19,7 +19,32 @@
 const fs = require("fs");
 const path = require("path");
 
-const STATE_PATH = path.join(__dirname, "onboarding-state.json");
+// State lives in a MOUNTED directory, not beside the code. It was
+// path.join(__dirname, ...) inside the image, so every `docker compose build`
+// threw the watermark away and the bot re-greeted the entire user list -- which
+// is exactly what happened on 2026-09-05, twice, to 22 real people.
+const STATE_DIR = process.env.ONBOARDING_STATE_DIR || __dirname;
+const STATE_PATH = path.join(STATE_DIR, "onboarding-state.json");
+
+// A real signup arrives alone. More than a handful of "new" users inside one
+// 60-second poll is not a busy day, it is a bug in the watermark -- so the
+// batch is refused, the watermark is advanced past it, and nobody is messaged.
+// Defence in depth: the unit bug below was fixed, and this exists so that the
+// NEXT bug in the same place cannot mass-message the community either.
+const MAX_GREETS_PER_TICK = 3;
+
+// Synapse is inconsistent about this field, and the inconsistency is the whole
+// incident: GET /_synapse/admin/v2/users/<id> answers in SECONDS (10 digits),
+// while the LIST endpoint this poller uses answers in MILLISECONDS (13). The
+// code trusted a comment that said "seconds" and multiplied by 1000, producing
+// microseconds -- a number a thousand times larger than the millisecond
+// watermark, so every account that had ever existed compared as "created after
+// now". Normalising by magnitude survives Synapse changing its mind again.
+function creationMs(user) {
+  const raw = Number(user && user.creation_ts) || 0;
+  if (raw <= 0) return 0;
+  return raw >= 1e12 ? raw : raw * 1000;
+}
 
 const DEFAULT_RULES = [
   "Welcome to 41chan. Before I let you in, the rules:",
@@ -162,13 +187,29 @@ class Onboarding {
 
   async poll() {
     const users = await this.fetchNewestUsers();
-    // creation_ts is SECONDS in the admin API; the watermark is ms.
+    // Both sides in milliseconds -- see creationMs.
     const fresh = users
-      .filter((u) => (u.creation_ts || 0) * 1000 > this.state.watermark_ts)
-      .sort((a, b) => (a.creation_ts || 0) - (b.creation_ts || 0));
+      .filter((u) => creationMs(u) > this.state.watermark_ts)
+      .sort((a, b) => creationMs(a) - creationMs(b));
+
+    if (fresh.length > MAX_GREETS_PER_TICK) {
+      // Refuse the batch and step over it. Saying nothing to 20 people is a
+      // recoverable mistake; DMing 20 people who did not just sign up is not.
+      const newest = fresh.reduce((m, u) => Math.max(m, creationMs(u)), this.state.watermark_ts);
+      this.state.watermark_ts = newest;
+      saveState(this.state);
+      console.error(
+        `[onboarding] REFUSED to greet ${fresh.length} users in one tick ` +
+        `(cap ${MAX_GREETS_PER_TICK}); watermark advanced, nobody messaged. ` +
+        "This means the watermark is wrong, not that the site got popular.",
+      );
+      this.audit({ kind: "onboarding_batch_refused", count: fresh.length });
+      return;
+    }
+
     for (const user of fresh) {
       const userId = user.name;
-      this.state.watermark_ts = Math.max(this.state.watermark_ts, (user.creation_ts || 0) * 1000);
+      this.state.watermark_ts = Math.max(this.state.watermark_ts, creationMs(user));
       if (this.isBotLike(userId) || this.state.greeted[userId]) {
         saveState(this.state);
         continue;
@@ -257,4 +298,6 @@ class Onboarding {
   }
 }
 
-module.exports = { Onboarding };
+// creationMs and MAX_GREETS_PER_TICK are exported for the test that proves
+// the 2026-09-05 mass-DM cannot recur.
+module.exports = { Onboarding, creationMs, MAX_GREETS_PER_TICK };

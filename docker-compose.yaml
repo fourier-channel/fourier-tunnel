@@ -8,6 +8,17 @@ services:
     container_name: fourier-tunnel
     env_file:
       - .env
+    environment:
+      # Where the onboarding watermark lives -- a MOUNTED path, so a rebuild
+      # cannot throw it away and re-greet everyone (2026-09-05 incident).
+      ONBOARDING_STATE_DIR: /state
+    volumes:
+      # config.yaml is also COPYed into the image by the Dockerfile; this mount
+      # takes precedence, so editing it on the host is enough. Without the
+      # mount, an edit here silently did nothing until the next `--build`,
+      # which is how a config change that looked applied was not.
+      - ./config.yaml:/app/config.yaml:ro
+      - ./onboarding-state:/state
     restart: unless-stopped
     networks:
       - synapse_default
