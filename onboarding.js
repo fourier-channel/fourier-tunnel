@@ -83,8 +83,17 @@ class Onboarding {
 
   // Register @fourier (MAS refuses plain appservice registration without
   // inhibit_login -- same trap ensureBotUser documents), name her, and seat
-  // her in the space so she can send invites from inside it. The tunnel
-  // (PL 100, already seated) hands her the space invite; she accepts.
+  // her in the space so she can send invites from inside it.
+  //
+  // She seats HERSELF. The tunnel does not invite her and must not: @tunnel is
+  // the scraper, and its whole relationship to rooms is "a user invites ME"
+  // (see invites.js). It is not in the space and has no power there, so the
+  // old tunnel-invites-her step could only ever fail silently -- it was
+  // swallowed by a bare catch, which is why nobody noticed it never worked.
+  //
+  // If she cannot join on her own, that is a REAL configuration gap and it is
+  // said out loud rather than swallowed: a human must invite @fourier to the
+  // space and grant her power level 50, which is what `invite` costs there.
   // Every step tolerates already-done, because a restart must not be an
   // error.
   async ensureUser() {
@@ -101,8 +110,14 @@ class Onboarding {
     await this.intent().setDisplayName(this.displayName);
     const space = this.config.bridge.onramp_room;
     if (space) {
-      try { await this.bridge.getIntent().invite(space, this.userId); } catch (e) { /* already invited/joined */ }
-      try { await this.intent().join(space); } catch (e) { /* already joined */ }
+      try {
+        await this.intent().join(space);
+      } catch (e) {
+        console.warn(
+          `[onboarding] ${this.userId} is not seated in ${space}: ${(e && e.message) || e}\n` +
+          "[onboarding] invite her to the space and grant power level 50, or she cannot invite anyone.",
+        );
+      }
     }
     console.log(`[onboarding] ${this.userId} ready as "${this.displayName}"`);
   }
@@ -201,17 +216,11 @@ class Onboarding {
     if (body === "yes" || body === "yes.") {
       const targetRoom = this.config.bridge.onramp_room;
       try {
-        // Hers when the space lets her; the tunnel (PL 100) as the fallback
-        // plumbing when it does not. The conversation stays Fourier-chan's
-        // either way.
-        try {
-          await intent.invite(targetRoom, userId);
-        } catch (e) {
-          const msg = (e && e.message) || "";
-          if (/already|in room|is already (in|joined)/i.test(msg)) throw e;
-          await this.bridge.getIntent().invite(targetRoom, userId);
-          this.audit({ kind: "onboarding_invite_via_tunnel", user: userId });
-        }
+        // Hers, and only hers. There is deliberately no fallback: the tunnel
+        // is the scraper and never invites anyone, so routing through it could
+        // not have worked (it is not even in the space) and served only to
+        // turn a precise permission error into "something broke".
+        await intent.invite(targetRoom, userId);
         await intent.sendText(roomId, this.acceptHint);
         delete this.state.pending[userId];
         saveState(this.state);
@@ -223,6 +232,15 @@ class Onboarding {
           delete this.state.pending[userId];
           saveState(this.state);
           this.audit({ kind: "onboarding_invite_noop", user: userId });
+        } else if (/forbidden|not permitted|power level|M_FORBIDDEN/i.test(msg)) {
+          // The one failure a human must act on, named as itself rather than
+          // hidden inside a generic apology.
+          await intent.sendText(roomId, "I can't send invites yet -- an admin has been told. Hang tight.");
+          console.error(
+            `[onboarding] CANNOT INVITE: ${this.userId} lacks permission in ${targetRoom}. ` +
+            "Grant her power level 50 there.",
+          );
+          this.audit({ kind: "onboarding_invite_forbidden", user: userId, error: msg.slice(0, 300) });
         } else {
           await intent.sendText(roomId, "Something broke sending your invite; try again in a minute, or type !join.");
           this.audit({ kind: "onboarding_invite_failed", user: userId, error: msg.slice(0, 300) });
