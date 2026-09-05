@@ -44,3 +44,17 @@ test("the batch cap is small enough to be a circuit breaker", () => {
   // like 50, the breaker stops breaking and the incident can recur.
   assert.ok(MAX_GREETS_PER_TICK > 0 && MAX_GREETS_PER_TICK <= 5);
 });
+
+test("onboarding DMs are created BY Fourier-chan, not by the appservice bot", () => {
+  // Regression for 2026-09-05: createAsClient:false makes
+  // matrix-appservice-bridge build the room with the BOT client, which put
+  // @tunnel -- the image scraper -- into every onboarding DM as its creator.
+  // The tunnel's only room relationship is "a user invites ME" (invites.js);
+  // it has no business in a welcome conversation.
+  const fs = require("node:fs");
+  const src = fs.readFileSync(require.resolve("./onboarding.js"), "utf8");
+  const call = src.slice(src.indexOf("intent.createRoom("));
+  const flag = /createAsClient:\s*(true|false)/.exec(call);
+  assert.ok(flag, "the createRoom call must state createAsClient explicitly");
+  assert.equal(flag[1], "true", "createAsClient:false puts @tunnel in every DM");
+});
