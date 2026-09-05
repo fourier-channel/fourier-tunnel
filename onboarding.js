@@ -222,8 +222,21 @@ class Onboarding {
   async greet(userId) {
     const intent = this.intent();
     try {
+      // createAsClient: TRUE -- she opens the room herself.
+      //
+      // With false, matrix-appservice-bridge builds the room with
+      // `this.botClient` (intent.js: `opts.createAsClient ?
+      // botSdkIntent.underlyingClient : this.botClient`), so @TUNNEL became the
+      // creator of, and a permanent member of, every onboarding DM -- the
+      // scraper bot sitting in a private conversation it has no part in.
+      // Operator caught it 2026-09-05 by simply looking at the room.
+      //
+      // Safe because @fourier is an exclusive user namespace in
+      // tunnel-registration.yaml, so Synapse still pushes these rooms' events
+      // to the appservice with the bot absent, and handleReply still sees the
+      // "Yes".
       const { room_id } = await intent.createRoom({
-        createAsClient: false,
+        createAsClient: true,
         options: {
           invite: [userId],
           is_direct: true,
