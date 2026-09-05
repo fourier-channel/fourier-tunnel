@@ -456,6 +456,14 @@ new Cli({
               return;
             }
 
+            // Fourier-chan's onboarding DM (rules -> "Yes" -> invite).
+            // BEFORE the joined-guard below: her DMs contain @fourier, not
+            // @tunnel, and the handler scopes itself to rooms it opened for
+            // exactly one pending user.
+            if (event.type === "m.room.message" && event.content) {
+              if (onboarding && (await onboarding.handleReply(event))) return;
+            }
+
             // Skip any non-invite event from a room the bot isn't joined to.
             // This ACKs (drains) backlog left over from a previously over-broad
             // appservice namespace, and is correct defense-in-depth: the bridge
@@ -465,8 +473,6 @@ new Cli({
             }
 
             if (event.type === "m.room.message" && event.content) {
-              // Fourier-chan's onboarding DM (rules -> "Yes" -> invite)
-              if (onboarding && (await onboarding.handleReply(event))) return;
               // Local on-ramp command (DM only) -- the fallback for anyone
               // who closed the onboarding DM.
               if (await handleJoinCommand(bridge, event)) return;
@@ -493,16 +499,23 @@ new Cli({
         },
       },
     });
-    const onboarding = new Onboarding(bridge, config, `@${_reg.sender_localpart}:${config.homeserver.domain}`, invites.audit);
+    const onboarding = new Onboarding(bridge, config, AS_TOKEN, invites.audit);
     console.log(`fourier-tunnel listening on port ${port}`);
     bridge.run(port).then(async () => {
       try {
         await ensureBotUser(config, _reg);
-        const displayName = (config.bridge && config.bridge.display_name) || "Fourier-chan";
+        const displayName = (config.bridge && config.bridge.display_name) || "Fourier";
         await bridge.getIntent().setDisplayName(displayName);
         console.log(`[startup] display name set to ${displayName}`);
       } catch (e) {
         console.error("[startup] failed to register bot user:", e.message);
+      }
+      try {
+        // Fourier-chan is her own user; failing to raise her must not stop
+        // the tunnel from tagging.
+        await onboarding.ensureUser();
+      } catch (e) {
+        console.error("[startup] onboarding user not ready:", e.message);
       }
       onboarding.start();
     });

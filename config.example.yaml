@@ -34,13 +34,16 @@ bridge:
   invite_power_level: 100
   # Room/space a local user is invited to via the !join on-ramp command (a room ID)
   onramp_room: "!yourspace:example.net"
-  # The bot's display name (the MXID comes from the registration's
-  # sender_localpart -- rename to @fourier there, not here).
-  display_name: "Fourier-chan"
-  # Fourier-chan's onboarding: DM every new local user the rules; "Yes"
-  # earns the invite to onramp_room. See onboarding.js for the defaults.
+  # The BRIDGE bot's display name (@tunnel stays the tunnel).
+  display_name: "Fourier"
+  # Fourier-chan's onboarding: she is her OWN user (@<localpart>:<domain>,
+  # acted through the appservice namespace -- the registration must cover
+  # her MXID). She DMs every new local user the rules; "Yes" earns the
+  # invite to onramp_room. See onboarding.js for the defaults.
   onboarding:
     enabled: true
+    localpart: "fourier"
+    display_name: "Fourier-chan"
     poll_interval_ms: 60000
     # rules_text: |-
     #   Welcome. The rules: ...

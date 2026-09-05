@@ -412,10 +412,18 @@ rules DM, non-yes re-ask (no invite), wrong-room ignore, Yes -> invite,
 pending cleared, audit trail complete.
 
 DEPLOY notes (gated, not done here):
-- The rename to @fourier is the REGISTRATION's sender_localpart -- index.js
-  now derives botUserId from it instead of hardcoding @tunnel. On next boot
-  ensureBotUser creates @fourier via the MAS inhibit_login path (the same
-  machinery that bit us when @bmb was renamed).
+- SUPERSEDED 2026-09-05, operator ruling: "the tunnel should stay the tunnel
+  user. @fourier is a new user." No sender_localpart rename. @fourier is a
+  SECOND user the appservice acts as via getIntent(@fourier:<domain>):
+  the registration's users namespace must cover her, e.g.
+    namespaces:
+      users:
+        - exclusive: true
+          regex: "@fourier:41chan\\.net"
+  alongside whatever it already claims. On boot ensureUser registers her
+  through the MAS inhibit_login path, names her Fourier-chan, and seats her
+  in the space (tunnel invites, she accepts). Her space invites fall back to
+  the tunnel's PL 100 when the space denies hers.
 - config.yaml needs homeserver.admin_token (see config.example.yaml) or the
   watch stays off.
 - Dockerfile already ships *.js, so onboarding.js rides along (the per-file

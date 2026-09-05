@@ -50,10 +50,16 @@ function saveState(state) {
 }
 
 class Onboarding {
-  constructor(bridge, config, botUserId, audit) {
+  // Fourier-chan is HER OWN user (@fourier:<domain>), not the bridge bot:
+  // @tunnel stays the tunnel (operator ruling 2026-09-05). The appservice
+  // acts as her through bridge.getIntent(her id), which requires the
+  // registration's users namespace to cover her MXID -- see the DEVLOG
+  // deploy notes. `asToken` is the appservice token, used once to register
+  // her through the MAS inhibit_login path.
+  constructor(bridge, config, asToken, audit) {
     this.bridge = bridge;
     this.config = config;
-    this.botUserId = botUserId;
+    this.asToken = asToken;
     this.audit = audit;
     const cfg = (config.bridge && config.bridge.onboarding) || {};
     this.enabled = cfg.enabled !== false;
@@ -61,9 +67,44 @@ class Onboarding {
     this.rules = cfg.rules_text || DEFAULT_RULES;
     this.acceptHint = cfg.accept_hint || DEFAULT_ACCEPT_HINT;
     this.adminToken = (config.homeserver && config.homeserver.admin_token) || null;
+    this.localpart = cfg.localpart || "fourier";
+    this.userId = `@${this.localpart}:${config.homeserver.domain}`;
+    this.displayName = cfg.display_name || "Fourier-chan";
     // { watermark_ts, pending: { [userId]: roomId }, greeted: { [userId]: ts } }
     this.state = loadState();
     this.timer = null;
+  }
+
+  // Her intent: every onboarding action -- the DM, the rules, the invite --
+  // happens as @fourier, so the new user meets Fourier-chan, not the tunnel.
+  intent() {
+    return this.bridge.getIntent(this.userId);
+  }
+
+  // Register @fourier (MAS refuses plain appservice registration without
+  // inhibit_login -- same trap ensureBotUser documents), name her, and seat
+  // her in the space so she can send invites from inside it. The tunnel
+  // (PL 100, already seated) hands her the space invite; she accepts.
+  // Every step tolerates already-done, because a restart must not be an
+  // error.
+  async ensureUser() {
+    const base = this.config.homeserver.url.replace(/\/+$/, "");
+    const res = await fetch(`${base}/_matrix/client/v3/register`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.asToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "m.login.application_service", username: this.localpart, inhibit_login: true }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok && body.errcode !== "M_USER_IN_USE") {
+      throw new Error(`${body.errcode || res.status}: ${body.error || "register failed"}`);
+    }
+    await this.intent().setDisplayName(this.displayName);
+    const space = this.config.bridge.onramp_room;
+    if (space) {
+      try { await this.bridge.getIntent().invite(space, this.userId); } catch (e) { /* already invited/joined */ }
+      try { await this.intent().join(space); } catch (e) { /* already joined */ }
+    }
+    console.log(`[onboarding] ${this.userId} ready as "${this.displayName}"`);
   }
 
   start() {
@@ -123,7 +164,7 @@ class Onboarding {
   }
 
   async greet(userId) {
-    const intent = this.bridge.getIntent();
+    const intent = this.intent();
     try {
       const { room_id } = await intent.createRoom({
         createAsClient: false,
@@ -155,12 +196,22 @@ class Onboarding {
     if (!roomId || roomId !== event.room_id) return false;
 
     const body = (event.content.body || "").trim().toLowerCase();
-    const intent = this.bridge.getIntent();
+    const intent = this.intent();
 
     if (body === "yes" || body === "yes.") {
       const targetRoom = this.config.bridge.onramp_room;
       try {
-        await intent.invite(targetRoom, userId);
+        // Hers when the space lets her; the tunnel (PL 100) as the fallback
+        // plumbing when it does not. The conversation stays Fourier-chan's
+        // either way.
+        try {
+          await intent.invite(targetRoom, userId);
+        } catch (e) {
+          const msg = (e && e.message) || "";
+          if (/already|in room|is already (in|joined)/i.test(msg)) throw e;
+          await this.bridge.getIntent().invite(targetRoom, userId);
+          this.audit({ kind: "onboarding_invite_via_tunnel", user: userId });
+        }
         await intent.sendText(roomId, this.acceptHint);
         delete this.state.pending[userId];
         saveState(this.state);
