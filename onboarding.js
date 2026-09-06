@@ -256,6 +256,71 @@ class Onboarding {
     }
   }
 
+  // An admin opening a DM with her. She is an appservice user, so nothing
+  // joins her to a room on its own; without this, an admin's DM to @fourier
+  // sits as an unanswered invite and !setavatar has nowhere to be typed.
+  // Admins only -- the same list that may reset strikes -- because a DM from
+  // anyone else is not a conversation she starts, and joining it would make
+  // her reachable by everyone as a bot to poke.
+  async handleAdminInvite(event) {
+    if (event.type !== "m.room.member" || !event.content) return false;
+    if (event.content.membership !== "invite" || event.state_key !== this.userId) return false;
+    if (!(this.config.bridge.strike_reset_admins || []).includes(event.sender)) return false;
+    try {
+      await this.intent().join(event.room_id);
+      this.audit({ kind: "onboarding_admin_dm_joined", admin: event.sender, room: event.room_id });
+    } catch (e) {
+      console.error(`[onboarding] could not join admin DM ${event.room_id}:`, e.message);
+    }
+    return true;
+  }
+
+  // !setavatar, the same flow the tunnel has (index.js handleAvatarFlow),
+  // for HER avatar: an admin types it in a DM with her, then sends an image
+  // within two minutes, and she wears it. Operator ask 2026-09-06.
+  async handleAvatarFlow(event) {
+    if (event.type !== "m.room.message" || !event.content) return false;
+    const sender = event.sender;
+    if (!(this.config.bridge.strike_reset_admins || []).includes(sender)) return false;
+    const roomId = event.room_id;
+    const content = event.content;
+    const intent = this.intent();
+    if (!this.avatarPending) this.avatarPending = new Map();
+
+    if (content.msgtype === "m.text" && (content.body || "").trim() === "!setavatar") {
+      if ((await this.joinedMemberCount(roomId)) !== 2) return false; // DM only
+      this.avatarPending.set(sender, Date.now() + 2 * 60 * 1000);
+      await intent.sendText(roomId, "Send me an image and I'll use it as my avatar (within 2 minutes).");
+      return true;
+    }
+    if (content.msgtype === "m.image") {
+      const expiry = this.avatarPending.get(sender);
+      if (!expiry) return false;
+      if (Date.now() > expiry) { this.avatarPending.delete(sender); return false; }
+      if ((await this.joinedMemberCount(roomId)) !== 2) return false;
+      if (!content.url) return false;
+      this.avatarPending.delete(sender);
+      try {
+        await intent.setAvatarUrl(content.url);
+        await intent.sendText(roomId, "Avatar updated.");
+        this.audit({ kind: "onboarding_avatar_set", admin: sender, mxc: content.url });
+      } catch (e) {
+        await intent.sendText(roomId, "Failed to set avatar: " + e.message);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  async joinedMemberCount(roomId) {
+    try {
+      const state = await this.intent().roomState(roomId);
+      return state.filter((e) => e.type === "m.room.member" && e.content.membership === "join").length;
+    } catch (e) {
+      return -1;
+    }
+  }
+
   // The reply handler: only fires in a DM this class opened, only for the
   // user it was opened for. Returns true when the event was consumed.
   async handleReply(event) {

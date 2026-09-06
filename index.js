@@ -462,7 +462,11 @@ new Cli({
             // exactly one pending user.
             if (event.type === "m.room.message" && event.content) {
               if (onboarding && (await onboarding.handleReply(event))) return;
+              // Her !setavatar, from an admin in a DM with her.
+              if (onboarding && (await onboarding.handleAvatarFlow(event))) return;
             }
+            // An admin inviting HER to a DM: she joins, so the DM exists.
+            if (onboarding && (await onboarding.handleAdminInvite(event))) return;
 
             // Skip any non-invite event from a room the bot isn't joined to.
             // This ACKs (drains) backlog left over from a previously over-broad
