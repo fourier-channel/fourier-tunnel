@@ -18,6 +18,8 @@
 
 const fs = require("fs");
 const path = require("path");
+const yaml = require("js-yaml");
+const progression = require("./progression");
 
 // State lives in a MOUNTED directory, not beside the code. It was
 // path.join(__dirname, ...) inside the image, so every `docker compose build`
@@ -25,6 +27,36 @@ const path = require("path");
 // is exactly what happened on 2026-09-05, twice, to 22 real people.
 const STATE_DIR = process.env.ONBOARDING_STATE_DIR || __dirname;
 const STATE_PATH = path.join(STATE_DIR, "onboarding-state.json");
+// The activity catalog and tier messages, beside config.yaml (mounted).
+const CATALOG_PATH = process.env.ONBOARDING_CATALOG || path.join(__dirname, "progression.yaml");
+
+function loadCatalog() {
+  try {
+    const cat = yaml.load(fs.readFileSync(CATALOG_PATH, "utf8"));
+    progression.validateCatalog(cat);
+    return cat;
+  } catch (e) {
+    console.warn(`[onboarding] no usable progression catalog at ${CATALOG_PATH}: ${e.message} -- greeting only, no tiers`);
+    return null;
+  }
+}
+
+// State shape v2: one record per user (progression.js), keyed by Matrix ID.
+// v1 kept two flat maps (pending, greeted); they fold into records so nobody
+// greeted before this change is greeted again.
+function migrateState(state) {
+  if (!state) return state;
+  if (!state.users) state.users = {};
+  for (const [userId, ts] of Object.entries(state.greeted || {})) {
+    if (!state.users[userId]) state.users[userId] = progression.emptyRecord(userId, ts);
+    if (!state.users[userId].greetedAt) state.users[userId].greetedAt = ts;
+  }
+  for (const [userId, roomId] of Object.entries(state.pending || {})) {
+    if (!state.users[userId]) state.users[userId] = progression.emptyRecord(userId, Date.now());
+    if (!state.users[userId].dmRoom) state.users[userId].dmRoom = roomId;
+  }
+  return state;
+}
 
 // How often she asks Synapse for new accounts. One poll is one indexed query
 // (~15 ms wall, ~12 ms DB, measured 2026-09-06), so the interval is a UX
@@ -106,7 +138,9 @@ class Onboarding {
     this.userId = `@${this.localpart}:${config.homeserver.domain}`;
     this.displayName = cfg.display_name || "Fourier-chan";
     // { watermark_ts, pending: { [userId]: roomId }, greeted: { [userId]: ts } }
-    this.state = loadState();
+    this.state = migrateState(loadState());
+    this.catalog = loadCatalog();
+    this.observeSpaceRooms = cfg.observe_space_rooms !== false;
     this.timer = null;
   }
 
@@ -155,6 +189,10 @@ class Onboarding {
       }
     }
     console.log(`[onboarding] ${this.userId} ready as "${this.displayName}"`);
+    if (this.catalog) {
+      console.log(`[onboarding] progression: ${Object.keys(this.catalog.activities).length} activities, ${(this.catalog.tiers || []).length} tiers`);
+      await this.joinSpaceRooms();
+    }
   }
 
   start() {
@@ -168,7 +206,7 @@ class Onboarding {
     }
     if (!this.state) {
       // First run: greet arrivals from now on, not the existing residents.
-      this.state = { watermark_ts: Date.now(), pending: {}, greeted: {} };
+      this.state = { watermark_ts: Date.now(), pending: {}, greeted: {}, users: {} };
       saveState(this.state);
       console.log("[onboarding] state seeded; greeting users created after now");
     }
@@ -245,6 +283,9 @@ class Onboarding {
       await intent.sendText(room_id, this.rules);
       this.state.pending[userId] = room_id;
       this.state.greeted[userId] = Date.now();
+      const rec = this.record(userId);
+      rec.greetedAt = Date.now();
+      rec.dmRoom = room_id;
       this.audit({ kind: "onboarding_greeted", user: userId, room: room_id });
       console.log(`[onboarding] greeted ${userId} in ${room_id}`);
     } catch (e) {
@@ -255,23 +296,101 @@ class Onboarding {
     }
   }
 
-  // An admin opening a DM with her. She is an appservice user, so nothing
-  // joins her to a room on its own; without this, an admin's DM to @fourier
-  // sits as an unanswered invite and !setavatar has nowhere to be typed.
-  // Admins only -- the same list that may reset strikes -- because a DM from
-  // anyone else is not a conversation she starts, and joining it would make
-  // her reachable by everyone as a bot to poke.
-  async handleAdminInvite(event) {
+  // Someone opening a DM with her. She is an appservice user, so nothing
+  // joins her to a room on its own; without this an invite sits unanswered.
+  // Any LOCAL user: she is the help bot, and a help bot that refuses DMs
+  // while keeping the ones it opened itself is silly (operator, 2026-09-06).
+  // Remote users are not hers to help. The DM becomes that user's channel
+  // for tier messages and client-side activity reports.
+  async handleDmInvite(event) {
     if (event.type !== "m.room.member" || !event.content) return false;
     if (event.content.membership !== "invite" || event.state_key !== this.userId) return false;
-    if (!(this.config.bridge.strike_reset_admins || []).includes(event.sender)) return false;
+    if (!this.isLocalHuman(event.sender)) return false;
     try {
       await this.intent().join(event.room_id);
-      this.audit({ kind: "onboarding_admin_dm_joined", admin: event.sender, room: event.room_id });
+      const rec = this.record(event.sender);
+      if (!rec.dmRoom) rec.dmRoom = event.room_id;
+      saveState(this.state);
+      this.audit({ kind: "onboarding_dm_joined", user: event.sender, room: event.room_id });
     } catch (e) {
-      console.error(`[onboarding] could not join admin DM ${event.room_id}:`, e.message);
+      console.error(`[onboarding] could not join DM ${event.room_id}:`, e.message);
     }
     return true;
+  }
+
+  isLocalHuman(userId) {
+    return typeof userId === "string"
+      && userId.endsWith(":" + this.config.homeserver.domain)
+      && !this.isBotLike(userId);
+  }
+
+  record(userId) {
+    if (!this.state.users) this.state.users = {};
+    if (!this.state.users[userId]) this.state.users[userId] = progression.emptyRecord(userId, Date.now());
+    return this.state.users[userId];
+  }
+
+  // Watch a user do something and, if it completes a tier, tell them what is
+  // next. Non-consuming: other handlers still see the event. Only local
+  // humans, only activities the catalog names, and client reports only from
+  // inside that user's own DM with her (so nobody reports on someone else).
+  async observeEvent(event) {
+    if (!this.catalog || !this.state) return false;
+    const userId = event.sender;
+    if (!this.isLocalHuman(userId)) return false;
+    const obs = progression.observationFromEvent(event);
+    if (!obs) return false;
+    const rec = this.record(userId);
+    if (event.type === progression.CLIENT_REPORT_EVENT && event.room_id !== rec.dmRoom) return false;
+    // Her own DM is not a room to score "joining" or chatting in.
+    if (event.room_id === rec.dmRoom && event.type !== progression.CLIENT_REPORT_EVENT) return false;
+    const out = progression.observe(this.catalog, rec, obs);
+    if (out.ignored) return false;
+    this.state.users[userId] = out.record;
+    saveState(this.state);
+    if (out.advanced && out.message) {
+      await this.sendToUser(userId, out.message);
+      this.audit({ kind: "onboarding_tier", user: userId, tier: out.tier, points: out.record.points });
+    }
+    return true;
+  }
+
+  // Deliver a message into the user's DM with her, opening one if none exists.
+  async sendToUser(userId, text) {
+    const rec = this.record(userId);
+    const intent = this.intent();
+    if (!rec.dmRoom) {
+      const { room_id } = await intent.createRoom({
+        createAsClient: true,
+        options: { invite: [userId], is_direct: true, preset: "trusted_private_chat" },
+      });
+      rec.dmRoom = room_id;
+      saveState(this.state);
+    }
+    await intent.sendText(rec.dmRoom, text);
+  }
+
+  // Sit in the space's rooms so room activity is observable. Children of the
+  // on-ramp space, read from its hierarchy; failures are logged per room and
+  // never fatal -- a room she cannot enter is one she cannot score, no more.
+  async joinSpaceRooms() {
+    const space = this.config.bridge.onramp_room;
+    if (!space || !this.observeSpaceRooms) return;
+    const base = this.config.homeserver.url.replace(/\/+$/, "");
+    try {
+      const url = `${base}/_matrix/client/v1/rooms/${encodeURIComponent(space)}/hierarchy?limit=100&user_id=${encodeURIComponent(this.userId)}`;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${this.asToken}` } });
+      if (!res.ok) throw new Error(`hierarchy ${res.status}`);
+      const body = await res.json();
+      let joined = 0;
+      for (const r of body.rooms || []) {
+        if (r.room_id === space || r.room_type === "m.space") continue;
+        try { await this.intent().join(r.room_id); joined++; } catch (e) { console.warn(`[onboarding] cannot observe ${r.room_id}: ${e.message}`); }
+      }
+      console.log(`[onboarding] observing ${joined} room(s) of the space`);
+    } catch (e) {
+      console.warn(`[onboarding] could not read the space hierarchy: ${e.message}`);
+    }
   }
 
   // !setavatar, the same flow the tunnel has (index.js handleAvatarFlow),

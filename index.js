@@ -465,8 +465,10 @@ new Cli({
               // Her !setavatar, from an admin in a DM with her.
               if (onboarding && (await onboarding.handleAvatarFlow(event))) return;
             }
-            // An admin inviting HER to a DM: she joins, so the DM exists.
-            if (onboarding && (await onboarding.handleAdminInvite(event))) return;
+            // Someone inviting HER to a DM: she joins, so the DM exists.
+            if (onboarding && (await onboarding.handleDmInvite(event))) return;
+            // Progression: watch what users do; never consumes the event.
+            if (onboarding) { try { await onboarding.observeEvent(event); } catch (e) { console.error("[onboarding] observe failed:", e.message); } }
 
             // Skip any non-invite event from a room the bot isn't joined to.
             // This ACKs (drains) backlog left over from a previously over-broad

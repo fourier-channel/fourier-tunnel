@@ -1,0 +1,58 @@
+# Fourier-chan's onboarding progression -- the catalog of activities a new
+# user should become comfortable with, what each is worth, and the tiers of
+# "pre-recorded" messages she sends as they get there.
+#
+# PLACEHOLDER VALUES. The real list and point system are being designed
+# separately (operator, 2026-09-06); this file is the shape, and the code
+# (progression.js) never needs to change when the numbers do. Copy to
+# progression.yaml beside config.yaml; it is mounted into the container.
+#
+# activities:
+#   <name>:
+#     values: { <value>: <points>, ... }   # what a variant is worth
+#     default: <points>                    # a value not listed (optional)
+#     points: <points>                     # flat, when there are no variants
+#     max_points: <n>                      # cap per activity (optional)
+# tiers:  ordered by id; a user passes a tier when BOTH hold:
+#     threshold: <total points>
+#     requires:  [<activity>, ...]         # done at least once (optional)
+#   and receives `message` once, ever.
+#
+# Room activities are observed directly (she joins the space's rooms).
+# Client-side activities (domain mode, interactions) are reported by
+# Technetium as a "net.41chan.onboarding.activity" event in her DM.
+
+activities:
+  join_room:        { values: { any: 2 }, max_points: 4 }
+  send_message:     { values: { text: 1, long: 2 }, max_points: 6 }
+  post_image:       { values: { image: 3 }, max_points: 6 }
+  use_emoji:        { values: { reaction: 1 }, max_points: 3 }
+  use_interaction:  { values: { any: 2 }, max_points: 4 }
+  enter_domain:     { values: { any: 3 }, max_points: 3 }
+  interact_domain:  { values: { any: 3 }, max_points: 6 }
+  use_thread:       { values: { reply: 2, start: 3 }, max_points: 6 }
+
+tiers:
+  - id: 1
+    threshold: 2
+    requires: [join_room]
+    message: |-
+      You're in a room. Say something -- anything -- in the chat, and I'll
+      show you what's next.
+  - id: 2
+    threshold: 5
+    requires: [send_message]
+    message: |-
+      Now try posting an image, or react to someone's message with an emoji.
+  - id: 3
+    threshold: 10
+    requires: [post_image, use_emoji]
+    message: |-
+      Look for the tab on the right edge of the chat -- that opens the Domain.
+      Go take a look.
+  - id: 4
+    threshold: 16
+    requires: [enter_domain]
+    message: |-
+      You've seen the Domain. Try replying in a thread, and try one of the
+      interactions on a message. After that you know everything I do.
