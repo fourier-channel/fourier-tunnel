@@ -26,12 +26,22 @@ const path = require("path");
 const STATE_DIR = process.env.ONBOARDING_STATE_DIR || __dirname;
 const STATE_PATH = path.join(STATE_DIR, "onboarding-state.json");
 
-// A real signup arrives alone. More than a handful of "new" users inside one
-// 60-second poll is not a busy day, it is a bug in the watermark -- so the
-// batch is refused, the watermark is advanced past it, and nobody is messaged.
-// Defence in depth: the unit bug below was fixed, and this exists so that the
-// NEXT bug in the same place cannot mass-message the community either.
-const MAX_GREETS_PER_TICK = 3;
+// How often she asks Synapse for new accounts. One poll is one indexed query
+// (~15 ms wall, ~12 ms DB, measured 2026-09-06), so the interval is a UX
+// number, not a cost: it is the longest a brand-new user can sit on a blank
+// screen wondering why nothing is happening. Five seconds. The floor exists so
+// a typo cannot turn the watch into a busy loop.
+//
+// Dedupe is the persisted ledger of Matrix IDs already greeted (state.greeted)
+// -- unique, durable, and the correct mechanism. An earlier "no more than 3
+// per tick" cap was a rate guard where a ledger belonged: launch traffic is
+// exactly when several people arrive at once, and refusing to greet them was
+// refusing the one moment the bot exists for.
+const POLL_DEFAULT_MS = 5_000;
+const POLL_FLOOR_MS = 1_000;
+// One admin-API page. If a poll ever returns this many NEW accounts, the page
+// may have been truncated and the log says so; it does not stop greeting.
+const PAGE_SIZE = 100;
 
 // Synapse is inconsistent about this field, and the inconsistency is the whole
 // incident: GET /_synapse/admin/v2/users/<id> answers in SECONDS (10 digits),
@@ -88,7 +98,7 @@ class Onboarding {
     this.audit = audit;
     const cfg = (config.bridge && config.bridge.onboarding) || {};
     this.enabled = cfg.enabled !== false;
-    this.pollMs = Math.max(15_000, cfg.poll_interval_ms || 60_000);
+    this.pollMs = Math.max(POLL_FLOOR_MS, cfg.poll_interval_ms || POLL_DEFAULT_MS);
     this.rules = cfg.rules_text || DEFAULT_RULES;
     this.acceptHint = cfg.accept_hint || DEFAULT_ACCEPT_HINT;
     this.adminToken = (config.homeserver && config.homeserver.admin_token) || null;
@@ -173,7 +183,7 @@ class Onboarding {
   // One admin-API page of the newest users, newest first.
   async fetchNewestUsers() {
     const base = this.config.homeserver.url.replace(/\/+$/, "");
-    const url = `${base}/_synapse/admin/v2/users?limit=50&order_by=creation_ts&dir=b&guests=false&deactivated=false`;
+    const url = `${base}/_synapse/admin/v2/users?limit=${PAGE_SIZE}&order_by=creation_ts&dir=b&guests=false&deactivated=false`;
     const res = await fetch(url, { headers: { Authorization: `Bearer ${this.adminToken}` } });
     if (!res.ok) throw new Error(`admin users API ${res.status}`);
     const body = await res.json();
@@ -192,19 +202,8 @@ class Onboarding {
       .filter((u) => creationMs(u) > this.state.watermark_ts)
       .sort((a, b) => creationMs(a) - creationMs(b));
 
-    if (fresh.length > MAX_GREETS_PER_TICK) {
-      // Refuse the batch and step over it. Saying nothing to 20 people is a
-      // recoverable mistake; DMing 20 people who did not just sign up is not.
-      const newest = fresh.reduce((m, u) => Math.max(m, creationMs(u)), this.state.watermark_ts);
-      this.state.watermark_ts = newest;
-      saveState(this.state);
-      console.error(
-        `[onboarding] REFUSED to greet ${fresh.length} users in one tick ` +
-        `(cap ${MAX_GREETS_PER_TICK}); watermark advanced, nobody messaged. ` +
-        "This means the watermark is wrong, not that the site got popular.",
-      );
-      this.audit({ kind: "onboarding_batch_refused", count: fresh.length });
-      return;
+    if (fresh.length >= PAGE_SIZE) {
+      console.warn(`[onboarding] a full page (${PAGE_SIZE}) of new accounts in one poll; the next poll picks up the rest`);
     }
 
     for (const user of fresh) {
@@ -378,4 +377,4 @@ class Onboarding {
 
 // creationMs and MAX_GREETS_PER_TICK are exported for the test that proves
 // the 2026-09-05 mass-DM cannot recur.
-module.exports = { Onboarding, creationMs, MAX_GREETS_PER_TICK };
+module.exports = { Onboarding, creationMs, POLL_DEFAULT_MS, POLL_FLOOR_MS, PAGE_SIZE };

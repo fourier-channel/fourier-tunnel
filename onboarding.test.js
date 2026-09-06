@@ -5,7 +5,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { creationMs, MAX_GREETS_PER_TICK } = require("./onboarding");
+const { creationMs, POLL_DEFAULT_MS, POLL_FLOOR_MS, PAGE_SIZE } = require("./onboarding");
 
 test("creation_ts in MILLISECONDS (the list endpoint) is not multiplied again", () => {
   // What GET /_synapse/admin/v2/users?... actually returns: 13 digits.
@@ -39,10 +39,19 @@ test("missing or junk creation_ts never clears the watermark", () => {
   }
 });
 
-test("the batch cap is small enough to be a circuit breaker", () => {
-  // Real signups arrive one at a time. If this is ever raised to something
-  // like 50, the breaker stops breaking and the incident can recur.
-  assert.ok(MAX_GREETS_PER_TICK > 0 && MAX_GREETS_PER_TICK <= 5);
+test("a new user waits seconds, not a minute, and a typo cannot make a busy loop", () => {
+  // Operator 2026-09-06: the just-missed-the-bus user must not sit on a blank
+  // screen for 59 seconds. One poll is ~15 ms, so this is a UX number.
+  assert.ok(POLL_DEFAULT_MS <= 5_000, "default poll must be at most 5 s");
+  assert.ok(POLL_FLOOR_MS >= 500 && POLL_FLOOR_MS <= POLL_DEFAULT_MS, "floor guards against a busy loop");
+  assert.ok(PAGE_SIZE >= 50, "a launch burst must fit in one page");
+});
+
+test("dedupe is the greeted ledger, keyed by Matrix ID, not a per-tick cap", () => {
+  const fs = require("node:fs");
+  const src = fs.readFileSync(require.resolve("./onboarding.js"), "utf8");
+  assert.ok(!/MAX_GREETS_PER_TICK/.test(src), "the rate cap is gone");
+  assert.ok(/this\.state\.greeted\[userId\]/.test(src), "greeted ledger consulted per user");
 });
 
 test("onboarding DMs are created BY Fourier-chan, not by the appservice bot", () => {
