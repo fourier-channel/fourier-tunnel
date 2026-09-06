@@ -375,6 +375,6 @@ class Onboarding {
   }
 }
 
-// creationMs and MAX_GREETS_PER_TICK are exported for the test that proves
+// creationMs and the per-tick cap are exported for the test that proves
 // the 2026-09-05 mass-DM cannot recur.
 module.exports = { Onboarding, creationMs, POLL_DEFAULT_MS, POLL_FLOOR_MS, PAGE_SIZE };
