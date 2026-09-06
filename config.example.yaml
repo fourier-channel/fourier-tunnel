@@ -44,7 +44,9 @@ bridge:
     enabled: true
     localpart: "fourier"
     display_name: "Fourier-chan"
-    poll_interval_ms: 60000
+    # How long a brand-new user can wait for her DM. One poll is ~15 ms of
+    # Synapse time, so keep this small; floor is 1000.
+    poll_interval_ms: 5000
     # rules_text: |-
     #   Welcome. The rules: ...
     #   Do you agree? Type Yes to accept.
