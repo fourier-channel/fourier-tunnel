@@ -115,6 +115,34 @@ class DanbooruClient {
     return null;
   }
 
+  // Find a tag by exact name. undefined when it does not exist yet.
+  async findTag(name) {
+    const resp = await this._client().get("/tags.json", {
+      params: { "search[name]": name, limit: 1 },
+      validateStatus: () => true,
+    });
+    if (resp.status !== 200 || !Array.isArray(resp.data) || !resp.data.length) return undefined;
+    return resp.data[0];
+  }
+
+  // Put a tag in its proper category. Idempotent; "missing" when the tag does
+  // not exist yet, which is not an error -- creating the artist entry will
+  // mint it in the right category.
+  async setTagCategory(name, category) {
+    const tag = await this.findTag(name);
+    if (!tag) return "missing";
+    if (tag.category === category) return "already";
+    await this._client().put(`/tags/${tag.id}.json`, { tag: { category } }, { validateStatus: () => true });
+    return "set";
+  }
+
+  // Create an artist entry, which is what makes its tag category 1. Setting
+  // Tag#category alone would colour the tag without creating the entity the
+  // booru expects behind it. Already-exists comes back 422 and is success.
+  async ensureArtist(name) {
+    await this._client().post("/artists.json", { artist: { name } }, { validateStatus: () => true });
+  }
+
   async updateTags(postId, newTagString, oldTagString = "") {
     const resp = await this._client().put(`/posts/${postId}.json`, {
       post: {

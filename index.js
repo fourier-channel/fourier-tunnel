@@ -7,6 +7,7 @@ const { autotag } = require("./autotagger");
 const { extractCreatorTags } = require("./prompt-tags");
 const invites = require("./invites");
 const listrooms = require("./listrooms");
+const poster = require("./poster");
 const { Onboarding } = require("./onboarding");
 
 const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
@@ -117,6 +118,36 @@ async function downloadFromSynapse(mxcUrl, asToken) {
   };
 }
 
+// Artist tags already put in their category this process. The poster tag
+// repeats on every image the same person posts, and without this that is two
+// extra API calls per upload to re-assert something already true.
+const categorisedArtists = new Set();
+
+// Make the poster's tag an ARTIST tag.
+//
+// Order matters and is not obvious: the post has already been created carrying
+// this tag, so the booru minted it as a GENERAL tag. Artist entries refuse to
+// attach to a non-empty general tag ("'x' is a general tag; artist entries can
+// only be created for artist tags"), so the category has to be corrected FIRST
+// and the entry created second. Setting the category is also what retroactively
+// fixes every post already carrying the tag, since category belongs to the tag
+// rather than to the post. Learned from fourier-sampling's poster, which pays
+// for this on the 4chan side.
+//
+// Fail-soft throughout: a picture that is posted but whose tag is still
+// general is a cosmetic problem, and wedging the bridge over it would not be.
+async function categoriseArtist(tag) {
+  if (!tag || categorisedArtists.has(tag)) return;
+  categorisedArtists.add(tag);
+  try {
+    await danbooru.setTagCategory(tag, 1);
+    await danbooru.ensureArtist(tag);
+  } catch (err) {
+    categorisedArtists.delete(tag); // let the next post try again
+    console.warn(`[poster] could not categorise ${tag}: ${err.message}`);
+  }
+}
+
 async function handleImageEvent(bridge, event) {
   const roomId = event.room_id;
   const mxcUrl = event.content && event.content.url;
@@ -205,7 +236,15 @@ async function handleImageEvent(bridge, event) {
   // derived, may leak model names / private notes) never enter it; they travel
   // solely in the provenance partition below, where the booru stores them
   // private-by-default and withholds them from every public projection.
-  const publicTags = [...new Set([...autoTags, ...metaTags])];
+  // WHO POSTED IT. Minted from the sender of this event, which this homeserver
+  // authenticated, so the tag matches the MXID exactly and the post is
+  // thereafter under that account's control. Null for a remote sender or a
+  // localpart that is not tag-safe; see poster.js.
+  const posterTag = poster.posterTagFor(event.sender, config.homeserver.domain);
+  if (!posterTag) {
+    console.warn(`[poster] no artist tag for sender ${event.sender}; posting unattributed`);
+  }
+  const publicTags = [...new Set([...autoTags, ...metaTags, ...(posterTag ? [posterTag] : [])])];
   const rating = (derived && derived.rating) || config.bridge.default_rating;
 
   const post = await danbooru.createPost(uploadMediaAssetId, {
@@ -213,6 +252,10 @@ async function handleImageEvent(bridge, event) {
     tagString: publicTags.join(" "),
     source: mxcUrl,
   });
+
+  // Now that the post exists, the tag exists too -- as a general tag. Promote
+  // it. Deliberately after createPost for that reason.
+  await categoriseArtist(posterTag);
 
   // Single write path (the tag hub): hand the FULL partition to the booru. It
   // records it, keeps creator-only tags private, fans out to consumers, and hands
