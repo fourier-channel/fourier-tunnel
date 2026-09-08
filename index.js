@@ -8,6 +8,7 @@ const { extractCreatorTags } = require("./prompt-tags");
 const invites = require("./invites");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
+const backfill = require("./backfill");
 const { Onboarding } = require("./onboarding");
 
 const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
@@ -145,6 +146,57 @@ async function categoriseArtist(tag) {
   } catch (err) {
     categorisedArtists.delete(tag); // let the next post try again
     console.warn(`[poster] could not categorise ${tag}: ${err.message}`);
+  }
+}
+
+// Rooms whose history has been walked this process. The join trigger fires
+// once per actual join, so this only guards a room being re-entered or an
+// admin running the command twice in a row -- both harmless, since replaying an
+// image is a no-op at the booru, but both a pile of pointless downloads.
+const backfilledRooms = new Set();
+
+// Read one page of a room's history as the bot, oldest-going-backwards.
+async function historyPage(roomId, botUserId, from) {
+  const base = config.homeserver.url.replace(/\/+$/, "");
+  const params = new URLSearchParams({ dir: "b", limit: "100", user_id: botUserId });
+  if (from) params.set("from", from);
+  const res = await fetch(
+    `${base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?${params}`,
+    { headers: { Authorization: `Bearer ${AS_TOKEN}` } },
+  );
+  if (!res.ok) throw new Error(`messages ${res.status}`);
+  return res.json();
+}
+
+// Walk a room the bot has entered and replay its images through the live
+// handler. Safe to repeat: that handler skips an upload whose md5 the booru
+// already has and just writes the room's tag state.
+//
+// How far back this can see is the ROOM's business, not ours: under
+// history_visibility "invited" the bot's own invite is the earliest event it
+// may read, and two rooms on this server are set that way. The summary reports
+// what was found rather than claiming the room is now complete.
+async function backfillRoomNow(bridge, roomId, botUserId) {
+  if (isRoomDisabled(roomId)) return null;
+  if (backfilledRooms.has(roomId)) return null;
+  backfilledRooms.add(roomId);
+  try {
+    const result = await backfill.backfillRoom({
+      roomId,
+      fetchPage: (from) => historyPage(roomId, botUserId, from),
+      onImage: async (ev) => {
+        await handleImageEvent(bridge, { ...ev, room_id: roomId });
+        // Paced: each image is a download, a hash, maybe an upload and a state
+        // event. Synapse rate-limits state events and will start refusing.
+        await sleep(750);
+      },
+    });
+    console.log(backfill.summarise(result));
+    return result;
+  } catch (err) {
+    backfilledRooms.delete(roomId); // let a later attempt try again
+    console.warn(`[backfill] ${roomId} failed: ${err.message}`);
+    return null;
   }
 }
 
@@ -456,6 +508,32 @@ async function handleListRoomsCommand(bridge, event) {
   return true;
 }
 
+// Handle the !backfill admin command. Runs in the room it is sent in, which is
+// the room being caught up -- unlike the other admin commands, this one is
+// ABOUT a room, so requiring a DM would mean naming the room by id.
+async function handleBackfillCommand(bridge, event) {
+  const body = event.content && event.content.body;
+  if (!body || body.trim().split(/\s+/)[0] !== "!backfill") return false;
+
+  const sender = event.sender;
+  if (!botAdmins().includes(sender)) {
+    invites.audit({ kind: "backfill_denied_not_admin", sender, room: event.room_id });
+    return true;
+  }
+
+  const intent = bridge.getIntent();
+  const botUserId = `@${config.appservice.sender_localpart}:${config.homeserver.domain}`;
+  backfilledRooms.delete(event.room_id); // an explicit ask overrides "already done"
+  await intent.sendText(event.room_id, "Walking this room's history for images...");
+  const result = await backfillRoomNow(bridge, event.room_id, botUserId);
+  invites.audit({ kind: "backfill", admin: sender, room: event.room_id, result: result ? `${result.done}/${result.seen}` : "failed" });
+  await intent.sendText(
+    event.room_id,
+    result ? backfill.summarise(result) : "Backfill failed; see the bridge log.",
+  );
+  return true;
+}
+
 // Handle the !resetstrikes admin command. DM-only: requires sender in the
 // admin list AND a two-member room (bot + admin).
 async function handleResetCommand(bridge, event) {
@@ -584,6 +662,22 @@ new Cli({
               return;
             }
 
+            // The bot has ENTERED a room: catch it up on what it missed.
+            // Fires on the actual join, so it runs once per entry rather than
+            // on every restart. Not awaited -- a room with a long history would
+            // otherwise hold up the appservice transaction this event arrived
+            // in, and Synapse would start retrying it.
+            if (
+              event.type === "m.room.member" &&
+              event.content &&
+              event.content.membership === "join" &&
+              event.state_key === botUserId
+            ) {
+              console.log(`[backfill] entered ${event.room_id}, walking its history`);
+              void backfillRoomNow(bridge, event.room_id, botUserId);
+              // Deliberately no return: a join is not consumed by this.
+            }
+
             // Fourier-chan's onboarding DM (rules -> "Yes" -> invite).
             // BEFORE the joined-guard below: her DMs contain @fourier, not
             // @tunnel, and the handler scopes itself to rooms it opened for
@@ -613,6 +707,7 @@ new Cli({
               // Admin reset command (DM only)
               if (await handleResetCommand(bridge, event)) return;
               if (await handleListRoomsCommand(bridge, event)) return;
+              if (await handleBackfillCommand(bridge, event)) return;
               // Avatar-setting flow (admin DM) — checked before tagging
               if (await handleAvatarFlow(bridge, event)) return;
               // Image tagging
