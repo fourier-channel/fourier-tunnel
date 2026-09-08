@@ -148,6 +148,26 @@ reversals of decisions that were made deliberately and recently.
 - Six of the eighteen tasks work end to end today. The other twelve wait on
   Technetium.
 
+## Two permission limits found by checking, not by testing
+
+**The meter needs Fourier-chan to hold power in the DM, and she only does when
+she opened it.** The meter is room state, and `state_default` in these rooms is
+50. In both DMs that exist today she is at 100 because she created them, so it
+works. A DM a USER opens with her leaves her at 0, and the meter write is
+refused. It degrades rather than breaking: the failure is caught and logged,
+the points are still awarded, and the text message still states the score --
+only the machine-readable meter is missing, so a client could not draw a bar.
+The same shape as the media-tag write-back that had never worked in a
+community room.
+
+**Backfill into a NEW room will not write tag state.** On 2026-09-08 the bot
+was granted level 10 and the `net.41chan.media.tags` event in the eighteen
+rooms it was in at the time. A room it enters later has neither, so
+`state_default` 50 applies again and every backfilled image fails its tag
+write. The bot cannot grant itself power. Re-run `grant-tag-write.sh` after the
+bot joins anywhere new; it is idempotent and skips rooms that are already
+correct.
+
 ## Tests
 
 `fibonacci.test.js` (17), `taskDetect.test.js` (12). They pin the spec's
