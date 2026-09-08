@@ -6,6 +6,7 @@ const { DanbooruClient } = require("./danbooru");
 const { autotag } = require("./autotagger");
 const { extractCreatorTags } = require("./prompt-tags");
 const invites = require("./invites");
+const listrooms = require("./listrooms");
 const { Onboarding } = require("./onboarding");
 
 const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
@@ -328,6 +329,90 @@ async function handleJoinCommand(bridge, event) {
   return true;
 }
 
+// The bot admin list. `admins` is the name going forward; strike_reset_admins
+// is what deployments already have on disk, and reading both means this command
+// works today without anyone editing a config file on the server first.
+function botAdmins() {
+  return config.bridge.admins || config.bridge.strike_reset_admins || [];
+}
+
+// Ask Synapse which rooms one bot identity is joined to, then name them.
+// Masquerades through the appservice token, the same way onboarding reads the
+// space hierarchy.
+async function joinedRoomsFor(userId) {
+  const base = config.homeserver.url.replace(/\/+$/, "");
+  const auth = { Authorization: `Bearer ${config.appservice.as_token}` };
+  const q = `user_id=${encodeURIComponent(userId)}`;
+
+  const res = await fetch(`${base}/_matrix/client/v3/joined_rooms?${q}`, { headers: auth });
+  if (!res.ok) throw new Error(`joined_rooms ${res.status}`);
+  const ids = (await res.json()).joined_rooms || [];
+
+  // Names are a nicety, so a room that will not answer is listed by id rather
+  // than failing the whole command. Sequential on purpose: this is an admin
+  // typing a command, not a hot path, and a burst of ninety parallel requests
+  // against Synapse to answer it would be rude.
+  const rooms = [];
+  for (const roomId of ids) {
+    let name = null;
+    try {
+      const r = await fetch(
+        `${base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.name/?${q}`,
+        { headers: auth },
+      );
+      if (r.ok) name = (await r.json()).name || null;
+    } catch (e) {
+      name = null;
+    }
+    rooms.push({ roomId, name });
+  }
+  return listrooms.sortRooms(rooms);
+}
+
+// Handle the !listrooms admin command. DM-only, like the others: a bot's full
+// room list is not something to print into a room full of people.
+async function handleListRoomsCommand(bridge, event) {
+  const body = event.content && event.content.body;
+  if (!body || body.trim().split(/\s+/)[0] !== "!listrooms") return false;
+
+  const sender = event.sender;
+  if (!botAdmins().includes(sender)) {
+    invites.audit({ kind: "listrooms_denied_not_admin", sender });
+    return true;
+  }
+
+  const intent = bridge.getIntent();
+  if ((await joinedMemberCount(bridge, event.room_id)) !== 2) {
+    invites.audit({ kind: "listrooms_denied_not_dm", sender, room: event.room_id });
+    return true;
+  }
+
+  const identities = listrooms.botIdentities({
+    domain: config.homeserver.domain,
+    senderLocalpart: config.appservice.sender_localpart,
+    onboarding: config.bridge.onboarding,
+  });
+
+  const sections = [];
+  for (const id of identities) {
+    try {
+      sections.push({ userId: id.userId, rooms: await joinedRoomsFor(id.userId) });
+    } catch (e) {
+      // Reported in the reply rather than swallowed: "no rooms" and "we could
+      // not ask" are different answers and must not look the same.
+      sections.push({ userId: id.userId, rooms: [], error: e.message });
+    }
+  }
+
+  invites.audit({
+    kind: "listrooms",
+    admin: sender,
+    counts: sections.map((s) => `${s.userId}=${s.error ? "error" : s.rooms.length}`).join(","),
+  });
+  await intent.sendText(event.room_id, listrooms.formatRoomList(sections));
+  return true;
+}
+
 // Handle the !resetstrikes admin command. DM-only: requires sender in the
 // admin list AND a two-member room (bot + admin).
 async function handleResetCommand(bridge, event) {
@@ -484,6 +569,7 @@ new Cli({
               if (await handleJoinCommand(bridge, event)) return;
               // Admin reset command (DM only)
               if (await handleResetCommand(bridge, event)) return;
+              if (await handleListRoomsCommand(bridge, event)) return;
               // Avatar-setting flow (admin DM) — checked before tagging
               if (await handleAvatarFlow(bridge, event)) return;
               // Image tagging

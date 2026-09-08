@@ -27,7 +27,13 @@ bridge:
   default_rating: "q"
   # Whether to run the tagging pipeline on images posted in DMs (2-member rooms)
   tag_in_dms: false
-  # User IDs allowed to reset strikes via DM command
+  # Bot admins. `admins` is the name going forward and covers every admin DM
+  # command (!resetstrikes, !setavatar, !listrooms). strike_reset_admins is the
+  # older name for the same list and is still read as a fallback, so existing
+  # deployments keep working untouched.
+  admins:
+    - "@admin:example.net"
+  # Deprecated alias for `admins`, kept so old configs do not break.
   strike_reset_admins:
     - "@admin:example.net"
   # Power level required in a room to invite the bot
