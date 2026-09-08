@@ -1,0 +1,83 @@
+# Onboarding tasks for the reverse-Fibonacci engine (fibonacci.md).
+#
+# ORDER IS THE POINT SYSTEM. Tasks are listed HARDEST FIRST, and each task's
+# value comes from its position: fibonacci.js partitions this list into the
+# 55/34/21/13/8/5/3/2/1 brackets. Nothing here states a point value, because
+# authoring one would be a second source of truth that silently disagrees with
+# the engine. To make something worth more, move it up.
+#
+# The point values named in fibonacci.md section 3 are the values this list
+# produces at 144 tasks. With 18 they do not match, and the algorithm wins --
+# see docs/FIBONACCI-REVIEW.md, finding 3.
+#
+# detect:
+#   server:<rule>  observed from Matrix events the bot already sees
+#   client         Technetium reports it as a net.41chan.onboarding.activity
+#                  event, because nothing about it reaches the server
+#
+# A task with detect: client is INERT until Technetium sends it. Those are
+# listed honestly rather than quietly dropped, so the catalog says what is
+# actually wired.
+
+goal: 144
+
+tasks:
+  # ---- Tier 1: power user -------------------------------------------------
+  - id: gallery_thread
+    label: Contributed to a thread with gallery mode enabled
+    detect: client            # gallery mode is a Technetium concept
+  - id: create_room
+    label: Created a room and gave it a topic and an avatar
+    detect: client            # the bot is not in a room at the moment it is made
+  - id: voice_call
+    label: Started or joined a voice or video call
+    detect: server:call
+  - id: notification_overrides
+    label: Set per-room notification overrides
+    detect: client            # push rules are account data, not room events
+
+  # ---- Tier 2: mid-tier feature adoption ---------------------------------
+  - id: upload_file
+    label: Uploaded an image or a document
+    detect: server:upload
+  - id: global_search
+    label: Used the global search bar
+    detect: client
+  - id: room_directory
+    label: Found and joined a room through the directory
+    detect: client            # the join is visible; HOW they got there is not
+  - id: reply_quote
+    label: Replied directly to someone, quoting them
+    detect: server:reply
+  - id: edit_message
+    label: Edited a message to fix it
+    detect: server:edit
+  - id: emoji_reaction
+    label: Reacted to a message with an emoji
+    detect: server:reaction
+  - id: markdown_format
+    label: Used formatting, such as bold
+    detect: server:formatted
+
+  # ---- Tier 3: low barrier ------------------------------------------------
+  - id: lobby_message
+    label: Said something in the lobby
+    detect: server:message
+  - id: bot_command
+    label: Used a bot command
+    detect: server:command
+  - id: bot_join_reply
+    label: Answered the onboarding greeting
+    detect: server:join_reply
+  - id: bot_dm
+    label: Opened a DM with the bot
+    detect: server:bot_dm
+  - id: accept_invite
+    label: Accepted the invite and joined
+    detect: server:join
+  - id: view_rules
+    label: Read the rules room
+    detect: client            # a read receipt is an EDU the bridge does not get
+  - id: toggle_theme
+    label: Changed the interface theme
+    detect: client

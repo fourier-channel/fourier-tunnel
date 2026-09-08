@@ -20,6 +20,8 @@ const fs = require("fs");
 const path = require("path");
 const yaml = require("js-yaml");
 const progression = require("./progression");
+const fibonacci = require("./fibonacci");
+const taskDetect = require("./taskDetect");
 
 // State lives in a MOUNTED directory, not beside the code. It was
 // path.join(__dirname, ...) inside the image, so every `docker compose build`
@@ -29,6 +31,12 @@ const STATE_DIR = process.env.ONBOARDING_STATE_DIR || __dirname;
 const STATE_PATH = path.join(STATE_DIR, "onboarding-state.json");
 // The activity catalog and tier messages, beside config.yaml (mounted).
 const CATALOG_PATH = process.env.ONBOARDING_CATALOG || path.join(__dirname, "progression.yaml");
+// The reverse-Fibonacci task list (fibonacci.md). Separate file from the tier
+// catalog on purpose: the two engines are different designs and mixing them in
+// one document would invite a half-migrated state that neither can read.
+const TASKS_PATH = process.env.ONBOARDING_TASKS || path.join(__dirname, "onboarding-tasks.yaml");
+// The meter lives in room state, keyed by the user it describes.
+const METER_EVENT = "net.41chan.onboarding.meter";
 
 function loadCatalog() {
   try {
@@ -37,6 +45,22 @@ function loadCatalog() {
     return cat;
   } catch (e) {
     console.warn(`[onboarding] no usable progression catalog at ${CATALOG_PATH}: ${e.message} -- greeting only, no tiers`);
+    return null;
+  }
+}
+
+// The Fibonacci engine's catalog. Returns null (and says so) rather than
+// throwing, so a missing or broken task list leaves the bot greeting people
+// instead of crashing the bridge.
+function loadTasks() {
+  try {
+    const cat = yaml.load(fs.readFileSync(TASKS_PATH, "utf8"));
+    taskDetect.validateCatalog(cat);
+    const assigned = fibonacci.assignPoints(cat.tasks);
+    const goal = Number(cat.goal) || fibonacci.DEFAULT_GOAL;
+    return { catalog: cat, assigned, goal };
+  } catch (e) {
+    console.warn(`[onboarding] no usable task catalog at ${TASKS_PATH}: ${e.message}`);
     return null;
   }
 }
@@ -140,6 +164,52 @@ class Onboarding {
     // { watermark_ts, pending: { [userId]: roomId }, greeted: { [userId]: ts } }
     this.state = migrateState(loadState());
     this.catalog = loadCatalog();
+
+    // Which point system runs. "tiers" is the 2026-09-06 design; "fibonacci"
+    // is fibonacci.md; "off" is neither. Default is OFF rather than either
+    // one, so an upgrade never silently starts scoring people.
+    this.engine = cfg.engine || "off";
+    // WHO it runs for. The operator's instruction 2026-09-08 was that the new
+    // system must not reach anyone but them until reviewed, so an empty list
+    // means nobody and there is no wildcard.
+    this.fibWhitelist = (cfg.fibonacci && cfg.fibonacci.whitelist) || [];
+    this.fib = this.engine === "fibonacci" ? loadTasks() : null;
+    // Changing someone's power level automatically, on activity, is the one
+    // irreversible thing in the spec. Off unless explicitly turned on.
+    this.onPass = (cfg.fibonacci && cfg.fibonacci.on_pass) || { enabled: false };
+
+    if (this.engine === "fibonacci" && this.fib) {
+      const feas = fibonacci.feasibility(this.fib.assigned, this.fib.goal);
+      const serverSide = taskDetect.earnableServerSide(this.fib.assigned);
+      console.log(
+        `[onboarding] engine=fibonacci tasks=${feas.tasks} goal=${feas.goal} ` +
+        `max=${feas.maxAchievable} earnable-without-client=${serverSide} ` +
+        `whitelist=${this.fibWhitelist.length}`
+      );
+      // Said loudly, because an unwinnable onboarding looks exactly like a
+      // working one until somebody fails to finish it.
+      if (!feas.reachable) {
+        console.warn(
+          `[onboarding] WARNING: the goal of ${feas.goal} is UNREACHABLE -- this ` +
+          `catalog is worth ${feas.maxAchievable} in total. Nobody can pass.`
+        );
+      } else if (feas.completionRequired > 0.8) {
+        console.warn(
+          `[onboarding] WARNING: passing needs ${Math.round(feas.completionRequired * 100)}% ` +
+          `of the whole catalog. The spec's "speedrun or grind" only holds near 144 tasks.`
+        );
+      }
+      if (serverSide < feas.goal) {
+        console.warn(
+          `[onboarding] WARNING: only ${serverSide} of ${feas.goal} points can be earned from ` +
+          `Matrix events. The rest need Technetium to report them.`
+        );
+      }
+    } else if (this.engine === "tiers") {
+      console.log("[onboarding] engine=tiers (the 2026-09-06 design)");
+    } else {
+      console.log("[onboarding] engine=off -- no progression scoring");
+    }
     this.observeSpaceRooms = cfg.observe_space_rooms !== false;
     this.timer = null;
   }
@@ -335,6 +405,120 @@ class Onboarding {
   // humans, only activities the catalog names, and client reports only from
   // inside that user's own DM with her (so nobody reports on someone else).
   async observeEvent(event) {
+    if (this.engine === "off") return false;
+    if (this.engine === "fibonacci") return this.observeFibonacci(event);
+    return this.observeTiers(event);
+  }
+
+  // The reverse-Fibonacci engine (fibonacci.md).
+  //
+  // Gated on a whitelist because the operator's instruction was that it must
+  // not reach anyone else until they have reviewed it. A user who is not on
+  // the list is scored by nothing at all right now: the tier engine is off,
+  // and this one skips them.
+  async observeFibonacci(event) {
+    if (!this.fib || !this.state) return false;
+    const userId = event.sender;
+    if (!this.isLocalHuman(userId)) return false;
+    if (!this.fibWhitelist.includes(userId)) return false;
+
+    const rec = this.record(userId);
+    const isBotDm = event.room_id === rec.dmRoom;
+    // A client may only report from its own DM with her, so one user cannot
+    // report activity on behalf of another.
+    if (event.type === taskDetect.CLIENT_REPORT && !isBotDm) return false;
+
+    const ids = taskDetect.tasksFor(this.fib.catalog, event, { isBotDm });
+    if (!ids.length) return false;
+
+    const profile = rec.fib || fibonacci.emptyProfile(userId);
+    const out = fibonacci.complete(this.fib.assigned, profile, ids, this.fib.goal);
+    if (!out.newly.length) return false;   // already had them; stay quiet
+
+    rec.fib = out.profile;
+    this.state.users[userId] = rec;
+    saveState(this.state);
+
+    await this.publishMeter(userId, out.profile);
+    this.audit({
+      kind: "fib_progress", user: userId, gained: out.gained,
+      score: out.profile.score, goal: this.fib.goal, tasks: out.newly.join(","),
+    });
+
+    if (out.justPassed) {
+      await this.sendToUser(userId, `That is ${this.fib.goal} points. Onboarding complete -- welcome in properly.`);
+      this.audit({ kind: "fib_passed", user: userId, score: out.profile.score });
+      await this.applyPassPolicy(userId);
+    } else {
+      const pct = Math.round(fibonacci.progressPercent(out.profile.score, this.fib.goal));
+      const next = fibonacci.nextTasks(this.fib.assigned, out.profile.completed, 1)[0];
+      const done = out.newly.map((id) => this.taskLabel(id)).join("; ");
+      await this.sendToUser(
+        userId,
+        `${done}. ${out.profile.score}/${this.fib.goal} (${pct}%).` +
+        (next ? ` Next, try: ${this.taskLabel(next.id)}.` : "")
+      );
+    }
+    return true;
+  }
+
+  taskLabel(id) {
+    const t = (this.fib && this.fib.catalog.tasks || []).find((x) => x.id === id);
+    return (t && t.label) || id;
+  }
+
+  // The meter, as room state in the user's own DM so a client can render it
+  // without asking. State rather than a message: it is a CURRENT value, and a
+  // timeline of thirty meter updates is not a progress bar.
+  async publishMeter(userId, profile) {
+    const rec = this.record(userId);
+    if (!rec.dmRoom) return;
+    try {
+      await this.intent().sendStateEvent(rec.dmRoom, METER_EVENT, userId, {
+        score: profile.score,
+        goal: this.fib.goal,
+        percent: fibonacci.progressPercent(profile.score, this.fib.goal),
+        completed: profile.completed,
+        passed: !!profile.passedAt,
+      });
+    } catch (e) {
+      // Cosmetic. A missing meter must not cost the user their points.
+      console.warn(`[onboarding] could not publish meter for ${userId}: ${e.message}`);
+    }
+  }
+
+  // Spec section 4C's last line: raise the user's access on passing.
+  //
+  // OFF unless configured. This is the only step in the whole system that
+  // hands out authority automatically, on the strength of activity a client
+  // partly self-reports, and it cannot be taken back by the same mechanism.
+  async applyPassPolicy(userId) {
+    if (!this.onPass.enabled) {
+      console.log(`[onboarding] ${userId} passed; on_pass is disabled, no privilege change`);
+      this.audit({ kind: "fib_pass_policy_skipped", user: userId });
+      return;
+    }
+    const room = this.onPass.room;
+    const level = Number(this.onPass.power_level);
+    if (!room || !Number.isFinite(level)) {
+      console.warn("[onboarding] on_pass enabled but room/power_level not set; doing nothing");
+      return;
+    }
+    try {
+      const intent = this.intent();
+      const pl = await intent.getStateEvent(room, "m.room.power_levels", "");
+      const users = { ...(pl.users || {}) };
+      if ((users[userId] || pl.users_default || 0) >= level) return; // never lower
+      users[userId] = level;
+      await intent.sendStateEvent(room, "m.room.power_levels", "", { ...pl, users });
+      this.audit({ kind: "fib_pass_policy_applied", user: userId, room, level });
+    } catch (e) {
+      console.warn(`[onboarding] could not apply pass policy for ${userId}: ${e.message}`);
+    }
+  }
+
+  // The 2026-09-06 tier engine, untouched. Reachable by setting engine: tiers.
+  async observeTiers(event) {
     if (!this.catalog || !this.state) return false;
     const userId = event.sender;
     if (!this.isLocalHuman(userId)) return false;

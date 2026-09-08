@@ -49,6 +49,24 @@ bridge:
   onboarding:
     enabled: true
     localpart: "fourier"
+    # Which point system runs: "fibonacci" (fibonacci.md), "tiers" (the
+    # 2026-09-06 design in progression.yaml), or "off". Default is OFF, so an
+    # upgrade never silently starts scoring people.
+    engine: "fibonacci"
+    fibonacci:
+      # WHO the engine runs for. Empty means nobody -- there is no wildcard.
+      # The operator's instruction 2026-09-08 was that it must not reach any
+      # other user until they have reviewed it.
+      whitelist:
+        - "@admin:example.net"
+      # On reaching the goal, raise the user's power level in a room.
+      # DISABLED, deliberately: it is the only step that grants authority
+      # automatically, partly on the strength of what a client reports about
+      # itself, and nothing here takes it back again.
+      on_pass:
+        enabled: false
+        # room: "!yourspace:example.net"
+        # power_level: 1
     display_name: "Fourier-chan"
     # How long a brand-new user can wait for her DM. One poll is ~15 ms of
     # Synapse time, so keep this small; floor is 1000.

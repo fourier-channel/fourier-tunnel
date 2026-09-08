@@ -28,3 +28,9 @@ CLAUDE.md
 docs/VERIFICATION-DOCTRINE.md
 docs/WORKING-RULES.md
 docs/CLAUDE-HEADER.md
+
+# The live catalogs. Their .example.yaml siblings are the documented shape;
+# the real files are per-deployment and mounted into the container, and for
+# onboarding-tasks.yaml the ORDER of the list is the point system itself.
+progression.yaml
+onboarding-tasks.yaml

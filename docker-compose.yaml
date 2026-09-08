@@ -18,7 +18,8 @@ services:
       # mount, an edit here silently did nothing until the next `--build`,
       # which is how a config change that looked applied was not.
       - ./config.yaml:/app/config.yaml:ro
-      - ./progression.yaml:/app/progression.yaml:ro
+      - ./progression.yaml:/app/progression.yaml
+      - ./onboarding-tasks.yaml:/app/onboarding-tasks.yaml:ro
       - ./onboarding-state:/state
     restart: unless-stopped
     networks:
