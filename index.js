@@ -176,10 +176,49 @@ async function historyPage(roomId, botUserId, from) {
 // history_visibility "invited" the bot's own invite is the earliest event it
 // may read, and two rooms on this server are set that way. The summary reports
 // what was found rather than claiming the room is now complete.
+// Can the bot write the tag state event in this room?
+//
+// Asked BEFORE a backfill because of an ordering trap that is easy to walk
+// into: the power-level grant only covers rooms the bot is already in, so a
+// room it has just been invited to has neither the grant nor a level. The
+// backfill then uploads every image happily and fails every tag write, which
+// looks like success in the booru and silence in the room. Better to say so
+// once, at the top, with the fix.
+async function canWriteTags(bridge, roomId, botUserId) {
+  try {
+    const pl = await bridge.getIntent().getStateEvent(roomId, "m.room.power_levels", "");
+    const need = Number(
+      (pl.events || {})[TAG_STATE_TYPE] !== undefined
+        ? pl.events[TAG_STATE_TYPE]
+        : pl.state_default !== undefined ? pl.state_default : 50,
+    );
+    const have = Number(
+      (pl.users || {})[botUserId] !== undefined
+        ? pl.users[botUserId]
+        : pl.users_default !== undefined ? pl.users_default : 0,
+    );
+    return { ok: have >= need, have, need };
+  } catch (e) {
+    // Unknown is not the same as refused; proceed and let the write speak.
+    return { ok: true, have: null, need: null, unknown: e.message };
+  }
+}
+
 async function backfillRoomNow(bridge, roomId, botUserId) {
   if (isRoomDisabled(roomId)) return null;
   if (backfilledRooms.has(roomId)) return null;
   backfilledRooms.add(roomId);
+
+  const perm = await canWriteTags(bridge, roomId, botUserId);
+  if (!perm.ok) {
+    console.warn(
+      `[backfill] ${roomId}: cannot write ${TAG_STATE_TYPE} here ` +
+      `(bot has ${perm.have}, needs ${perm.need}). Images will still reach the ` +
+      `booru, but NO tags will be written back to this room. Fix with: run ` +
+      `grant-tag-write.sh (it picks up this room now the bot is in it), then ` +
+      `send !backfill here to write the tag state that this run will miss.`
+    );
+  }
   try {
     const result = await backfill.backfillRoom({
       roomId,
@@ -191,8 +230,9 @@ async function backfillRoomNow(bridge, roomId, botUserId) {
         await sleep(750);
       },
     });
-    console.log(backfill.summarise(result));
-    return result;
+    const note = perm.ok ? "" : "  (tag write-back BLOCKED: see the warning above)";
+    console.log(backfill.summarise(result) + note);
+    return { ...result, tagsBlocked: !perm.ok };
   } catch (err) {
     backfilledRooms.delete(roomId); // let a later attempt try again
     console.warn(`[backfill] ${roomId} failed: ${err.message}`);
@@ -527,10 +567,14 @@ async function handleBackfillCommand(bridge, event) {
   await intent.sendText(event.room_id, "Walking this room's history for images...");
   const result = await backfillRoomNow(bridge, event.room_id, botUserId);
   invites.audit({ kind: "backfill", admin: sender, room: event.room_id, result: result ? `${result.done}/${result.seen}` : "failed" });
-  await intent.sendText(
-    event.room_id,
-    result ? backfill.summarise(result) : "Backfill failed; see the bridge log.",
-  );
+  let reply = result ? backfill.summarise(result) : "Backfill failed; see the bridge log.";
+  if (result && result.tagsBlocked) {
+    reply +=
+      "\n\nTags were NOT written back to this room: I do not have permission to " +
+      "send " + TAG_STATE_TYPE + " here. Run grant-tag-write.sh, then send " +
+      "!backfill again.";
+  }
+  await intent.sendText(event.room_id, reply);
   return true;
 }
 
