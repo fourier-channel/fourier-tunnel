@@ -74,6 +74,11 @@ function tasksFor(catalog, event, ctx = {}) {
 
   const out = [];
   for (const task of catalog.tasks || []) {
+    // Inside the bot's own DM, only tasks that are ABOUT the bot count.
+    // Otherwise talking to her scores the tasks meant for the community: an
+    // image sent to set her avatar was scoring "uploaded an image", which is
+    // precisely the collision the tier engine hit and was guarded against.
+    if (ctx.isBotDm && task.dm !== true) continue;
     const rule = RULES[task.detect];
     if (rule && rule(ev, ctx)) out.push(task.id);
   }

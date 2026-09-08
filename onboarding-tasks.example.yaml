@@ -15,6 +15,13 @@
 #   client         Technetium reports it as a net.41chan.onboarding.activity
 #                  event, because nothing about it reaches the server
 #
+# dm: true marks a task that may be earned INSIDE the bot's own DM. Everything
+# else is ignored there. Without that rule, sending Fourier-chan an image to set
+# her avatar scored "uploaded an image", which is the same collision the
+# operator hit on 2026-09-08 with the tier engine ("I think we accidentally
+# turned Fourier-chan's guide mode on"). Her DM is where you talk TO her; the
+# tasks are things you do in the community.
+#
 # A task with detect: client is INERT until Technetium sends it. Those are
 # listed honestly rather than quietly dropped, so the catalog says what is
 # actually wired.
@@ -66,12 +73,15 @@ tasks:
   - id: bot_command
     label: Used a bot command
     detect: server:command
+    dm: true               # may be earned inside the bot's own DM
   - id: bot_join_reply
     label: Answered the onboarding greeting
     detect: server:join_reply
+    dm: true               # may be earned inside the bot's own DM
   - id: bot_dm
     label: Opened a DM with the bot
     detect: server:bot_dm
+    dm: true               # may be earned inside the bot's own DM
   - id: accept_invite
     label: Accepted the invite and joined
     detect: server:join

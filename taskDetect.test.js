@@ -98,3 +98,27 @@ test("a catalog with a bogus rule is refused at load", () => {
   assert.throws(() => validateCatalog({ tasks: [{ id: "x", detect: "client" }, { id: "x", detect: "client" }] }), /duplicate/);
   assert.throws(() => validateCatalog({ tasks: [] }), /empty/);
 });
+
+test("the bot's own DM only scores tasks about the bot", () => {
+  // The avatar collision: an admin sends Fourier-chan an image so she can use
+  // it as her portrait, and the old behaviour paid them for "uploaded an
+  // image". Her DM is where you talk TO her.
+  const image = msg({ msgtype: "m.image", url: "mxc://a/b" });
+  assert.deepEqual(tasksFor(CATALOG, image, { isBotDm: true }), ["bot_dm"]);
+  assert.deepEqual(tasksFor(CATALOG, image, { isBotDm: false }), ["upload_file"]);
+
+  // Chat in her DM is not "said something in the lobby" either.
+  const chat = msg({ msgtype: "m.text", body: "hello" });
+  assert.ok(!tasksFor(CATALOG, chat, { isBotDm: true }).includes("lobby_message"));
+
+  // But answering her greeting, in her DM, is exactly what it is.
+  const join = msg({ msgtype: "m.text", body: "!join" });
+  const got = tasksFor(CATALOG, join, { isBotDm: true });
+  assert.ok(got.includes("bot_join_reply"));
+  assert.ok(got.includes("bot_command"));
+});
+
+test("a client report still works in the DM, which is the only place it may come from", () => {
+  const got = tasksFor(CATALOG, { type: CLIENT_REPORT, content: { activity: "toggle_theme" } }, { isBotDm: true });
+  assert.deepEqual(got, ["toggle_theme"]);
+});
