@@ -215,7 +215,7 @@ async function backfillRoomNow(bridge, roomId, botUserId) {
       `[backfill] ${roomId}: cannot write ${TAG_STATE_TYPE} here ` +
       `(bot has ${perm.have}, needs ${perm.need}). Images will still reach the ` +
       `booru, but NO tags will be written back to this room. Fix with: run ` +
-      `grant-tag-write.sh (it picks up this room now the bot is in it), then ` +
+      `tools/grant-tag-write.sh (it picks up this room now the bot is in it), then ` +
       `send !backfill here to write the tag state that this run will miss.`
     );
   }
@@ -571,7 +571,7 @@ async function handleBackfillCommand(bridge, event) {
   if (result && result.tagsBlocked) {
     reply +=
       "\n\nTags were NOT written back to this room: I do not have permission to " +
-      "send " + TAG_STATE_TYPE + " here. Run grant-tag-write.sh, then send " +
+      "send " + TAG_STATE_TYPE + " here. Run tools/grant-tag-write.sh, then send " +
       "!backfill again.";
   }
   await intent.sendText(event.room_id, reply);

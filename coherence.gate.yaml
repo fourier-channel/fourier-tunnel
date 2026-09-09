@@ -11,6 +11,16 @@
 #           rule 6), quoted back in a derived-facts denial.
 #   exclude paths held out of the confusable check: vendored or upstream
 #           content that is not ours to normalize.
-# Docker and infrastructure. No toolchain to run; coherence verifies that.
+# This repo declared `class-a-only` -- "Docker and infrastructure, no toolchain
+# to run" -- and coherence answered "no class B surface (verified)" for months
+# while eight *.test.js files and 82 passing tests were never run by any gate,
+# the fibonacci point system's among them. The claim was false, and the word
+# VERIFIED was what made it dangerous.
+#
+# It survived because coherence looked for Node only in package.json SCRIPTS,
+# and `node --test` needs no script: it discovers test files by NAME. The probe
+# now knows that rule, and its regression test is
+# test_a_node_repo_cannot_declare_class_a_only.
 
-gate: class-a-only
+gate: node --test
+suite: node --test
