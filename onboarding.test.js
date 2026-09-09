@@ -76,6 +76,11 @@ test("onboarding DMs are created BY Fourier-chan, not by the appservice bot", ()
 // 2026-09-08 was that the new system must not reach any other user until it is
 // reviewed. If someone loosens the gate, this fails.
 
+// This reads the SOURCE, so it catches the check being deleted or moved after
+// the scoring, and nothing else. It cannot see behaviour: with the gate
+// mutated to `if (false && !this.fibWhitelist.includes(userId))` it still
+// passes, because the text it greps for is still there. The gate is actually
+// exercised in onboarding-whitelist.test.js -- keep both.
 test("the new engine is gated on an explicit whitelist with no wildcard", () => {
   const fs = require("node:fs");
   const src = fs.readFileSync(require.resolve("./onboarding.js"), "utf8");
