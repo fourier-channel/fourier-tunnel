@@ -476,7 +476,7 @@ function botAdmins() {
 // space hierarchy.
 async function joinedRoomsFor(userId) {
   const base = config.homeserver.url.replace(/\/+$/, "");
-  const auth = { Authorization: `Bearer ${config.appservice.as_token}` };
+  const auth = { Authorization: `Bearer ${AS_TOKEN}` };
   const q = `user_id=${encodeURIComponent(userId)}`;
 
   const res = await fetch(`${base}/_matrix/client/v3/joined_rooms?${q}`, { headers: auth });
