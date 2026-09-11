@@ -199,7 +199,8 @@ Nine plain `node --test` suites, one per module, no runner:
 
 - Forward tagging works. Reverse sync (editing the state event to update the
   booru) is not implemented; nothing reads the state event inbound.
-- Tag-edit permission enforcement is intended to live in a Matrix client.
+- Tag-edit permission enforcement is intended to live in a Matrix client;
+  `tag_edit_power_level` in the config is read by nothing in the bridge.
 - Posts by a Builder-level account land in the booru's moderation queue.
 - Measured 2026-09-08: this bridge had produced a few dozen posts against a
   six-figure booru; it matters where the bot is invited, not how fast it runs.
