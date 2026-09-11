@@ -256,7 +256,7 @@ async function handleImageEvent(bridge, event) {
     (event.content && event.content.body) || mxcUrl.split("/").pop() || "image";
 
   // Duplicate check: if Danbooru already has a post with this image's md5, skip
-  // the (re-)upload — which on this fork fails with a 500 on duplicate md5 — and
+  // the (re-)upload -- which on this fork fails with a 500 on duplicate md5 -- and
   // just point the room's tag state at the existing post. This makes a re-posted
   // image an intended [skip], and still tags the new room correctly.
   const md5 = require("crypto").createHash("md5").update(buffer).digest("hex");
@@ -524,7 +524,7 @@ async function handleListRoomsCommand(bridge, event) {
 
   const identities = listrooms.botIdentities({
     domain: config.homeserver.domain,
-    senderLocalpart: config.appservice.sender_localpart,
+    senderLocalpart: _reg.sender_localpart,
     onboarding: config.bridge.onboarding,
   });
 
@@ -562,7 +562,7 @@ async function handleBackfillCommand(bridge, event) {
   }
 
   const intent = bridge.getIntent();
-  const botUserId = `@${config.appservice.sender_localpart}:${config.homeserver.domain}`;
+  const botUserId = `@${_reg.sender_localpart}:${config.homeserver.domain}`;
   backfilledRooms.delete(event.room_id); // an explicit ask overrides "already done"
   await intent.sendText(event.room_id, "Walking this room's history for images...");
   const result = await backfillRoomNow(bridge, event.room_id, botUserId);
@@ -661,7 +661,7 @@ async function handleAvatarFlow(bridge, event) {
     } catch (e) {
       await intent.sendText(roomId, "Failed to set avatar: " + e.message);
     }
-    return true; // consumed — do not tag
+    return true; // consumed -- do not tag
   }
 
   return false;
@@ -752,7 +752,7 @@ new Cli({
               if (await handleResetCommand(bridge, event)) return;
               if (await handleListRoomsCommand(bridge, event)) return;
               if (await handleBackfillCommand(bridge, event)) return;
-              // Avatar-setting flow (admin DM) — checked before tagging
+              // Avatar-setting flow (admin DM) -- checked before tagging
               if (await handleAvatarFlow(bridge, event)) return;
               // Image tagging
               if (event.content.msgtype === "m.image") {

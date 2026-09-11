@@ -477,7 +477,10 @@ class Onboarding {
       await this.intent().sendStateEvent(rec.dmRoom, METER_EVENT, userId, {
         score: profile.score,
         goal: this.fib.goal,
-        percent: fibonacci.progressPercent(profile.score, this.fib.goal),
+        // An integer, always. Synapse's canonical JSON rejects a non-integer
+        // number ("Bad JSON value: float"), and the meter had been failing to
+        // publish for exactly that since the day scores stopped dividing evenly.
+        percent: Math.round(fibonacci.progressPercent(profile.score, this.fib.goal)),
         completed: profile.completed,
         passed: !!profile.passedAt,
       });
