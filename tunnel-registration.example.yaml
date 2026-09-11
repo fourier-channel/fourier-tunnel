@@ -18,6 +18,12 @@ namespaces:
   users:
     - exclusive: true
       regex: "@tunnel:example\\.net"
+    # Fourier-chan (bridge.onboarding.localpart in config.yaml) acts as her
+    # OWN user through this appservice, so she must be claimed here too, as
+    # a second EXACT entry. Two exact users is not the wildcard warned about
+    # above; a regex that matches everyone is.
+    - exclusive: true
+      regex: "@fourier:example\\.net"
   aliases: []
   rooms: []
 rate_limited: false

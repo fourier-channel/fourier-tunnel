@@ -586,7 +586,9 @@ class Onboarding {
   async handleAvatarFlow(event) {
     if (event.type !== "m.room.message" || !event.content) return false;
     const sender = event.sender;
-    if (!(this.config.bridge.strike_reset_admins || []).includes(sender)) return false;
+    // `admins` is the name going forward; strike_reset_admins is its alias.
+    const admins = this.config.bridge.admins || this.config.bridge.strike_reset_admins || [];
+    if (!admins.includes(sender)) return false;
     const roomId = event.room_id;
     const content = event.content;
     const intent = this.intent();

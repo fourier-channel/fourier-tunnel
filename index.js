@@ -585,7 +585,7 @@ async function handleResetCommand(bridge, event) {
   if (!body || !body.startsWith("!resetstrikes")) return false;
 
   const sender = event.sender;
-  if (!(config.bridge.strike_reset_admins || []).includes(sender)) {
+  if (!botAdmins().includes(sender)) {
     invites.audit({ kind: "reset_denied_not_admin", sender });
     return true;
   }
@@ -629,7 +629,7 @@ async function handleResetCommand(bridge, event) {
 async function handleAvatarFlow(bridge, event) {
   const sender = event.sender;
   const roomId = event.room_id;
-  const isAdmin = (config.bridge.strike_reset_admins || []).includes(sender);
+  const isAdmin = botAdmins().includes(sender);
   if (!isAdmin) return false;
 
   const intent = bridge.getIntent();

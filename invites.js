@@ -1,8 +1,15 @@
 const fs = require("fs");
 const path = require("path");
 
-const STRIKES_PATH = path.join(__dirname, "strikes.json");
-const AUDIT_PATH = path.join(__dirname, "audit.log");
+// In the mounted state directory, NOT beside the code. Beside the code they
+// lived inside the image, and every `docker compose up --build` threw the
+// strike ledger away -- the ledger the README calls non-decaying. Same
+// mount and same variable the onboarding watermark moved to after the
+// 2026-09-05 re-greeting incident; without the variable (tests, host dev)
+// they fall back to the old place.
+const STATE_DIR = process.env.ONBOARDING_STATE_DIR || __dirname;
+const STRIKES_PATH = path.join(STATE_DIR, "strikes.json");
+const AUDIT_PATH = path.join(STATE_DIR, "audit.log");
 
 function loadStrikes() {
   try {
