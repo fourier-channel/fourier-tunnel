@@ -28,6 +28,26 @@
 "use strict";
 
 const path = require("path");
+
+// THIS ORDERING IS THE FIX, AND IT IS NOT COSMETIC.
+//
+// index.js resolves the homeserver URL ONCE, at module scope, and everything
+// downstream of it uses that one value -- including the media download inside
+// handleImageEvent. So --homeserver has to be in the environment BEFORE index
+// is required. It used to be read afterwards, in main(), which moved the pager
+// and left the downloader pointed at the container's own hostname: the first
+// real run printed "homeserver : http://localhost:8008", walked all 419 images
+// with it, and failed every one of them with "getaddrinfo EAI_AGAIN synapse".
+//
+// An explicit HOMESERVER_URL in the environment wins over the flag: the
+// variable is the thing index.js actually reads, and silently overwriting what
+// the operator exported would make the flag a liar.
+const hsFlag = (() => {
+  const i = process.argv.indexOf("--homeserver");
+  return i === -1 ? undefined : process.argv[i + 1];
+})();
+if (hsFlag && !process.env.HOMESERVER_URL) process.env.HOMESERVER_URL = hsFlag;
+
 const { catchUpRoom, summarise } = require(path.join(__dirname, "..", "catchup"));
 const { handleImageEvent, AS_TOKEN, config } = require(path.join(__dirname, "..", "index"));
 
@@ -59,12 +79,10 @@ async function main() {
     return 2;
   }
 
-  // THE CONFIG'S URL IS THE BRIDGE'S, AND THE BRIDGE IS IN A CONTAINER.
-  // config.yaml says http://synapse:8008, which resolves on the compose network
-  // and nowhere else -- this tool runs on the host, where it is simply
-  // unreachable. The first run said only "fetch failed", which named neither the
-  // URL nor the reason, so the override and the naming arrive together.
-  const base = String(process.env.HOMESERVER_URL || arg("homeserver") || config.homeserver.url).replace(/\/+$/, "");
+  // Already resolved, trailing slash already gone, and identical to the URL
+  // handleImageEvent will download media from -- because it is the same value,
+  // read from the same place, rather than a second opinion about it.
+  const base = config.homeserver.url;
   const enc = encodeURIComponent(roomId);
 
   async function page(url, token) {

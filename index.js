@@ -9,6 +9,7 @@ const invites = require("./invites");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
+const { resolveHomeserverUrl } = require("./homeserver");
 
 // PACING BETWEEN BACKFILLED IMAGES.
 //
@@ -24,6 +25,18 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 const { Onboarding } = require("./onboarding");
 
 const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
+
+// ONE homeserver URL for the whole process, resolved once.
+//
+// config.yaml names Synapse by its compose-network hostname, which is correct
+// inside the bridge container and unreachable from anywhere else. HOMESERVER_URL
+// says where it answers from HERE. Resolved back INTO the config so that all
+// five call sites -- registration, media download, history paging, joined_rooms
+// and the Bridge itself -- agree by construction rather than by everyone
+// remembering to check. tools/catch-up-room.js used to resolve its own URL for
+// paging and leave downloadFromSynapse on the configured one; the run walked the
+// room fine and then failed all 419 downloads with EAI_AGAIN synapse.
+config.homeserver.url = resolveHomeserverUrl(process.env, config.homeserver.url);
 const danbooru = new DanbooruClient(config.danbooru);
 
 // Load the appservice token from the registration file for authenticated
