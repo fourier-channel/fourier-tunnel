@@ -12,6 +12,13 @@ RUN npm install --omit=dev
 # kept out via .dockerignore (*.test.js, dev-autotag.js), so this ships exactly
 # the same set as the old allowlist, but stays correct as modules are added.
 COPY *.js ./
+# The operator tools, for the same reason the line above is a glob. They are not
+# on the bridge's own path, but they are how a room gets caught up, and a tool
+# that is not in the image can only be run by bind-mounting code the image does
+# not have -- which is the divergence this whole suite exists to catch. It runs
+# HERE because the URLs in config.yaml are compose-network names: synapse,
+# danbooru and fourier-spectrum resolve on this network and nowhere else.
+COPY tools ./tools
 COPY config.yaml tunnel-registration.yaml ./
 
 # The bridge listens on 8009 for Synapse's appservice traffic

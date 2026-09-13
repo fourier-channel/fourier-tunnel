@@ -163,6 +163,38 @@ every room. The grant covers only rooms the bot is already in: re-run it
 after any new join, or tags in that room silently fail to write. The bot
 checks before a backfill and says so in the room when it cannot write.
 
+### Catching up a room the bot joined too late
+
+A room created with `history_visibility: invited` seals every event sent
+before a member's invite. A bot invited later can never read that window --
+`/messages` omits it, `/event` 404s, `/relations` 403s -- so `!backfill`
+reports a number that looks complete and is not. No power level fixes it and
+no larger page cap reaches it: the bot is not refused a permission, it is
+refused a past.
+
+`tools/catch-up-room.js` reads the room with Synapse's **admin** Room Messages
+API, which has no such horizon, and still writes the tag state **as the bot**,
+so the bot's own power level continues to govern what it may say. It reports
+how many images were sealed, which is the number worth running it for.
+
+It must run on the compose network, because `config.yaml` names Synapse,
+danbooru and the tagger by their container hostnames:
+
+```sh
+read -s SYNAPSE_ADMIN_TOKEN && export SYNAPSE_ADMIN_TOKEN
+docker compose run --rm -e SYNAPSE_ADMIN_TOKEN tunnel \
+  node tools/catch-up-room.js --room '!id:41chan.net'          # plan only
+docker compose run --rm -e SYNAPSE_ADMIN_TOKEN tunnel \
+  node tools/catch-up-room.js --room '!id:41chan.net' --apply  # writes
+```
+
+**Dry run is the default**; `--apply` is what writes. The admin token comes
+from the environment and never from a flag, because a flag is in the shell
+history and in every `ps` listing. `--cap N` bounds the work; `--homeserver`
+(or `HOMESERVER_URL`) points it elsewhere, for a Synapse that is not on this
+network. It is pointable at any room, which is the point -- any room whose bot
+arrived after the pictures did has the same sealed window.
+
 ### Admin commands
 
 Sender must be in `bridge.admins`.
