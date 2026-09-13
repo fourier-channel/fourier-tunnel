@@ -140,18 +140,31 @@ async function main() {
     cap,
     log: (line) => console.warn(line),
     onImage: async (ev) => {
+      // A DRY RUN MUST NOT REACH THE PIPELINE. --apply used to gate only the
+      // Matrix state write, while handleImageEvent downloaded the media,
+      // uploaded it to the booru and created the post regardless. On the host
+      // that was invisible because everything died at the download; on the
+      // compose network it would have uploaded 419 images under a line reading
+      // "nothing will be written". A flag that claims a safety it does not have
+      // is worse than no flag.
+      if (!apply) {
+        console.log(`  WOULD PROCESS ${ev.content.url}`);
+        return "posted";
+      }
       const outcome = await handleImageEvent(bridge, { ...ev, room_id: roomId });
       // Same pacing as the live walk, and for the same reason: Synapse rate
-      // limits state events and starts refusing them. In a dry run nothing is
-      // sent, so nothing needs pacing.
-      if (apply) await sleep(PACE_MS);
+      // limits state events and starts refusing them.
+      await sleep(PACE_MS);
       return outcome;
     },
   });
 
   console.log("");
-  console.log(summarise(result));
-  if (!apply) console.log("\n  Dry run. Re-run with --apply.");
+  console.log(summarise(result, { dryRun: !apply }));
+  if (!apply) {
+    console.log("\n  Dry run: nothing was downloaded, uploaded, posted or written.");
+    console.log("  Re-run with --apply to do the work.");
+  }
   // A run that could not finish is not a success, whatever it managed.
   return result.failed > 0 || result.truncated ? 1 : 0;
 }

@@ -127,9 +127,17 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
   };
 }
 
-/** One line an operator can read without decoding it. */
-function summarise(r) {
-  const bits = [`${r.done} done`];
+/**
+ * One line an operator can read without decoding it.
+ *
+ * `dryRun` changes the WORD, not the number: a planned image and a posted one
+ * are not the same fact and must not print the same way. Saying "419 done"
+ * about a run that did nothing is the same lie as saying "0 done" about a run
+ * that posted 266, which is what sent this tool to be written in the first
+ * place.
+ */
+function summarise(r, { dryRun = false } = {}) {
+  const bits = [`${r.done} ${dryRun ? "to process" : "done"}`];
   if (r.blocked) bits.push(`${r.blocked} posted but tag state blocked`);
   if (r.failed) bits.push(`${r.failed} failed`);
   if (r.skipped) bits.push(`${r.skipped} repeat(s) of the same picture`);

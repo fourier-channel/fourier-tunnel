@@ -72,3 +72,15 @@ test("the tool sets the override BEFORE it requires index", () => {
   assert.ok(setsEnv < requiresIndex,
     "--homeserver must reach the environment before index.js resolves it at module scope");
 });
+
+test("the dry run never reaches the pipeline", () => {
+  // --apply used to gate only the Matrix state write while handleImageEvent
+  // still downloaded, uploaded and posted every image. The guard must come
+  // FIRST inside onImage, before the pipeline is called at all.
+  const src = fs.readFileSync(path.join(__dirname, "tools", "catch-up-room.js"), "utf8");
+  const onImage = src.indexOf("onImage: async (ev)");
+  const call = src.indexOf("handleImageEvent(bridge", onImage);
+  const guard = src.indexOf("if (!apply)", onImage);
+  assert.ok(onImage !== -1 && call !== -1 && guard !== -1, "expected onImage, its guard and the pipeline call");
+  assert.ok(guard < call, "the dry-run guard must return before handleImageEvent is called");
+});

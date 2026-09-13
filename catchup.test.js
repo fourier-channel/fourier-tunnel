@@ -179,3 +179,12 @@ test("a token that never moves does not spin", async () => {
   assert.equal(calls, 2, "stops on the second sight of the same token");
   assert.equal(r.pages, 2);
 });
+
+test("a dry run says 'to process', never 'done'", () => {
+  // The word is the whole safety property. An operator reading "419 done" after
+  // a run that deliberately did nothing has been told the opposite of the truth.
+  const r = { roomId: "!r:x", seen: 3, done: 3, blocked: 0, failed: 0, skipped: 0, ms: 1000, sealed: 0, botVisible: 3 };
+  assert.match(summarise(r, { dryRun: true }), /3 to process/);
+  assert.doesNotMatch(summarise(r, { dryRun: true }), /done/);
+  assert.match(summarise(r), /3 done/);
+});
