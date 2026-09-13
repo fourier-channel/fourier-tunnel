@@ -47,7 +47,7 @@ function pngTextChunks(buf) {
           out[keyword] = compressed ? zlib.inflateSync(text).toString("utf8") : text.toString("utf8");
         }
       }
-    } catch (e) { /* skip a malformed chunk, keep scanning */ }
+    } catch { /* skip a malformed chunk, keep scanning */ }
     if (type === "IEND") break;
     off = end + 4; // + CRC
   }
@@ -77,14 +77,14 @@ function rawPrompt(chunks) {
       // The longest CLIP text block is almost always the positive prompt.
       texts.sort((a, b) => b.length - a.length);
       if (texts.length) return texts[0].trim();
-    } catch (e) { /* not JSON we understand */ }
+    } catch { /* not JSON we understand */ }
   }
   for (const key of ["Comment", "Description"]) {
     if (typeof chunks[key] === "string") {
       try {
         const c = JSON.parse(chunks[key]);
         if (c && typeof c.prompt === "string") return c.prompt.trim();
-      } catch (e) {
+      } catch {
         if (key === "Description") return chunks[key].trim();
       }
     }
@@ -144,7 +144,7 @@ function extractCreatorTags(buffer, contentType, opts) {
     const isPng = (contentType && /png/i.test(contentType)) ||
       (Buffer.isBuffer(buffer) && buffer.length > 8 && buffer[0] === 0x89 && buffer[1] === 0x50);
     if (isPng) return promptToTags(rawPrompt(pngTextChunks(buffer)), opts);
-  } catch (e) { /* fail soft */ }
+  } catch { /* fail soft */ }
   return { tags: [], meta: [] };
 }
 

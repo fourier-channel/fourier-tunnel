@@ -22,5 +22,23 @@
 # now knows that rule, and its regression test is
 # test_a_node_repo_cannot_declare_class_a_only.
 
-gate: node --test
+# LINT RUNS FIRST, and it is in the gate rather than beside it.
+#
+# 2026-09-13: `await sleep(750)` shipped and ran for weeks. `sleep` was never
+# defined -- it threw ReferenceError on every backfilled image, AFTER the image
+# had been uploaded and tagged, so 266 successful pictures reported "0 done, 266
+# failed" and the pacing that line existed to provide never happened. No test
+# reaches that line without a live homeserver. eslint's no-undef reads it off
+# the page.
+#
+# Chained with &&, so a lint failure stops the run rather than being scrolled
+# past. fourier-sampling has had eslint for months, ungated, and it rotted to 22
+# errors that every session wrote off as somebody else's business -- memory
+# `lint-was-ungated-and-rotted`. A check nothing runs is not a check.
+# --no-install ON PURPOSE: the linter must be the one this repo pins, never one
+# npx fetches at gate time, and a missing toolchain must say so rather than
+# silently resolving to whatever is newest. That makes `npm install` (WITH
+# devDependencies) a precondition for gating a checkout -- the Docker image is
+# unaffected, it builds its own tree with --omit=dev and never copies this one.
+gate: npx --no-install eslint . && node --test
 suite: node --test

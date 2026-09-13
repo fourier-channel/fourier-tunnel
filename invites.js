@@ -14,7 +14,14 @@ const AUDIT_PATH = path.join(STATE_DIR, "audit.log");
 function loadStrikes() {
   try {
     return JSON.parse(fs.readFileSync(STRIKES_PATH, "utf8"));
-  } catch (e) {
+  } catch (err) {
+    // An ABSENT ledger is the ordinary first run. An unreadable or corrupt one
+    // is every strike ever recorded silently becoming zero, and the caller
+    // cannot tell those apart from an empty object -- so the difference is said
+    // out loud here rather than inferred later from people's behaviour.
+    if (err.code !== "ENOENT") {
+      console.warn(`[invites] strike ledger at ${STRIKES_PATH} unreadable, continuing with NO strikes: ${err.message}`);
+    }
     return {};
   }
 }

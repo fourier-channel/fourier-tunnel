@@ -11,7 +11,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  bracketPlan, assignPoints, maxAchievable, feasibility, scoreOf,
+  bracketPlan, assignPoints, feasibility, scoreOf,
   progressPercent, hasPassed, nextTasks, roundHalfToEven, BASE_DISTRIBUTION,
 } = require("./fibonacci");
 

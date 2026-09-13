@@ -129,7 +129,12 @@ const DEFAULT_ACCEPT_HINT = [
 function loadState() {
   try {
     return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
-  } catch (e) {
+  } catch (err) {
+    // Same reasoning as the strike ledger: missing is the first run, corrupt is
+    // every user's progression forgotten. Silence makes them identical.
+    if (err.code !== "ENOENT") {
+      console.warn(`[onboarding] state at ${STATE_PATH} unreadable, starting from nothing: ${err.message}`);
+    }
     return null;
   }
 }
@@ -623,7 +628,7 @@ class Onboarding {
     try {
       const state = await this.intent().roomState(roomId);
       return state.filter((e) => e.type === "m.room.member" && e.content.membership === "join").length;
-    } catch (e) {
+    } catch {
       return -1;
     }
   }

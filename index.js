@@ -20,7 +20,7 @@ const backfill = require("./backfill");
 // starts refusing them, which is why some images lost their tag state on runs
 // that otherwise worked.
 const BACKFILL_PACE_MS = 750;
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 const { Onboarding } = require("./onboarding");
 
 const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
@@ -88,7 +88,7 @@ async function joinedMemberCount(bridge, roomId) {
     return state.filter(
       (e) => e.type === "m.room.member" && e.content.membership === "join"
     ).length;
-  } catch (e) {
+  } catch {
     return -1; // unknown
   }
 }
@@ -106,7 +106,7 @@ async function botIsJoined(bridge, roomId, botUserId) {
         e.state_key === botUserId &&
         e.content.membership === "join"
     );
-  } catch (e) {
+  } catch {
     return false; // can't read state => not a member
   }
 }
@@ -537,7 +537,7 @@ async function joinedRoomsFor(userId) {
         { headers: auth },
       );
       if (r.ok) name = (await r.json()).name || null;
-    } catch (e) {
+    } catch {
       name = null;
     }
     rooms.push({ roomId, name });
@@ -639,8 +639,11 @@ async function handleResetCommand(bridge, event) {
     memberCount = state.filter(
       (e) => e.type === "m.room.member" && e.content.membership === "join"
     ).length;
-  } catch (e) {
-    memberCount = 0;
+  } catch (err) {
+    // NOT zero. Zero is a claim about the room; this is a failure to look, and
+    // the two must not share a value when the next line branches on it.
+    console.warn(`[dm] could not read membership, treating as unknown: ${err.message}`);
+    memberCount = -1;
   }
   if (memberCount !== 2) {
     invites.audit({ kind: "reset_denied_not_dm", sender, room: event.room_id });
