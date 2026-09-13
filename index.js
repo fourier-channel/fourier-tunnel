@@ -711,6 +711,14 @@ async function handleAvatarFlow(bridge, event) {
   return false;
 }
 
+// BOOT ONLY WHEN RUN AS THE ENTRYPOINT.
+//
+// Everything above is the image pipeline, and a catch-up tool needs to reuse it
+// exactly rather than reimplement it -- a second copy of "what a picture means"
+// is how two paths drift and only one gets fixed. Requiring this file used to
+// start a whole bridge as a side effect, so reuse was impossible and copying was
+// the only option. `node index.js` is unaffected: require.main is this module.
+if (require.main === module) {
 new Cli({
   registrationPath: "tunnel-registration.yaml",
   generateRegistration: function (reg, callback) {
@@ -839,3 +847,10 @@ new Cli({
     });
   },
 }).run();
+}
+
+// The pipeline, for tools that drive it with their own reader and their own
+// writer. handleImageEvent takes anything with getIntent().sendStateEvent --
+// the real Bridge in the service, a thin stand-in in a tool -- because that is
+// the only thing it asks of it.
+module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config };
