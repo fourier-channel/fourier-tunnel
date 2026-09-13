@@ -44,7 +44,7 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 async function main() {
   const roomId = arg("room");
   if (!roomId || !roomId.startsWith("!")) {
-    console.error("usage: node tools/catch-up-room.js --room '!id:server' [--apply] [--cap N]");
+    console.error("usage: node tools/catch-up-room.js --room '!id:server' [--apply] [--cap N] [--homeserver URL]");
     console.error("  --room is required and must be a room ID (!...), not an alias.");
     return 2;
   }
@@ -59,11 +59,23 @@ async function main() {
     return 2;
   }
 
-  const base = String(config.homeserver.url).replace(/\/+$/, "");
+  // THE CONFIG'S URL IS THE BRIDGE'S, AND THE BRIDGE IS IN A CONTAINER.
+  // config.yaml says http://synapse:8008, which resolves on the compose network
+  // and nowhere else -- this tool runs on the host, where it is simply
+  // unreachable. The first run said only "fetch failed", which named neither the
+  // URL nor the reason, so the override and the naming arrive together.
+  const base = String(process.env.HOMESERVER_URL || arg("homeserver") || config.homeserver.url).replace(/\/+$/, "");
   const enc = encodeURIComponent(roomId);
 
   async function page(url, token) {
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    let res;
+    try {
+      res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    } catch (err) {
+      // fetch's own message is "fetch failed" and nothing else. Say WHERE.
+      throw new Error(`cannot reach ${url.replace(/\?.*/, "")} (${err.cause ? err.cause.code || err.cause.message : err.message}). ` +
+        `If this is the container's own hostname, pass --homeserver http://localhost:8008 or set HOMESERVER_URL.`);
+    }
     if (!res.ok) throw new Error(`${url.replace(/\?.*/, "")} -> HTTP ${res.status}`);
     return res.json();
   }
@@ -97,6 +109,7 @@ async function main() {
   const bridge = { getIntent: () => intent };
 
   console.log(`room        : ${roomId}`);
+  console.log(`homeserver  : ${base}`);
   console.log(`reader      : admin (the server's view, no history horizon)`);
   console.log(`writer      : ${botUserId} (its power level still governs the tag state)`);
   console.log(`mode        : ${apply ? "APPLY -- this writes" : "dry run, nothing will be written"}`);
