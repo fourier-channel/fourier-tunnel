@@ -9,6 +9,18 @@ const invites = require("./invites");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
+
+// PACING BETWEEN BACKFILLED IMAGES.
+//
+// This was `await sleep(750)` and `sleep` was never defined -- not declared,
+// not imported, not a Node global. It threw ReferenceError on EVERY image,
+// after handleImageEvent had already done the whole job, so a run that
+// uploaded and tagged 266 pictures reported "0 done, 266 failed" and the
+// pacing this exists for never once ran. Synapse rate-limits state events and
+// starts refusing them, which is why some images lost their tag state on runs
+// that otherwise worked.
+const BACKFILL_PACE_MS = 750;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const { Onboarding } = require("./onboarding");
 
 const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
@@ -224,11 +236,14 @@ async function backfillRoomNow(bridge, roomId, botUserId) {
       roomId,
       fetchPage: (from) => historyPage(roomId, botUserId, from),
       onImage: async (ev) => {
-        await handleImageEvent(bridge, { ...ev, room_id: roomId });
+        const outcome = await handleImageEvent(bridge, { ...ev, room_id: roomId });
         // Paced: each image is a download, a hash, maybe an upload and a state
         // event. Synapse rate-limits state events and will start refusing.
-        await sleep(750);
+        await sleep(BACKFILL_PACE_MS);
+        return outcome;
       },
+      // Named, not swallowed. Passing this is now mandatory; see backfillRoom.
+      log: (line) => console.warn(line),
     });
     const note = perm.ok ? "" : "  (tag write-back BLOCKED: see the warning above)";
     console.log(backfill.summarise(result) + note);
@@ -279,16 +294,23 @@ async function handleImageEvent(bridge, event) {
         sources: { creator: [], auto: [], both: [], meta: [] },
       };
     }
-    await bridge.getIntent().sendStateEvent(roomId, TAG_STATE_TYPE, mxcUrl, {
-      post_id: existing.id,
-      tags: projection.tags,
-      rating: existing.rating || config.bridge.default_rating,
-      sources: projection.sources,
-      updated_by: "tunnel",
-      updated_at: Date.now(),
-    });
+    try {
+      await bridge.getIntent().sendStateEvent(roomId, TAG_STATE_TYPE, mxcUrl, {
+        post_id: existing.id,
+        tags: projection.tags,
+        rating: existing.rating || config.bridge.default_rating,
+        sources: projection.sources,
+        updated_by: "tunnel",
+        updated_at: Date.now(),
+      });
+    } catch (err) {
+      // The picture IS on the booru. Only the room's copy of its tags is
+      // missing, and a re-run writes it once the power level allows.
+      console.warn(`[tag-state] post #${existing.id} is on the booru but its state was refused in ${roomId}: ${err.message}`);
+      return "tags-blocked";
+    }
     console.log(`[skip] duplicate md5 ${md5} -> existing post #${existing.id}`);
-    return;
+    return "posted";
   }
 
   const upload = await danbooru.createUploadFromBytes(buffer, filename, contentType);
@@ -347,7 +369,15 @@ async function handleImageEvent(bridge, event) {
 
   // Now that the post exists, the tag exists too -- as a general tag. Promote
   // it. Deliberately after createPost for that reason.
-  await categoriseArtist(posterTag);
+  //
+  // Fail-soft from here down: the post is CREATED. Anything after it that
+  // throws must not report the picture as lost, or a run reads as a total
+  // failure while the booru fills up correctly.
+  try {
+    await categoriseArtist(posterTag);
+  } catch (err) {
+    console.warn(`[poster] artist tag not categorised for post #${post.id}: ${err.message}`);
+  }
 
   // Single write path (the tag hub): hand the FULL partition to the booru. It
   // records it, keeps creator-only tags private, fans out to consumers, and hands
@@ -363,25 +393,36 @@ async function handleImageEvent(bridge, event) {
   // If the hub is unreachable, fall back to the booru's tag_string -- still
   // public-safe, since creator-only tags were never written to it.
   if (!projection) {
-    const fullPost = await danbooru.getPost(post.id);
-    projection = {
-      tags: (fullPost.tag_string || "").split(/\s+/).filter(Boolean),
-      sources: { creator: [], auto: autoOnly, both, meta: metaTags },
-    };
+    try {
+      const fullPost = await danbooru.getPost(post.id);
+      projection = {
+        tags: (fullPost.tag_string || "").split(/\s+/).filter(Boolean),
+        sources: { creator: [], auto: autoOnly, both, meta: metaTags },
+      };
+    } catch (err) {
+      console.warn(`[tag-hub] could not read back post #${post.id}: ${err.message}`);
+      projection = { tags: publicTags, sources: { creator: [], auto: autoOnly, both, meta: metaTags } };
+    }
   }
 
   const intent = bridge.getIntent();
-  await intent.sendStateEvent(roomId, TAG_STATE_TYPE, mxcUrl, {
-    post_id: post.id,
-    tags: projection.tags,
-    rating,
-    // PUBLIC-SAFE provenance for the redesigned tag buckets. Creator-only tags are
-    // withheld by the booru and surface only via its identity-gated read.
-    sources: projection.sources,
-    updated_by: "tunnel",
-    updated_at: Date.now(),
-  });
+  try {
+    await intent.sendStateEvent(roomId, TAG_STATE_TYPE, mxcUrl, {
+      post_id: post.id,
+      tags: projection.tags,
+      rating,
+      // PUBLIC-SAFE provenance for the redesigned tag buckets. Creator-only tags are
+      // withheld by the booru and surface only via its identity-gated read.
+      sources: projection.sources,
+      updated_by: "tunnel",
+      updated_at: Date.now(),
+    });
+  } catch (err) {
+    console.warn(`[tag-state] post #${post.id} was created but its state was refused in ${roomId}: ${err.message}`);
+    return "tags-blocked";
+  }
   console.log(`[done] post #${post.id} tagged (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta)`);
+  return "posted";
 }
 
 // Build the deps object handleInvite needs, backed by a bot Intent.

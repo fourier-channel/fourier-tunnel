@@ -49,23 +49,39 @@ function imagesIn(chunk) {
  *
  * Never throws for one bad picture. A single undecodable image must not stop
  * the other seventy-one, so failures are counted and reported.
+ *
+ * THREE OUTCOMES, NOT TWO. `onImage` may resolve with "tags-blocked" to say the
+ * picture reached the booru but the room's tag state could not be written --
+ * recoverable by re-running once the power level is granted, and not the same
+ * fact as a failure. Counting it as failed is what made a working run of 266
+ * images report "0 done, 266 failed" on 2026-09-13.
+ *
+ * `log` IS REQUIRED. It defaulted to a no-op and the only caller never passed
+ * one, so every per-image error was counted and then discarded -- 266 failures
+ * with no reason recorded anywhere. A silent default is the shape the operator
+ * ruled against the same day: a fallback that hides the issue is worse than the
+ * issue. Omitting it is now a TypeError at the call site.
  */
-async function backfillRoom({ roomId, fetchPage, onImage, cap = DEFAULT_CAP, log = () => {} }) {
+async function backfillRoom({ roomId, fetchPage, onImage, cap = DEFAULT_CAP, log }) {
+  if (typeof log !== "function") {
+    throw new TypeError("backfillRoom requires log(): a failure nobody can read is not a report");
+  }
   let from;
-  let seen = 0, done = 0, failed = 0, pages = 0;
+  let seen = 0, done = 0, blocked = 0, failed = 0, pages = 0;
   const started = Date.now();
 
-  while (pages < MAX_PAGES && done + failed < cap) {
+  while (pages < MAX_PAGES && done + blocked + failed < cap) {
     const page = await fetchPage(from);
     pages++;
     const images = imagesIn(page && page.chunk);
     seen += images.length;
 
     for (const ev of images) {
-      if (done + failed >= cap) break;
+      if (done + blocked + failed >= cap) break;
       try {
-        await onImage(ev);
-        done++;
+        const outcome = await onImage(ev);
+        if (outcome === "tags-blocked") blocked++;
+        else done++;
       } catch (err) {
         failed++;
         log(`[backfill] ${roomId} ${ev.content.url}: ${err.message}`);
@@ -78,12 +94,13 @@ async function backfillRoom({ roomId, fetchPage, onImage, cap = DEFAULT_CAP, log
     from = page.end;
   }
 
-  return { roomId, seen, done, failed, pages, capped: done + failed >= cap, ms: Date.now() - started };
+  return { roomId, seen, done, blocked, failed, pages, capped: done + blocked + failed >= cap, ms: Date.now() - started };
 }
 
 /** One line an operator can read without decoding it. */
 function summarise(r) {
   const bits = [`${r.done} done`];
+  if (r.blocked) bits.push(`${r.blocked} posted but tag state blocked`);
   if (r.failed) bits.push(`${r.failed} failed`);
   if (r.capped) bits.push(`stopped at the cap`);
   return `[backfill] ${r.roomId}: ${r.seen} image(s) found, ${bits.join(", ")} in ${Math.round(r.ms / 1000)}s`;
