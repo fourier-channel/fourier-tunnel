@@ -188,3 +188,39 @@ test("a dry run says 'to process', never 'done'", () => {
   assert.doesNotMatch(summarise(r, { dryRun: true }), /done/);
   assert.match(summarise(r), /3 done/);
 });
+
+test("a permanent refusal is counted apart from a failure, and names the server", async () => {
+  // 59 images in one room failed identically for weeks because Synapse refuses
+  // remote media outright (federation_domain_whitelist is empty). Calling that
+  // "failed" tells an operator to rerun, which can never work.
+  const r = await catchUpRoom({
+    roomId: "!r:x",
+    adminPage: pager({
+      undefined: {
+        chunk: [img("mxc://matrix.org/2"), img("mxc://matrix.org/1"), img("mxc://41chan.net/3")],
+        end: null,
+      },
+    }),
+    onImage: async (e) => (e.content.url.includes("matrix.org") ? "unfetchable" : "posted"),
+    log: () => {},
+  });
+  assert.equal(r.unfetchable, 2);
+  assert.equal(r.failed, 0, "a refusal must not also count as a failure");
+  assert.equal(r.done, 1);
+  assert.deepEqual(r.unfetchableFrom, ["matrix.org"]);
+  const line = summarise(r);
+  assert.match(line, /2 unfetchable/);
+  assert.match(line, /matrix\.org/);
+  assert.match(line, /Rerunning will never reach these/);
+});
+
+test("nothing about unfetchable is said when nothing was refused", async () => {
+  const r = await catchUpRoom({
+    roomId: "!r:x",
+    adminPage: pager({ undefined: { chunk: [img("mxc://a/1")], end: null } }),
+    onImage: async () => "posted",
+    log: () => {},
+  });
+  assert.equal(r.unfetchable, 0);
+  assert.doesNotMatch(summarise(r), /unfetchable/);
+});

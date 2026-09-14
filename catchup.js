@@ -64,6 +64,11 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
   const started = Date.now();
   const adminUrls = new Set();
   let seen = 0, done = 0, blocked = 0, failed = 0, skipped = 0, pages = 0;
+  let unfetchable = 0;
+  // Which homeservers hold bytes we are never allowed to fetch. Named, because
+  // "59 failed" invites a rerun and "59 live on matrix.org, which federation
+  // denies" tells the operator the only thing that would actually change it.
+  const unfetchableFrom = new Set();
   let truncated = false;
 
   let from;
@@ -82,7 +87,14 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
       try {
         const outcome = await onImage(ev);
         if (outcome === "tags-blocked") blocked++;
-        else done++;
+        // A PERMANENT REFUSAL IS NOT A FAILURE. Its bytes are on a homeserver
+        // we are not allowed to talk to, so every future run fails identically.
+        // Counting it as "failed" says try again, which is false.
+        else if (outcome === "unfetchable") {
+          unfetchable++;
+          const m = /^mxc:\/\/([^/]+)\//.exec(url);
+          if (m) unfetchableFrom.add(m[1]);
+        } else done++;
       } catch (err) {
         failed++;
         log(`[catchup] ${roomId} ${url}: ${err.message}`);
@@ -121,6 +133,7 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
 
   return {
     roomId, seen, done, blocked, failed, skipped, pages, truncated,
+    unfetchable, unfetchableFrom: [...unfetchableFrom].sort(),
     botVisible,
     sealed: botVisible === null ? null : seen - botVisible,
     ms: Date.now() - started,
@@ -139,6 +152,7 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
 function summarise(r, { dryRun = false } = {}) {
   const bits = [`${r.done} ${dryRun ? "to process" : "done"}`];
   if (r.blocked) bits.push(`${r.blocked} posted but tag state blocked`);
+  if (r.unfetchable) bits.push(`${r.unfetchable} unfetchable`);
   if (r.failed) bits.push(`${r.failed} failed`);
   if (r.skipped) bits.push(`${r.skipped} repeat(s) of the same picture`);
   if (r.truncated) bits.push(`STOPPED EARLY -- there is more room than this run walked`);
@@ -150,6 +164,11 @@ function summarise(r, { dryRun = false } = {}) {
             `Those are the ones no amount of power level or paging would ever have reached.`;
   } else {
     line += "\n  the bot could see all of these itself; nothing here was sealed to it";
+  }
+  if (r.unfetchable) {
+    line += `\n  ${r.unfetchable} cannot be fetched at all: their bytes live on ` +
+            `${(r.unfetchableFrom || []).join(", ") || "another homeserver"} and federation is denied. ` +
+            "Rerunning will never reach these -- only allowing federation with that server would.";
   }
   return line;
 }

@@ -133,11 +133,35 @@ async function downloadFromSynapse(mxcUrl, asToken) {
   if (!match) throw new Error(`Invalid mxc URL: ${mxcUrl}`);
   const [, serverName, mediaId] = match;
   const url = `${config.homeserver.url}/_matrix/client/v1/media/download/${serverName}/${mediaId}`;
-  const resp = await axios.get(url, {
-    headers: { Authorization: `Bearer ${asToken}` },
-    responseType: "arraybuffer",
-    timeout: 30000,
-  });
+  let resp;
+  try {
+    resp = await axios.get(url, {
+      headers: { Authorization: `Bearer ${asToken}` },
+      responseType: "arraybuffer",
+      timeout: 30000,
+    });
+  } catch (err) {
+    // Axios says only "Request failed with status code 403". Synapse says WHY,
+    // in the body, and the difference decides what an operator should do:
+    // "Federation denied with matrix.org" is PERMANENT under an empty
+    // federation_domain_whitelist and no amount of rerunning reaches it, while a
+    // 404 is a missing file and a 429 is worth retrying. 59 images in one room
+    // failed identically for weeks behind that one unreadable sentence.
+    const status = err.response && err.response.status;
+    let detail = "";
+    if (err.response && err.response.data) {
+      try {
+        const body = JSON.parse(Buffer.from(err.response.data).toString("utf8"));
+        detail = [body.errcode, body.error].filter(Boolean).join(" ");
+      } catch {
+        detail = ""; // a non-JSON body tells us nothing; the status still does
+      }
+    }
+    throw new Error(
+      `media download ${serverName}/${mediaId} -> ${status || err.code || "failed"}` +
+      (detail ? `: ${detail}` : ""),
+    );
+  }
   return {
     buffer: Buffer.from(resp.data),
     contentType: resp.headers["content-type"] || "application/octet-stream",

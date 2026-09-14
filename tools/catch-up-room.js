@@ -151,7 +151,19 @@ async function main() {
         console.log(`  WOULD PROCESS ${ev.content.url}`);
         return "posted";
       }
-      const outcome = await handleImageEvent(bridge, { ...ev, room_id: roomId });
+      let outcome;
+      try {
+        outcome = await handleImageEvent(bridge, { ...ev, room_id: roomId });
+      } catch (err) {
+        // Synapse refuses remote media outright when federation_domain_whitelist
+        // is empty, which it is here. That is a policy, not a fault, and it is
+        // permanent: the bytes were never on this server and never will be.
+        if (/Federation denied/i.test(err.message)) {
+          console.warn(`  UNFETCHABLE ${ev.content.url}: ${err.message}`);
+          return "unfetchable";
+        }
+        throw err;
+      }
       // Same pacing as the live walk, and for the same reason: Synapse rate
       // limits state events and starts refusing them.
       await sleep(PACE_MS);
