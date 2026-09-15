@@ -20,6 +20,7 @@ const fs = require("fs");
 const path = require("path");
 const yaml = require("js-yaml");
 const progression = require("./progression");
+const avatarCapability = require("./capabilities/avatar");
 const fibonacci = require("./fibonacci");
 const taskDetect = require("./taskDetect");
 
@@ -585,43 +586,23 @@ class Onboarding {
     }
   }
 
-  // !setavatar, the same flow the tunnel has (index.js handleAvatarFlow),
-  // for HER avatar: an admin types it in a DM with her, then sends an image
-  // within two minutes, and she wears it. Operator ask 2026-09-06.
+  // Her !setavatar, through the shared capability -- the same one the bridge
+  // bot uses. This was a second copy of that flow and the two had already
+  // drifted: this one wrote an audit record and the other did not.
   async handleAvatarFlow(event) {
-    if (event.type !== "m.room.message" || !event.content) return false;
-    const sender = event.sender;
-    // `admins` is the name going forward; strike_reset_admins is its alias.
-    const admins = this.config.bridge.admins || this.config.bridge.strike_reset_admins || [];
-    if (!admins.includes(sender)) return false;
-    const roomId = event.room_id;
-    const content = event.content;
-    const intent = this.intent();
     if (!this.avatarPending) this.avatarPending = new Map();
-
-    if (content.msgtype === "m.text" && (content.body || "").trim() === "!setavatar") {
-      if ((await this.joinedMemberCount(roomId)) !== 2) return false; // DM only
-      this.avatarPending.set(sender, Date.now() + 2 * 60 * 1000);
-      await intent.sendText(roomId, "Send me an image and I'll use it as my avatar (within 2 minutes).");
-      return true;
-    }
-    if (content.msgtype === "m.image") {
-      const expiry = this.avatarPending.get(sender);
-      if (!expiry) return false;
-      if (Date.now() > expiry) { this.avatarPending.delete(sender); return false; }
-      if ((await this.joinedMemberCount(roomId)) !== 2) return false;
-      if (!content.url) return false;
-      this.avatarPending.delete(sender);
-      try {
-        await intent.setAvatarUrl(content.url);
-        await intent.sendText(roomId, "Avatar updated.");
-        this.audit({ kind: "onboarding_avatar_set", admin: sender, mxc: content.url });
-      } catch (e) {
-        await intent.sendText(roomId, "Failed to set avatar: " + e.message);
-      }
-      return true;
-    }
-    return false;
+    const intent = this.intent();
+    return avatarCapability.handleAvatarFlow(event, {
+      setAvatarUrl: (mxc) => intent.setAvatarUrl(mxc),
+      sendText: (room, text) => intent.sendText(room, text),
+      joinedMemberCount: (room) => this.joinedMemberCount(room),
+      // `admins` is the name going forward; strike_reset_admins is its alias.
+      admins: this.config.bridge.admins || this.config.bridge.strike_reset_admins || [],
+      // HER OWN pending store, not the bridge bot's: an image sent to answer
+      // one bot's prompt must not be worn by the other.
+      pending: this.avatarPending,
+      audit: (r) => this.audit({ ...r, bot: "onboarding" }),
+    });
   }
 
   async joinedMemberCount(roomId) {

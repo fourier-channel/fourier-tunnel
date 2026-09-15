@@ -6,6 +6,7 @@ const { DanbooruClient } = require("./danbooru");
 const { autotag } = require("./autotagger");
 const { extractCreatorTags } = require("./prompt-tags");
 const invites = require("./invites");
+const avatarCapability = require("./capabilities/avatar");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
@@ -92,7 +93,6 @@ const TAG_STATE_TYPE = "net.41chan.media.tags";
 
 // Per-admin pending avatar requests: userId -> expiry epoch ms.
 const avatarPending = new Map();
-const AVATAR_PENDING_MS = 2 * 60 * 1000;
 
 // Count joined members in a room (used to detect DMs = 2 members).
 async function joinedMemberCount(bridge, roomId) {
@@ -705,47 +705,22 @@ async function handleResetCommand(bridge, event) {
   return true;
 }
 
-// Handle avatar-setting flow in a DM from an admin.
-// Returns true if the event was consumed by this handler.
+// The bridge bot's !setavatar, through the shared capability.
+//
+// The body used to live here AND again in onboarding.js, and the two had
+// drifted: the greeter recorded an avatar change in the audit log and this one
+// did not. One implementation now, so a fix reaches both and neither can
+// quietly stop leaving evidence. See capabilities/avatar.js.
 async function handleAvatarFlow(bridge, event) {
-  const sender = event.sender;
-  const roomId = event.room_id;
-  const isAdmin = botAdmins().includes(sender);
-  if (!isAdmin) return false;
-
   const intent = bridge.getIntent();
-  const content = event.content || {};
-
-  // The !setavatar command (text message)
-  if (content.msgtype === "m.text" && content.body && content.body.trim() === "!setavatar") {
-    if ((await joinedMemberCount(bridge, roomId)) !== 2) return false; // DM only
-    avatarPending.set(sender, Date.now() + AVATAR_PENDING_MS);
-    await intent.sendText(roomId, "Send me an image and I'll use it as my avatar (within 2 minutes).");
-    return true;
-  }
-
-  // A following image, if this admin has a live pending request in a DM
-  if (content.msgtype === "m.image") {
-    const expiry = avatarPending.get(sender);
-    if (!expiry) return false;
-    if (Date.now() > expiry) {
-      avatarPending.delete(sender);
-      return false;
-    }
-    if ((await joinedMemberCount(bridge, roomId)) !== 2) return false;
-    const mxc = content.url;
-    if (!mxc) return false;
-    avatarPending.delete(sender);
-    try {
-      await intent.setAvatarUrl(mxc);
-      await intent.sendText(roomId, "Avatar updated.");
-    } catch (e) {
-      await intent.sendText(roomId, "Failed to set avatar: " + e.message);
-    }
-    return true; // consumed -- do not tag
-  }
-
-  return false;
+  return avatarCapability.handleAvatarFlow(event, {
+    setAvatarUrl: (mxc) => intent.setAvatarUrl(mxc),
+    sendText: (room, text) => intent.sendText(room, text),
+    joinedMemberCount: (room) => joinedMemberCount(bridge, room),
+    admins: botAdmins(),
+    pending: avatarPending,
+    audit: invites.audit,
+  });
 }
 
 // BOOT ONLY WHEN RUN AS THE ENTRYPOINT.
