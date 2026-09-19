@@ -294,12 +294,24 @@ function normalizeTerm(raw) {
     .replace(/^[-~*@_]+|_+$/g, "");
 }
 
+// ORIGINAL CHARACTERS. Operator, 2026-09-19: "We use lora-style names for
+// original characters. so (oc_mahogany:0) or (oc_kayla) (with or without the
+// parens) within a prompt is an original character and should be extracted
+// and declared as such." So a term that normalises to oc_<name> -- the
+// weight and the parentheses are gone by then -- is not a creator tag like
+// the rest of the prompt: it is the creator NAMING a character, and it goes
+// in its own list for the booru to put on the post publicly and file as a
+// character. It never counts against `max`.
+const OC_PREFIX = "oc_";
+const OC_NAME = /^oc_[a-z0-9][a-z0-9_'.-]*$/;
+
 // Normalise a freeform prompt into Danbooru-style tags: comma-split, strip
 // weights/brackets/LoRA tokens, lowercase, spaces -> underscores, dedupe. Returns
-// { tags, meta } -- content tags vs quality/meta terms (kept, de-emphasised).
+// { tags, meta, characters } -- content tags, quality/meta terms (kept,
+// de-emphasised), and original characters (oc_<name>).
 function promptToTags(prompt, opts) {
   const max = (opts && opts.max) || 60;
-  const out = { tags: [], meta: [] };
+  const out = { tags: [], meta: [], characters: [] };
   if (!prompt) return out;
   const seen = new Set();
   const cleaned = String(prompt).replace(/<[^>]*>/g, " ").replace(/\bBREAK\b/g, ",");
@@ -309,9 +321,9 @@ function promptToTags(prompt, opts) {
     if (/^[\d_.]+$/.test(t)) continue;
     if (seen.has(t)) continue;
     seen.add(t);
-    if (QUALITY_META.has(t)) out.meta.push(t);
-    else out.tags.push(t);
-    if (out.tags.length >= max) break;
+    if (OC_NAME.test(t)) out.characters.push(t);
+    else if (QUALITY_META.has(t)) out.meta.push(t);
+    else if (out.tags.length < max) out.tags.push(t);
   }
   return out;
 }
@@ -336,7 +348,7 @@ function extractCreatorTags(buffer, contentType, opts) {
   try {
     return promptToTags(rawPrompt(embeddedChunks(buffer, contentType)), opts);
   } catch { /* fail soft */ }
-  return { tags: [], meta: [] };
+  return { tags: [], meta: [], characters: [] };
 }
 
-module.exports = { extractCreatorTags, normalizeTerm, embeddedChunks, pngTextChunks, exifTextFields, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };
+module.exports = { extractCreatorTags, normalizeTerm, OC_PREFIX, OC_NAME, embeddedChunks, pngTextChunks, exifTextFields, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };

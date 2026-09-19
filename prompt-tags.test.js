@@ -48,12 +48,12 @@ test("zTXt (compressed) parameters inflate and read as content", () => {
 });
 
 test("non-AI image (no text chunks) -> empty tags and meta", () => {
-  assert.deepEqual(extractCreatorTags(png([chunk("IEND", Buffer.alloc(0))]), "image/png"), { tags: [], meta: [] });
+  assert.deepEqual(extractCreatorTags(png([chunk("IEND", Buffer.alloc(0))]), "image/png"), { tags: [], meta: [], characters: [] });
 });
 
 test("non-PNG / null bytes -> empty (never throws)", () => {
-  assert.deepEqual(extractCreatorTags(Buffer.from("ffd8ffe0", "hex"), "image/jpeg"), { tags: [], meta: [] });
-  assert.deepEqual(extractCreatorTags(null, ""), { tags: [], meta: [] });
+  assert.deepEqual(extractCreatorTags(Buffer.from("ffd8ffe0", "hex"), "image/jpeg"), { tags: [], meta: [], characters: [] });
+  assert.deepEqual(extractCreatorTags(null, ""), { tags: [], meta: [], characters: [] });
 });
 
 test("promptToTags dedupes content and respects max (meta not counted against max)", () => {
@@ -158,11 +158,11 @@ test("JPEG: the bytes decide, not the declared type", () => {
 });
 
 test("JPEG: no APP1, a truncated segment, and a bogus IFD offset all read as empty, never throw", () => {
-  assert.deepEqual(extractCreatorTags(Buffer.from("ffd8ffda0008000000000000ffd9", "hex"), "image/jpeg"), { tags: [], meta: [] });
+  assert.deepEqual(extractCreatorTags(Buffer.from("ffd8ffda0008000000000000ffd9", "hex"), "image/jpeg"), { tags: [], meta: [], characters: [] });
   const whole = jpeg(tiff({ userComment: ascii(PARAMS) }));
-  assert.deepEqual(extractCreatorTags(whole.subarray(0, 40), "image/jpeg"), { tags: [], meta: [] });
+  assert.deepEqual(extractCreatorTags(whole.subarray(0, 40), "image/jpeg"), { tags: [], meta: [], characters: [] });
   const bad = tiff({ userComment: ascii(PARAMS) }); bad.writeUInt32BE(0x7fffffff, 4);
-  assert.deepEqual(extractCreatorTags(jpeg(bad), "image/jpeg"), { tags: [], meta: [] });
+  assert.deepEqual(extractCreatorTags(jpeg(bad), "image/jpeg"), { tags: [], meta: [], characters: [] });
 });
 
 test("WebP: the EXIF chunk, with and without the Exif header, reads like a JPEG", () => {
@@ -206,4 +206,13 @@ test("normaliser: search operators and handles do not become tags", () => {
   assert.equal(normalizeTerm("~maybe"), "maybe");
   assert.equal(normalizeTerm("tom & jerry"), "tom_&_jerry");
   assert.equal(normalizeTerm("k-on!"), "k-on!");
+});
+
+test("original characters: oc_<name> is extracted on its own, weighted or bare, parenthesised or not", () => {
+  const r = promptToTags("masterpiece, 1girl, (oc_mahogany:0), oc_kayla, (oc_rin), smile, oc_x");
+  assert.deepEqual(r.characters, ["oc_mahogany", "oc_kayla", "oc_rin", "oc_x"]);
+  assert.deepEqual(r.tags, ["1girl", "smile"], "an OC is not also a creator tag");
+  assert.deepEqual(r.meta, ["masterpiece"]);
+  assert.deepEqual(promptToTags("1girl, solo", { max: 1 }).characters, []);
+  assert.deepEqual(promptToTags("oc_a, oc_b, 1girl", { max: 1 }).characters, ["oc_a", "oc_b"], "OCs never count against max");
 });

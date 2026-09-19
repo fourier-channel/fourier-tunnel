@@ -20,7 +20,7 @@ function rig(over = {}) {
     findPostByMd5: async (md5) => (md5 === MD5 ? { id: 7, source: MXC, tag_string: "1girl hilda_(pokemon)" } : null),
     getTagProjection: async () => ({ tags: ["1girl", "hilda_(pokemon)", "highres"], sources: { creator: [], auto: ["1girl"], both: ["hilda_(pokemon)"], meta: ["highres"] } }),
     recordTagSources: async (id, partition) => { written.push([id, partition]); return { post_id: id, recorded: 4 }; },
-    extract: () => ({ tags: ["hilda_(pokemon)", "smile"], meta: ["masterpiece"] }),
+    extract: () => ({ tags: ["hilda_(pokemon)", "smile"], meta: ["masterpiece"], characters: ["oc_kayla"] }),
     sendText: async (room, text) => { sent.push([room, text]); },
     admins: [ADMIN],
     isDm: async () => true,
@@ -42,7 +42,9 @@ test("by mxc: downloads, finds the post by md5, rebuilds the split against the a
   assert.deepEqual(p.auto, ["1girl"]);
   assert.deepEqual(p.meta, ["highres", "masterpiece"]);
   assert.equal(p.replace_creator, true);
+  assert.deepEqual(p.oc, ["oc_kayla"]);
   assert.match(out.report, /Post #7 \(jpeg\): read 2 creator tag/);
+  assert.match(out.report, /Original characters: oc_kayla/);
 });
 
 test("by md5: fetches the bytes from the post's own mxc source", async () => {

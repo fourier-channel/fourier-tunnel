@@ -76,6 +76,7 @@ async function rescan(target, deps) {
   const scraped = extract(buffer, contentType, { max: deps.maxCreatorTags });
   const creatorTags = scraped.tags || [];
   const scrapedMeta = scraped.meta || [];
+  const ocTags = scraped.characters || [];
 
   // The autotagger's rows, from the booru's public projection: auto and both
   // are both the autotagger's, and both is where a creator name meets one.
@@ -93,6 +94,7 @@ async function rescan(target, deps) {
     auto: autoTags.filter((x) => !creatorSet.has(x)),
     both,
     meta: metaTags,
+    oc: ocTags,
     replace_creator: true,
   };
 
@@ -105,9 +107,10 @@ async function rescan(target, deps) {
   }
 
   const kind = (contentType || "").replace(/^image\//, "") || "?";
-  audit({ kind: "rescan", post_id: post.id, md5, content_type: contentType, creator: creatorTags.length, both: both.length, rows: recorded && recorded.recorded });
-  const report = creatorTags.length
-    ? `Post #${post.id} (${kind}): read ${creatorTags.length} creator tag(s) from its metadata, ${both.length} of them also the autotagger's; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} provenance rows now on the post.`
+  audit({ kind: "rescan", post_id: post.id, md5, content_type: contentType, creator: creatorTags.length, both: both.length, oc: ocTags.length, rows: recorded && recorded.recorded });
+  const ocNote = ocTags.length ? ` Original characters: ${ocTags.join(", ")}.` : "";
+  const report = creatorTags.length || ocTags.length
+    ? `Post #${post.id} (${kind}): read ${creatorTags.length} creator tag(s) from its metadata, ${both.length} of them also the autotagger's; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} provenance rows now on the post.${ocNote}`
     : `Post #${post.id} (${kind}): no prompt in these bytes. Its old creator rows, if any, are cleared; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} rows remain.`;
   return { ok: true, report, postId: post.id, partition };
 }

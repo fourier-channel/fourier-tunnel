@@ -368,11 +368,15 @@ async function handleImageEvent(bridge, event) {
     console.warn(`[autotag] fourier-spectrum unavailable, posting untagged: ${err.message}`);
   }
   const autoTags = (derived && derived.tags) || [];
-  let creatorTags = [], metaTags = [];
+  let creatorTags = [], metaTags = [], ocTags = [];
   try {
     const scraped = extractCreatorTags(buffer, contentType, { max: config.autotagger && config.autotagger.max_creator_tags });
     creatorTags = scraped.tags;
     metaTags = scraped.meta;
+    // Original characters (oc_<name>): the creator naming a character. PUBLIC,
+    // unlike the rest of the prompt -- a name is the point of a name -- so
+    // they go into tag_string below and the booru files them as characters.
+    ocTags = scraped.characters || [];
   } catch (err) {
     console.warn(`[creator-tags] prompt scrape failed: ${err.message}`);
   }
@@ -396,7 +400,7 @@ async function handleImageEvent(bridge, event) {
   if (!posterTag) {
     console.warn(`[poster] no artist tag for sender ${event.sender}; posting unattributed`);
   }
-  const publicTags = [...new Set([...autoTags, ...metaTags, ...(posterTag ? [posterTag] : [])])];
+  const publicTags = [...new Set([...autoTags, ...metaTags, ...ocTags, ...(posterTag ? [posterTag] : [])])];
   const rating = (derived && derived.rating) || config.bridge.default_rating;
 
   const post = await danbooru.createPost(uploadMediaAssetId, {
@@ -420,7 +424,7 @@ async function handleImageEvent(bridge, event) {
   // Single write path (the tag hub): hand the FULL partition to the booru. It
   // records it, keeps creator-only tags private, fans out to consumers, and hands
   // back the PUBLIC-SAFE projection we write into the room-public Matrix state.
-  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags };
+  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, oc: ocTags };
   let projection = null;
   try {
     const recorded = await danbooru.recordTagSources(post.id, partition);
@@ -459,7 +463,7 @@ async function handleImageEvent(bridge, event) {
     console.warn(`[tag-state] post #${post.id} was created but its state was refused in ${roomId}: ${err.message}`);
     return "tags-blocked";
   }
-  console.log(`[done] post #${post.id} tagged (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta)`);
+  console.log(`[done] post #${post.id} tagged (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta / ${ocTags.length} oc)`);
   return "posted";
 }
 
