@@ -216,3 +216,16 @@ test("original characters: oc_<name> is extracted on its own, weighted or bare, 
   assert.deepEqual(promptToTags("1girl, solo", { max: 1 }).characters, []);
   assert.deepEqual(promptToTags("oc_a, oc_b, 1girl", { max: 1 }).characters, ["oc_a", "oc_b"], "OCs never count against max");
 });
+
+test("original characters: both shapes, and a weighted token split from the words after it", () => {
+  const r = promptToTags("(ariah_oc:0) white hair, character_oc_mira, (rin_character_oc:1.1), oc, 1girl");
+  assert.deepEqual(r.characters, ["ariah_oc", "character_oc_mira", "rin_character_oc"]);
+  assert.deepEqual(r.tags, ["white_hair", "oc", "1girl"]);
+  assert.deepEqual(promptToTags("(oc_kayla) white hair").characters, ["oc_kayla"], "a leading unweighted group splits too");
+  assert.deepEqual(promptToTags("(oc_kayla) white hair").tags, ["white_hair"]);
+});
+
+test("splitting leaves qualifiers, weights and emphasis exactly as before", () => {
+  assert.deepEqual(promptToTags("hilda (pokemon), (smile:1.2), ((masterpiece)), hilda \\(pokemon\\):1.3").tags, ["hilda_(pokemon)", "smile"]);
+  assert.deepEqual(promptToTags("1girl (smile:1.2) solo").tags, ["1girl", "smile", "solo"]);
+});

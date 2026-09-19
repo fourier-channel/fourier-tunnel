@@ -302,8 +302,46 @@ function normalizeTerm(raw) {
 // the rest of the prompt: it is the creator NAMING a character, and it goes
 // in its own list for the booru to put on the post publicly and file as a
 // character. It never counts against `max`.
+// BOTH SHAPES, prefix and suffix, with or without "character" (operator:
+// "it looks like it might be character_oc ... I'd program in both just to
+// be safe"). Measured in this deployment's own prompts: "(ariah_oc:0)",
+// five times -- the suffix form. Bare "oc" alone is nobody's name.
 const OC_PREFIX = "oc_";
-const OC_NAME = /^oc_[a-z0-9][a-z0-9_'.-]*$/;
+const OC_NAME = /^(?:(?:character_)?oc_[a-z0-9][a-z0-9_'.-]*|[a-z0-9][a-z0-9_'.-]*_(?:character_)?oc)$/;
+
+// A PARENTHESISED TOKEN RUNS INTO THE WORDS AFTER IT. "(ariah_oc:0) white
+// hair" is one comma-separated term in a real prompt: a weighted lora-style
+// token and then a description, no comma between. Normalised as one term it
+// became ariah_oc_white_hair. So a term is first split into pieces: every
+// UNESCAPED parenthesised group that carries a weight, or that leads the
+// term with text after it, is its own piece, and the text around it is
+// another. The one group left alone is a trailing, unweighted "(series)"
+// after a name -- that is a qualifier and normalizeTerm keeps it. Escaped
+// \(...\) never splits: it is part of a Danbooru name.
+const GROUP = /(?<!\\)\(([^()]*?)(?<!\\)\)/g;
+function expandTerm(raw) {
+  const t = String(raw);
+  const groups = [...t.matchAll(GROUP)];
+  if (!groups.length) return [t];
+  const only = groups.length === 1 ? groups[0] : null;
+  if (only) {
+    const before = t.slice(0, only.index), after = t.slice(only.index + only[0].length);
+    const weighted = /:\s*[\d.]+\s*$/.test(only[1]);
+    if (!weighted && before.trim() && !after.trim()) return [t]; // name (series)
+    if (!before.trim() && !after.trim()) return [t];               // (tag:1.2), ((tag))
+  }
+  const pieces = [];
+  let cursor = 0;
+  for (const g of groups) {
+    const before = t.slice(cursor, g.index);
+    if (before.trim()) pieces.push(before);
+    pieces.push(g[0]);
+    cursor = g.index + g[0].length;
+  }
+  const tail = t.slice(cursor);
+  if (tail.trim()) pieces.push(tail);
+  return pieces;
+}
 
 // Normalise a freeform prompt into Danbooru-style tags: comma-split, strip
 // weights/brackets/LoRA tokens, lowercase, spaces -> underscores, dedupe. Returns
@@ -315,7 +353,7 @@ function promptToTags(prompt, opts) {
   if (!prompt) return out;
   const seen = new Set();
   const cleaned = String(prompt).replace(/<[^>]*>/g, " ").replace(/\bBREAK\b/g, ",");
-  for (const raw of cleaned.split(",")) {
+  for (const term of cleaned.split(",")) for (const raw of expandTerm(term)) {
     const t = normalizeTerm(raw);
     if (t.length < 2 || t.length > 60) continue;
     if (/^[\d_.]+$/.test(t)) continue;
@@ -351,4 +389,4 @@ function extractCreatorTags(buffer, contentType, opts) {
   return { tags: [], meta: [], characters: [] };
 }
 
-module.exports = { extractCreatorTags, normalizeTerm, OC_PREFIX, OC_NAME, embeddedChunks, pngTextChunks, exifTextFields, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };
+module.exports = { extractCreatorTags, normalizeTerm, expandTerm, OC_PREFIX, OC_NAME, embeddedChunks, pngTextChunks, exifTextFields, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };
