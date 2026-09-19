@@ -12,6 +12,12 @@ RUN npm install --omit=dev
 # kept out via .dockerignore (*.test.js, dev-autotag.js), so this ships exactly
 # the same set as the old allowlist, but stays correct as modules are added.
 COPY *.js ./
+# The capabilities the bots share (capabilities/avatar.js, rescan.js). A
+# directory, so a new capability rides in the way a new top-level module does.
+# It was missing from this file once: index.js required ./capabilities/rescan,
+# the checkout had it, the image did not, and the bridge crash-looped on
+# MODULE_NOT_FOUND for the minutes it took to read this file (2026-09-19).
+COPY capabilities ./capabilities
 # The operator tools, for the same reason the line above is a glob. They are not
 # on the bridge's own path, but they are how a room gets caught up, and a tool
 # that is not in the image can only be run by bind-mounting code the image does
