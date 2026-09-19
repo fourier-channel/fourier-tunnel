@@ -286,8 +286,12 @@ function normalizeTerm(raw) {
     .replace(/\s*\(\s*/g, "_(").replace(/\s*\)/g, ")")
     .replace(/\s+/g, "_")
     .replace(/_+/g, "_")
-    .replace(/[^a-z0-9_'./:!?&+*=@~()-]/g, "")
-    .replace(/^_+|_+$/g, "");
+    .replace(/[^a-z0-9_'./:!?&+()-]/g, "")
+    // Danbooru's own rule: a tag may not begin with -, ~ or * (they are
+    // search operators), and a leading @ is a handle out of a prompt's
+    // credits, not a tag -- one came through as @h4ra1d2 on the first
+    // production rescan.
+    .replace(/^[-~*@_]+|_+$/g, "");
 }
 
 // Normalise a freeform prompt into Danbooru-style tags: comma-split, strip

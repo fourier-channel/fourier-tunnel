@@ -199,3 +199,11 @@ test("prompt with a qualified character lands as that character's name", () => {
   const r = promptToTags("masterpiece, 1girl, hilda \\(pokemon\\), (smile:1.1), astolfo \\(fate\\)");
   assert.deepEqual(r.tags, ["1girl", "hilda_(pokemon)", "smile", "astolfo_(fate)"]);
 });
+
+test("normaliser: search operators and handles do not become tags", () => {
+  assert.equal(normalizeTerm("@h4ra1d2"), "h4ra1d2");
+  assert.equal(normalizeTerm("-blurry"), "blurry");
+  assert.equal(normalizeTerm("~maybe"), "maybe");
+  assert.equal(normalizeTerm("tom & jerry"), "tom_&_jerry");
+  assert.equal(normalizeTerm("k-on!"), "k-on!");
+});
