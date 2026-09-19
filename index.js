@@ -7,6 +7,7 @@ const { autotag } = require("./autotagger");
 const { extractCreatorTags } = require("./prompt-tags");
 const invites = require("./invites");
 const avatarCapability = require("./capabilities/avatar");
+const rescanCapability = require("./capabilities/rescan");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
@@ -705,6 +706,28 @@ async function handleResetCommand(bridge, event) {
   return true;
 }
 
+// The bridge bot's !rescan, through the shared capability: an admin, in a
+// DM, names an mxc url or an md5, and the image's own metadata is read again
+// and its creator provenance rewritten on the booru. The same deps the CLI
+// (rescan.js) hands it, so the two cannot drift.
+function rescanDeps(bridge) {
+  return {
+    download: (mxc) => downloadFromSynapse(mxc, AS_TOKEN),
+    findPostByMd5: (md5) => danbooru.findPostByMd5(md5),
+    getTagProjection: (id) => danbooru.getTagProjection(id),
+    recordTagSources: (id, partition) => danbooru.recordTagSources(id, partition),
+    extract: extractCreatorTags,
+    maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
+    sendText: (room, text) => bridge.getIntent().sendText(room, text),
+    admins: botAdmins(),
+    isDm: async (room) => (await joinedMemberCount(bridge, room)) === 2,
+    audit: (record) => invites.audit(record),
+  };
+}
+async function handleRescanCommand(bridge, event) {
+  return rescanCapability.handleRescanCommand(event, rescanDeps(bridge));
+}
+
 // The bridge bot's !setavatar, through the shared capability.
 //
 // The body used to live here AND again in onboarding.js, and the two had
@@ -816,6 +839,7 @@ new Cli({
               if (await handleResetCommand(bridge, event)) return;
               if (await handleListRoomsCommand(bridge, event)) return;
               if (await handleBackfillCommand(bridge, event)) return;
+              if (await handleRescanCommand(bridge, event)) return;
               // Avatar-setting flow (admin DM) -- checked before tagging
               if (await handleAvatarFlow(bridge, event)) return;
               // Image tagging
