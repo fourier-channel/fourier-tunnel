@@ -424,7 +424,11 @@ async function handleImageEvent(bridge, event) {
   // Single write path (the tag hub): hand the FULL partition to the booru. It
   // records it, keeps creator-only tags private, fans out to consumers, and hands
   // back the PUBLIC-SAFE projection we write into the room-public Matrix state.
-  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, oc: ocTags };
+  // THE LAMP (operator ruling 2026-09-20): the booru records which MODEL
+  // reported each tag and draws a dot per tag from it. The tunnel has only
+  // ever called spectrum, so everything the autotagger returned -- the
+  // auto-only tags AND the ones the prompt also named -- is spectrum's.
+  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, oc: ocTags, spectrum: [...autoOnly, ...both, ...metaTags] };
   let projection = null;
   try {
     const recorded = await danbooru.recordTagSources(post.id, partition);
