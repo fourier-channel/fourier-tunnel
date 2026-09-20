@@ -123,8 +123,15 @@ class RoomDeniedError extends Error {
 function guard(intent, deps = {}) {
   const denied = deps.isDenied || isDenied;
   return new Proxy(intent, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver);
+    get(target, prop) {
+      // THE RECEIVER IS THE TARGET, NOT THE PROXY, and that is load-bearing.
+      // Reflect.get(target, prop, proxy) runs a getter with `this` bound to
+      // the proxy, and a getter that reads a #private field then throws
+      // "Cannot read private member from an object whose class did not
+      // declare it" -- a whole object bricked by a wrapper that was only ever
+      // meant to intercept method calls. This library's getters happen to use
+      // public fields today, which is not a thing to depend on.
+      const value = Reflect.get(target, prop);
       if (typeof value !== "function" || typeof prop !== "string") return value;
       if (ALWAYS_ALLOWED.has(prop)) return value.bind(target);
       return function (...args) {

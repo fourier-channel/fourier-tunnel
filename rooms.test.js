@@ -151,3 +151,21 @@ test("looksLikeRoomId accepts ids and nothing else", () => {
 });
 
 void guardFor;
+
+test("a getter backed by a private field still works through the guard", () => {
+  // Reflect.get(target, prop, proxy) binds the getter's `this` to the PROXY,
+  // and a #private read then throws -- bricking the whole object with a
+  // wrapper meant only to intercept method calls. Intent has getters.
+  const rooms = require("./rooms");
+  class WithPrivate {
+    #secret = "kept";
+    get exposed() { return this.#secret; }
+    get plain() { return "fine"; }
+    join(room) { return "joined " + room; }
+  }
+  const g = rooms.guard(new WithPrivate(), { isDenied: (r) => r === ROOM });
+  assert.equal(g.exposed, "kept");
+  assert.equal(g.plain, "fine");
+  assert.equal(g.join(OK), "joined " + OK);
+  assert.throws(() => g.join(ROOM), rooms.RoomDeniedError);
+});
