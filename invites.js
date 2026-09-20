@@ -123,6 +123,22 @@ async function handleInvite(event, deps, config) {
 
     audit({ kind: "invite_received", room: roomId, inviter });
 
+    // A room the bot was removed from is not re-entered on an invitation,
+    // however powerful the inviter. The removal was a decision; an invite
+    // that silently overrode it would make the denial worthless, since the
+    // usual way back in IS an invite. Lifting it is deliberate and separate:
+    // "!rejoinroom <id>". The bot leaves rather than lingering as "invited",
+    // because an unanswered invite is a room it might still be dragged into.
+    if (deps.isRoomDenied && deps.isRoomDenied(roomId)) {
+      audit({ kind: "invite_ignored_denied_room", room: roomId, inviter });
+      try {
+        await deps.leave(roomId);
+      } catch (e) {
+        audit({ kind: "invite_denied_room_leave_failed", room: roomId, error: e.message });
+      }
+      return "ignored_denied_room";
+    }
+
     let pl = powerLevelsFromStrippedState(event);
     let joined = false;
 

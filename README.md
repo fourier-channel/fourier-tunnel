@@ -203,6 +203,15 @@ Sender must be in `bridge.admins`.
 - `!listrooms` -- in a DM with the bot; lists the rooms each bot identity is in.
 - `!resetstrikes @user:domain` -- in a DM; clears a user's invite strikes.
 - `!setavatar` -- in a DM; then post an image within 2 minutes.
+- `!leaveroom !id:domain` -- in a DM; the bot leaves that room and will not go
+  back, refusing invites there until the denial is lifted. The everyday way to
+  do this is simply to remove the bot in your client, which records the same
+  denial by itself; this exists for doing it from elsewhere.
+- `!rejoinroom !id:domain` -- in a DM; lifts the denial. It does NOT join: the
+  way back in is still an invite from somebody with the invite power level.
+- `!deniedrooms` -- in a DM; the rooms the bot is deliberately staying out of,
+  with who decided and when. Nothing else can show this, since the list is the
+  only record of a room the bot is not in on purpose.
 - `!join` -- for users: the on-ramp.
 
 ---

@@ -7,6 +7,7 @@ const { autotag } = require("./autotagger");
 const { extractCreatorTags } = require("./prompt-tags");
 const invites = require("./invites");
 const avatarCapability = require("./capabilities/avatar");
+const rooms = require("./rooms");
 const rescanCapability = require("./capabilities/rescan");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
@@ -477,6 +478,7 @@ function inviteDeps(bridge) {
   return {
     join: (roomId) => intent.join(roomId),
     leave: (roomId) => intent.leave(roomId),
+    isRoomDenied: (roomId) => rooms.isDenied(roomId),
     readPowerLevels: (roomId) =>
       intent.getStateEvent(roomId, "m.room.power_levels", ""),
     sendDM: async (userId, text) => {
@@ -593,6 +595,74 @@ async function joinedRoomsFor(userId) {
 
 // Handle the !listrooms admin command. DM-only, like the others: a bot's full
 // room list is not something to print into a room full of people.
+// "!leaveroom <id>", "!rejoinroom <id>", "!deniedrooms" -- admin, DM only.
+//
+// The everyday way to remove the bot is to remove it in a client, which the
+// membership handler above turns into a denial by itself. These exist for
+// doing it from somewhere else, for lifting it again, and for reading the
+// list back -- which nothing else can show, since the list is the only record
+// of a room the bot is deliberately not in.
+async function handleRoomDenyCommands(bridge, event) {
+  const body = event.content && event.content.body;
+  if (!body) return false;
+  const [cmd, arg] = body.trim().split(/\s+/);
+  if (!["!leaveroom", "!rejoinroom", "!deniedrooms"].includes(cmd)) return false;
+
+  const sender = event.sender;
+  const intent = bridge.getIntent();
+  if (!botAdmins().includes(sender)) {
+    invites.audit({ kind: "roomdeny_denied_not_admin", sender, cmd });
+    return true;
+  }
+  if ((await joinedMemberCount(bridge, event.room_id)) !== 2) {
+    invites.audit({ kind: "roomdeny_denied_not_dm", sender, cmd, room: event.room_id });
+    return true;
+  }
+
+  if (cmd === "!deniedrooms") {
+    const list = rooms.listDenied();
+    const text = list.length
+      ? list.map((r) => `${r.room} -- ${r.reason}, by ${r.by}, ${new Date(r.at).toISOString()}`).join("\n")
+      : "No rooms are denied. Removing the bot from a room in your client adds it here.";
+    await intent.sendText(event.room_id, text);
+    return true;
+  }
+
+  if (!rooms.looksLikeRoomId(arg)) {
+    await intent.sendText(event.room_id,
+      `${cmd} needs a room id, like ${cmd} !abcdef:41chan.net. An alias will not do: the list is ` +
+      "kept by id, because that is what an alias can be repointed away from.");
+    return true;
+  }
+
+  if (cmd === "!rejoinroom") {
+    const lifted = rooms.allow(arg);
+    invites.audit({ kind: "room_allowed", room: arg, by: sender, lifted });
+    await intent.sendText(event.room_id, lifted
+      ? `${arg} is no longer denied. It is not joined either -- invite the bot from somebody with ` +
+        "at least the invite power level and it will accept, which is the ordinary door."
+      : `${arg} was not on the list, so nothing changed.`);
+    return true;
+  }
+
+  // !leaveroom: deny FIRST, then leave. The other order leaves a window in
+  // which the leave has happened and the denial has not, and anything that
+  // touched the room in that window would put it straight back.
+  const added = rooms.deny(arg, { by: sender, reason: "!leaveroom" });
+  let left = "already out";
+  try {
+    await intent.leave(arg);
+    left = "left";
+  } catch (e) {
+    left = `could not leave (${e.message.slice(0, 120)})`;
+  }
+  invites.audit({ kind: "room_denied_by_command", room: arg, by: sender, added, left });
+  await intent.sendText(event.room_id,
+    `${arg}: ${left}, and it is now denied${added ? "" : " (it already was)"}. ` +
+    `It will refuse invites there until "!rejoinroom ${arg}".`);
+  return true;
+}
+
 async function handleListRoomsCommand(bridge, event) {
   const body = event.content && event.content.body;
   if (!body || body.trim().split(/\s+/)[0] !== "!listrooms") return false;
@@ -801,6 +871,37 @@ new Cli({
               return;
             }
 
+            // The bot has been REMOVED from a room: it stays out.
+            //
+            // Being kicked or banned is the natural way to say "get out and
+            // do not come back", so it is the gesture that records the
+            // denial -- an involuntary removal gets the same teardown as the
+            // voluntary one. Without this the removal does not stick at all:
+            // the library re-joins before the next send OR READ (see
+            // rooms.js), so the bot reappears without anyone asking it to.
+            if (
+              event.type === "m.room.member" &&
+              event.content &&
+              (event.content.membership === "leave" || event.content.membership === "ban") &&
+              event.state_key === botUserId &&
+              event.sender !== botUserId          // it leaving on its own is not a denial
+            ) {
+              const added = rooms.deny(event.room_id, {
+                by: event.sender,
+                reason: event.content.membership === "ban" ? "banned" : "removed",
+              });
+              invites.audit({ kind: "room_denied_on_removal", room: event.room_id,
+                              by: event.sender, membership: event.content.membership, added });
+              console.log(`[rooms] ${event.sender} removed the bot from ${event.room_id}; ` +
+                          `it will not go back (lift with !rejoinroom ${event.room_id})`);
+              return;
+            }
+
+            // Nothing else happens in a denied room. The guard in rooms.js is
+            // what makes that true even for code paths nobody has thought of;
+            // this just avoids doing the work to reach one.
+            if (event.room_id && rooms.isDenied(event.room_id)) return;
+
             // The bot has ENTERED a room: catch it up on what it missed.
             // Fires on the actual join, so it runs once per entry rather than
             // on every restart. Not awaited -- a room with a long history would
@@ -845,6 +946,7 @@ new Cli({
               if (await handleJoinCommand(bridge, event)) return;
               // Admin reset command (DM only)
               if (await handleResetCommand(bridge, event)) return;
+              if (await handleRoomDenyCommands(bridge, event)) return;
               if (await handleListRoomsCommand(bridge, event)) return;
               if (await handleBackfillCommand(bridge, event)) return;
               if (await handleRescanCommand(bridge, event)) return;
@@ -871,6 +973,16 @@ new Cli({
     });
     const onboarding = new Onboarding(bridge, config, AS_TOKEN, invites.audit);
     console.log(`fourier-tunnel listening on port ${port}`);
+    // EVERY intent, for every bot, comes through here -- index.js and
+    // onboarding.js both call bridge.getIntent() -- so this is the one place
+    // the denied-room guard has to be. Wrapping it here rather than at each
+    // call site means a call site added tomorrow is covered today, which
+    // matters because the thing being guarded (an automatic re-join inside
+    // the library, before reads as well as writes) is invisible at the call
+    // site and always will be.
+    const rawGetIntent = bridge.getIntent.bind(bridge);
+    bridge.getIntent = (...args) => rooms.guard(rawGetIntent(...args));
+
     bridge.run(port).then(async () => {
       try {
         await ensureBotUser(config, _reg);
