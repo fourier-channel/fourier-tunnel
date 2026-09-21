@@ -12,6 +12,14 @@ function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "tunnel-drop-"));
 }
 
+/** A spool root whose queue already exists, as a real deployment's would. */
+function tmpWithQueue(source = "matrix") {
+  const root = tmp();
+  fs.mkdirSync(path.join(root, "_drop", source, "ready"), { recursive: true });
+  fs.mkdirSync(path.join(root, "_drop", source, "staging"), { recursive: true });
+  return root;
+}
+
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32)]);
 
 const good = (over = {}) => Object.assign({
@@ -86,7 +94,7 @@ test("a namespace that could escape its directory is refused", () => {
 });
 
 test("publishing is ONE rename: staging is left empty and ready holds the whole entry", async () => {
-  const root = tmp();
+  const root = tmpWithQueue();
   const { sidecar } = D.buildSidecar(good());
   const r = await D.publish(root, sidecar, PNG);
   assert.equal(r.ok, true);
@@ -100,7 +108,7 @@ test("publishing is ONE rename: staging is left empty and ready holds the whole 
 });
 
 test("re-delivering the same attachment replaces its entry rather than queueing a second", async () => {
-  const root = tmp();
+  const root = tmpWithQueue();
   const { sidecar } = D.buildSidecar(good());
   const a = await D.publish(root, sidecar, PNG);
   const b = await D.publish(root, sidecar, PNG);
@@ -122,7 +130,7 @@ test("re-delivering the same attachment replaces its entry rather than queueing 
 });
 
 test("two attachments on one message get distinct entries", async () => {
-  const root = tmp();
+  const root = tmpWithQueue();
   const one = D.buildSidecar(good({ attachmentRef: "a1" })).sidecar;
   const two = D.buildSidecar(good({ attachmentRef: "a2" })).sidecar;
   await D.publish(root, one, PNG);
@@ -131,7 +139,7 @@ test("two attachments on one message get distinct entries", async () => {
 });
 
 test("an entry with no bytes is refused", async () => {
-  const root = tmp();
+  const root = tmpWithQueue();
   const { sidecar } = D.buildSidecar(good());
   assert.equal((await D.publish(root, sidecar, Buffer.alloc(0))).ok, false);
   assert.equal((await D.publish(root, sidecar, null)).ok, false);
@@ -187,4 +195,36 @@ test("the sidecar schema agrees with fourier-sampling's canon", (t) => {
       `the drain requires ${field} and this writer does not send it -- every entry would be parked`,
     );
   }
+});
+
+// ---- added 2026-09-21, from an adversarial review of this file -------------
+
+test("it REFUSES to create the queue it delivers into", async () => {
+  const root = tmp(); // a spool root with no queue in it
+  const { sidecar } = D.buildSidecar(good());
+  const r = await D.publish(root, sidecar, PNG);
+  // mkdir -p made a wrong root succeed perfectly: a queue appears, every
+  // publish returns ok, and the drain -- looking at the real path -- reports
+  // "waiting 0" and exits 0. Both halves green, zero objects archived.
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /--init/);
+  assert.equal(fs.existsSync(path.join(root, "_drop")), false, "and it must not have created anything");
+});
+
+test("the queue path it writes is the one fourier-sampling reads", () => {
+  const canon = "/home/saber/fourier-sampling/src/drop/dropdir.ts";
+  if (!fs.existsSync(canon)) {
+    console.log("  (skipped: fourier-sampling is not checked out beside this repo; path agreement NOT verified)");
+    return;
+  }
+  // Two repositories that must agree about a directory, shipped independently.
+  // The first version of this writer built <root>/<source> while the drain
+  // built <spool>/_drop/<source>: both correct alone, and together an
+  // undocumented convention a mount can satisfy while pointing elsewhere.
+  const src = fs.readFileSync(canon, "utf8");
+  assert.match(src, /path\.join\(spoolDir, "_drop", source\)/,
+    "the drain no longer builds <spool>/_drop/<source>; this writer must be changed to match it");
+  assert.equal(D.relativeQueuePath("matrix"), path.join("_drop", "matrix", "ready"));
+  const p = D.dropPaths("/spool", "matrix");
+  assert.equal(p.ready, path.join("/spool", "_drop", "matrix", "ready"));
 });

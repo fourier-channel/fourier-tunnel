@@ -73,14 +73,26 @@ function extFor(filename) {
   return ALLOWED_EXT.has(ext) ? ext : null;
 }
 
-function dropPaths(root, source) {
+/**
+ * Where a source's queue lives, derived the SAME WAY the drain derives it.
+ *
+ * `spoolRoot` is the spool, and the "_drop" segment is added here rather than
+ * baked into a mount path. The first version took the queue root directly and
+ * joined only the source, so this side built <root>/<source> while
+ * fourier-sampling built <spool>/_drop/<source>. Both are correct in isolation;
+ * together they are an undocumented convention that a mount can satisfy while
+ * pointing somewhere else entirely -- tunnel writing happily, the drain
+ * reporting "waiting 0", and nothing archived. An adversarial review found it,
+ * and dropPathsAgree() below is the test that keeps the two in step.
+ */
+function dropPaths(spoolRoot, source) {
   if (!/^[a-z0-9-]{1,32}$/.test(source)) {
     throw new Error(
       `refusing a drop source named ${JSON.stringify(source)}: it must match /^[a-z0-9-]{1,32}$/. ` +
       "A source name becomes a path segment and free text must never build a path.",
     );
   }
-  const base = path.join(root, source);
+  const base = path.join(spoolRoot, "_drop", source);
   return {
     root: base,
     staging: path.join(base, "staging"),
@@ -168,17 +180,39 @@ function entryId(messageRef, attachmentRef) {
  *
  * Returns { ok: true, id, dir } or { ok: false, reason }.
  */
-async function publish(root, sidecar, bytes) {
+async function publish(spoolRoot, sidecar, bytes) {
   if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
     return { ok: false, reason: "refusing to publish an entry with no bytes" };
   }
-  const p = dropPaths(root, sidecar.source);
+  const p = dropPaths(spoolRoot, sidecar.source);
   const id = entryId(sidecar.message_ref, sidecar.attachment_ref);
   const staged = path.join(p.staging, id);
   const live = path.join(p.ready, id);
+
+  // IT DOES NOT CREATE THE QUEUE IT DELIVERS INTO.
+  //
+  // mkdir -p made a wrong root succeed perfectly: a queue appears, every
+  // publish returns ok, and the drain -- looking at the real path -- reports
+  // "waiting 0" and exits 0. Both halves green, zero objects archived. The
+  // drain refuses to create what it drains for exactly this reason; the writer
+  // has the same duty on its side, and its failure is worse because it looks
+  // like success per image rather than once per pass.
+  try {
+    const st = await fs.stat(p.ready);
+    if (!st.isDirectory()) throw new Error("not a directory");
+  } catch {
+    return {
+      ok: false,
+      reason:
+        `no drop queue at ${p.ready}. This writer does NOT create it, because creating it on demand makes a ` +
+        "wrong root indistinguishable from a working one -- entries land inside the container and vanish with " +
+        "it while every publish reports success. Check the bind mount, and have fourier-sampling create the " +
+        "queue with: node tools/drop-drain.ts --source " + sidecar.source + " --init",
+    };
+  }
+
   try {
     await fs.mkdir(p.staging, { recursive: true });
-    await fs.mkdir(p.ready, { recursive: true });
     await fs.rm(staged, { recursive: true, force: true });
     await fs.mkdir(staged, { recursive: true });
     await fs.writeFile(path.join(staged, "bytes"), bytes);
@@ -221,7 +255,8 @@ async function publish(root, sidecar, bytes) {
  * them, and no error anywhere. fourier-sampling's drain refuses to create the
  * queue it drains for the same reason, from the same incident.
  */
-async function mountLooksReal(root) {
+async function mountLooksReal(spoolRoot) {
+  const root = spoolRoot;
   try {
     const st = await fs.stat(root);
     if (!st.isDirectory()) return { ok: false, reason: `${root} exists but is not a directory` };
@@ -244,7 +279,19 @@ async function mountLooksReal(root) {
   return { ok: true };
 }
 
+/**
+ * The path construction, exported so a test can compare it with the drain's.
+ *
+ * Two repositories that must agree about a directory, shipped independently:
+ * the same shape of problem the schema version guards, and it needs the same
+ * kind of check rather than a comment on each side saying what it assumed.
+ */
+function relativeQueuePath(source) {
+  return path.join("_drop", source, "ready");
+}
+
 module.exports = {
+  relativeQueuePath,
   DROP_SCHEMA_VERSION,
   ALLOWED_EXT,
   normalizeExt,

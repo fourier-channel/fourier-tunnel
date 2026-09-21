@@ -312,10 +312,16 @@ test("stop() closes deliberately and does NOT reconnect", async () => {
 
   client.stop();
   await flush();
-  await timers.run();
+  // MEASURED BEFORE run(), which is the whole correction. run() fires and
+  // deletes pending timeouts, so asserting size 0 afterwards is trivially true
+  // and cannot fail -- an adversarial review found that this assertion had no
+  // teeth, and it was right: removing the firstBeatTimer cleanup entirely still
+  // passed it.
+  assert.equal(timers.size(), 0, "stop() must leave NO timer pending, including the jittered first beat");
   assert.equal(ws.closed.code, 1000, "a deliberate close, which Discord distinguishes from a fault");
+
+  await timers.run();
   assert.equal(FakeSocket.opened.length, 1, "no reconnect after a deliberate stop");
-  assert.equal(timers.size(), 0);
 });
 
 test("the token never reaches the log", async () => {

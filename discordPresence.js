@@ -72,7 +72,15 @@ class PresenceClient {
    */
   constructor(opts) {
     this.opts = opts;
-    this.log = opts.log || (() => {});
+    // NOT A NO-OP BY DEFAULT. A presence client that gives up silently is a bot
+    // that is simply offline, which is the state it exists to prevent and the
+    // one nobody investigates. A caller that wants silence passes a no-op
+    // deliberately; forgetting to pass one must not buy it.
+    this.log = opts.log || ((level, msg, fields) => {
+      if (level === "error" || level === "warn") {
+        console.error(`[presence] ${level}: ${msg}${fields ? " " + JSON.stringify(fields) : ""}`);
+      }
+    });
     this.timers = opts.timers || { setTimeout, clearTimeout, setInterval, clearInterval };
     this.now = opts.now || Date.now;
 
@@ -211,7 +219,15 @@ class PresenceClient {
 
   #onHello(d) {
     const interval = d && d.heartbeat_interval;
-    if (!interval) return;
+    if (!interval) {
+      // Returning silently here skipped the IDENTIFY as well as the heartbeat,
+      // so the socket sat open, authenticated by nothing, until the hello
+      // deadline closed it 30 seconds later with a reason that named the wrong
+      // thing. Say what actually happened.
+      this.log("warn", "HELLO carried no heartbeat_interval; closing rather than running unauthenticated and unheartbeated");
+      this.#closeWith(CLOSE_ZOMBIE, "hello without heartbeat_interval");
+      return;
+    }
     // The documented jittered first beat, so a fleet does not beat in lockstep.
     this.firstBeatTimer = this.timers.setTimeout(() => {
       this.firstBeatTimer = null;
