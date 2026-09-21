@@ -39,6 +39,19 @@ const OP_INVALID_SESSION = 9;
 const OP_HELLO = 10;
 const OP_HEARTBEAT_ACK = 11;
 
+/**
+ * How long a socket may stay open without saying HELLO before it is treated as
+ * dead. Discord sends HELLO immediately on connect, so anything approaching
+ * this is already wrong.
+ */
+const HELLO_DEADLINE_MS = 30_000;
+
+/**
+ * Consecutive resumes that never reach RESUMED before the session is discarded.
+ * Resuming is free of budget but not free of connections.
+ */
+const MAX_RESUMES_WITHOUT_SUCCESS = 5;
+
 /** Close codes this client sends. Never 1000/1001 for a fault: Discord treats those as deliberate. */
 const CLOSE_ZOMBIE = 4000;
 const CLOSE_SHUTDOWN = 1000;
@@ -73,6 +86,10 @@ class PresenceClient {
      * cancelled: after stop() it would fire on a closed socket and start an
      * interval nothing owns. Found by the shutdown test, not by reading. */
     this.firstBeatTimer = null;
+    /** Watches for a socket that opens and never speaks. */
+    this.helloTimer = null;
+    /** Consecutive resumes that never reached RESUMED. */
+    this.resumesWithoutSuccess = 0;
     this.awaitingAck = false;
     this.attempt = 0;
     this.ready = false;
@@ -110,12 +127,29 @@ class PresenceClient {
     // OPENED. Recording afterwards loses every attempt that crashed in between,
     // and undercounting is the direction that empties the budget while the
     // ledger still says there is room.
-    const check = await this.opts.budget.check(this.now());
+    let check;
+    try {
+      check = await this.opts.budget.check(this.now());
+    } catch (err) {
+      // An unreadable ledger is NOT an empty one. Crashing out of an async
+      // handler here would leave an unhandled rejection and a client that is
+      // simply gone, which is the state presence exists to prevent.
+      this.#giveUp(`the identify ledger could not be read, so connecting is refused: ${err.message}`);
+      return;
+    }
     if (!check.ok) {
       this.#giveUp(check.reason);
       return;
     }
-    await this.opts.budget.record(this.now(), "identify");
+    try {
+      await this.opts.budget.record(this.now(), "identify");
+    } catch (err) {
+      // Refusing here is the safe direction. An identify we could not record is
+      // an identify the NEXT run will not count, and undercounting is what
+      // empties a budget whose exhaustion resets the token.
+      this.#giveUp(`the identify could not be recorded in the ledger, so it was NOT sent: ${err.message}. Fix the path or free space, then restart.`);
+      return;
+    }
     this.log("info", "identifying", { remaining: check.remaining - 1 });
     return this.#open(url, { resume: false });
   }
@@ -128,6 +162,19 @@ class PresenceClient {
     this.awaitingAck = false;
     const ws = new WS(full);
     this.ws = ws;
+
+    // A SOCKET THAT NEVER SAYS HELLO. The zombie detector only starts once a
+    // heartbeat interval is known, so before HELLO there was nothing watching
+    // at all: a connection that opened and went silent would sit forever with
+    // no timer, no log and no error -- offline, and looking like nothing had
+    // gone wrong. This is the window that had no window.
+    this.helloTimer = this.timers.setTimeout(() => {
+      this.helloTimer = null;
+      if (this.stopped || this.ws !== ws) return;
+      if (this.heartbeatTimer !== null || this.firstBeatTimer !== null) return; // HELLO arrived
+      this.log("warn", "no HELLO within the deadline; closing and letting the reconnect path decide");
+      this.#closeWith(CLOSE_ZOMBIE, "no hello");
+    }, HELLO_DEADLINE_MS);
 
     ws.addEventListener("message", (ev) => this.#onMessage(ev));
     ws.addEventListener("close", (ev) => { void this.#onClose(ev); });
@@ -216,6 +263,7 @@ class PresenceClient {
       this.resumeUrl = d.resume_gateway_url || this.opts.gatewayUrl;
       this.ready = true;
       this.attempt = 0;
+      this.resumesWithoutSuccess = 0;
       await this.#saveSession();
       this.log("info", "ready", { user: (d.user && d.user.username) || "?", guilds: Array.isArray(d.guilds) ? d.guilds.length : 0 });
       return;
@@ -223,6 +271,7 @@ class PresenceClient {
     if (p.t === "RESUMED") {
       this.ready = true;
       this.attempt = 0;
+      this.resumesWithoutSuccess = 0;
       await this.#saveSession();
       this.log("info", "resumed -- no identify was spent");
     }
@@ -280,10 +329,27 @@ class PresenceClient {
 
     this.attempt += 1;
     if (d.action === "resume") {
-      this.log("info", "reconnecting to resume", { code, why: d.why });
+      // BOUNDED. A resume costs no budget, which made an unbounded fixed retry
+      // look free -- but a server that accepts a socket and drops it produces a
+      // hot loop against Discord either way. After enough resumes that never
+      // reach RESUMED, the session is not coming back: drop it and fall through
+      // to the budget-gated identify path on the next close.
+      this.resumesWithoutSuccess = (this.resumesWithoutSuccess || 0) + 1;
+      if (this.resumesWithoutSuccess > MAX_RESUMES_WITHOUT_SUCCESS) {
+        this.log("warn", "resumes are not succeeding; discarding the session and identifying instead", { tried: this.resumesWithoutSuccess });
+        this.sessionId = null;
+        this.resumeUrl = null;
+        await this.opts.sessions.clear().catch(() => {});
+        this.reconnectTimer = this.timers.setTimeout(() => {
+          if (!this.stopped) void this.#identifyAndOpen(this.opts.gatewayUrl);
+        }, d.delayMs || 5_000);
+        return;
+      }
+      const delayMs = typeof d.delayMs === "number" ? d.delayMs : 1_000;
+      this.log("info", "reconnecting to resume", { code, why: d.why, delayMs });
       this.reconnectTimer = this.timers.setTimeout(() => {
         if (!this.stopped) this.#open(d.url, { resume: true });
-      }, 1_000);
+      }, delayMs);
       return;
     }
 
@@ -305,6 +371,7 @@ class PresenceClient {
   }
 
   #clearTimers() {
+    if (this.helloTimer !== null) { this.timers.clearTimeout(this.helloTimer); this.helloTimer = null; }
     if (this.firstBeatTimer !== null) { this.timers.clearTimeout(this.firstBeatTimer); this.firstBeatTimer = null; }
     if (this.heartbeatTimer !== null) { this.timers.clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
     if (this.reconnectTimer !== null) { this.timers.clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }

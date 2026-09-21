@@ -65,9 +65,17 @@ function fakeTimers() {
     clearTimeout: (id) => pending.delete(id),
     setInterval: (fn, ms) => { const id = next++; pending.set(id, { fn, ms, kind: "interval" }); return id; },
     clearInterval: (id) => pending.delete(id),
-    /** Run every pending timeout once, and each interval `times` times. */
-    async run(times = 1) {
+    /**
+     * Run every pending timeout once, and each interval `times` times.
+     *
+     * `withinMs` fires ONLY timers whose delay is at or under it. Without that
+     * bound a fake timer ignores its own delay, so a test can assert that a
+     * deadline exists but never that its VALUE is right -- and mutating the
+     * deadline to eleven days would not fail a thing. Found by mutating it.
+     */
+    async run(times = 1, withinMs = Infinity) {
       for (const [id, e] of [...pending]) {
+        if (e.ms > withinMs) continue;
         if (e.kind === "timeout") { pending.delete(id); await e.fn(); }
         else for (let i = 0; i < times; i++) { if (pending.has(id)) await e.fn(); }
       }
@@ -323,4 +331,96 @@ test("the token never reaches the log", async () => {
 
   const text = JSON.stringify(logs);
   assert.equal(text.includes(TOKEN), false, "a presence client holding a live credential must never log it");
+});
+
+// ---- added 2026-09-21, from an adversarial review of this file -------------
+
+test("a socket that opens and never says HELLO is closed, not left hanging", async () => {
+  const { client, timers } = rig();
+  await client.start();
+  const ws = FakeSocket.opened[0];
+  // No HELLO. Before this deadline existed there was nothing watching at all:
+  // the zombie detector only starts once a heartbeat interval is known, so a
+  // connection that opened and went silent sat forever with no timer, no log
+  // and no error -- offline, and looking like nothing had gone wrong.
+  assert.equal(ws.closed, null);
+  // Only timers due within a minute. A deadline longer than that is not a
+  // deadline for a server that sends HELLO immediately on connect -- and
+  // without this bound the assertion held even against an eleven-day one.
+  await timers.run(1, 60_000);
+  assert.ok(ws.closed, "the hello deadline must close it, and must be short enough to matter");
+  assert.equal(ws.closed.code, 4000, "and not with 1000/1001, which Discord reads as deliberate");
+});
+
+test("the hello deadline does not fire once HELLO has arrived", async () => {
+  const { client, timers } = rig();
+  await client.start();
+  const ws = FakeSocket.opened[0];
+  ws.deliver(hello(1000));
+  ws.deliver(ready());
+  await flush();
+  await timers.run();      // the jittered first beat, not the hello deadline
+  assert.equal(ws.closed, null, "a healthy connection must not be closed by the deadline");
+});
+
+test("resumes that never succeed give up on the session rather than looping forever", async () => {
+  const { client, timers, dir } = rig();
+  await client.opts.sessions.save({ session_id: "sess-x", resume_gateway_url: "wss://resume.example/", seq: 5 });
+  await client.start();
+
+  // Every attempt opens, is dropped, and never reaches RESUMED. A resume costs
+  // no budget, which made an unbounded fixed retry look free -- but a hot loop
+  // against Discord is a hot loop whether or not it spends the budget.
+  let identified = false;
+  for (let i = 0; i < 10 && !identified; i++) {
+    const ws = FakeSocket.opened[FakeSocket.opened.length - 1];
+    ws.deliver(hello());
+    if (ws.payloadFor(2)) { identified = true; break; }
+    ws.drop(4000);
+    await flush();
+    await timers.run();
+  }
+  assert.ok(identified, "after enough failed resumes it must discard the session and identify");
+  assert.equal(fs.existsSync(path.join(dir, "session.json")), false, "and the dead session must be cleared");
+});
+
+test("a ledger that cannot be READ refuses to connect, and says so", async () => {
+  const dir = tmp();
+  // A directory where the ledger file should be.
+  const asDirectory = path.join(dir, "identify.jsonl");
+  fs.mkdirSync(asDirectory);
+  let stoppedWith = null;
+  const { client } = rig({
+    budget: new G.IdentifyBudget(asDirectory),
+    onStopped: (r) => { stoppedWith = r; },
+  });
+
+  // Must not throw out of an async handler: an unhandled rejection leaves a
+  // client that is simply gone, which is the state presence exists to prevent.
+  await client.start();
+  assert.equal(FakeSocket.opened.length, 0, "no socket may be opened");
+  assert.ok(stoppedWith, "and it must say why");
+  assert.match(stoppedWith, /could not be read/);
+});
+
+test("a ledger that READS but cannot be WRITTEN refuses to send the identify", async () => {
+  // A SEPARATE TEST because the read failure masked this one entirely: the
+  // first version used an unreadable path, check() threw first, and the record
+  // path it claimed to cover was never reached. Mutating the record guard away
+  // did not fail it. Found by mutation, not by reading.
+  let stoppedWith = null;
+  const { client } = rig({
+    budget: {
+      check: async () => ({ ok: true, remaining: 900, waitMs: 0 }),
+      record: async () => { throw new Error("ENOSPC: no space left on device"); },
+    },
+    onStopped: (r) => { stoppedWith = r; },
+  });
+
+  await client.start();
+  // An identify we could not record is one the NEXT run will not count, and
+  // undercounting is what empties a budget whose exhaustion resets the token.
+  assert.equal(FakeSocket.opened.length, 0, "the identify must NOT be sent");
+  assert.ok(stoppedWith, "and it must say why");
+  assert.match(stoppedWith, /could not be recorded/);
 });

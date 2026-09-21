@@ -94,15 +94,67 @@ test("an unchecked budget is not a permissive one", () => {
   assert.equal(d.action, "stop");
 });
 
-test("backoff has a hard floor above the rate that would exhaust the budget", () => {
-  // 1000 identifies a day is one per 86.4s. Anything faster than the floor is a
-  // bug, not a tuning choice -- so the floor is checkable rather than a comment.
+// SUPERSEDED 2026-09-21. This was titled "backoff has a hard floor above the
+// rate that would exhaust the budget" and then asserted backoffMs(0) === 5_000
+// -- five seconds, against an exhausting rate of one per 86.4s. It asserted the
+// OPPOSITE of the property its title claimed, and could never have failed for
+// it. An adversarial review found it; doctrine rule 2 is that a test which has
+// never failed has proven nothing, and this one could not.
+//
+// The real defence is not the ladder. attempt legitimately resets when a
+// connection succeeds, so a server that accepts, sends READY and drops resets
+// it every cycle and the ladder never grows. The spacing below is derived from
+// the LEDGER instead, which no in-memory reset and no restart can defeat.
+test("the ladder is a ladder, and it is NOT what bounds the sustained rate", () => {
   assert.equal(G.backoffMs(0), 5_000);
-  assert.equal(G.backoffMs(1), 10_000);
   assert.equal(G.backoffMs(2), 20_000);
-  // And a ceiling, so a long outage does not back off into next week.
-  assert.equal(G.backoffMs(50), 300_000);
-  for (let a = 0; a < 20; a++) assert.ok(G.backoffMs(a) >= 5_000);
+  assert.equal(G.backoffMs(50), 300_000, "a ceiling, so a long outage does not back off into next week");
+  // Stated plainly so nobody mistakes the ladder for the budget defence again:
+  assert.ok(G.backoffMs(0) < G.MIN_IDENTIFY_SPACING_MS, "the ladder floor is BELOW the safe rate on purpose; the ledger is what enforces it");
+});
+
+test("the minimum spacing is genuinely below the rate that exhausts the budget", () => {
+  // 1000 per 24h is one per 86.4s. The spacing must be slower than that, with
+  // margin, or a sustained loop empties the budget however the ladder behaves.
+  const exhausting = G.WINDOW_MS / G.DEFAULT_CAP;
+  assert.ok(G.MIN_IDENTIFY_SPACING_MS > exhausting, `spacing ${G.MIN_IDENTIFY_SPACING_MS}ms must exceed ${exhausting}ms`);
+  const sustainedPerDay = G.WINDOW_MS / G.MIN_IDENTIFY_SPACING_MS;
+  assert.ok(sustainedPerDay < G.DEFAULT_CAP, `a sustained loop would reach ${sustainedPerDay}/day, under the ${G.DEFAULT_CAP} cap`);
+});
+
+test("the ledger spacing survives an attempt counter that keeps resetting", async () => {
+  // THE FAILURE THIS EXISTS FOR, and the one the old test could not see: a
+  // gateway that accepts, READYs and drops resets attempt every cycle, so the
+  // ladder is permanently at its floor. The spacing must hold anyway.
+  const dir = tmp();
+  const b = new G.IdentifyBudget(path.join(dir, "i.jsonl"));
+  await b.record(NOW, "identify");
+  const check = await b.check(NOW + 5_000);
+  const d = G.decide({ closeCode: 4009, session: null, budget: check, attempt: 0 });
+  assert.equal(d.action, "identify");
+  assert.equal(d.ladderMs, 5_000, "the ladder is at its floor, as it would be after a reset");
+  assert.ok(d.delayMs >= 115_000, `but the delay is the spacing, not the ladder: got ${d.delayMs}`);
+});
+
+test("waitMs falls to zero once enough time has passed", async () => {
+  const dir = tmp();
+  const b = new G.IdentifyBudget(path.join(dir, "i.jsonl"));
+  assert.equal(await b.waitMs(NOW), 0, "an empty ledger imposes no wait");
+  await b.record(NOW, "identify");
+  assert.equal(await b.waitMs(NOW), G.MIN_IDENTIFY_SPACING_MS);
+  assert.equal(await b.waitMs(NOW + G.MIN_IDENTIFY_SPACING_MS), 0);
+});
+
+test("resumes back off too, on their own cheaper ladder", () => {
+  // A resume costs no budget, which made an unbounded fixed retry look free.
+  // A server that accepts a socket and drops it produces a hot loop against
+  // Discord either way, and free is not the same as harmless.
+  assert.equal(G.resumeBackoffMs(0), 1_000);
+  assert.equal(G.resumeBackoffMs(2), 4_000);
+  assert.equal(G.resumeBackoffMs(50), 30_000, "and it is bounded");
+  const d = G.decide({ closeCode: 4000, session: session(), budget: okBudget, attempt: 3 });
+  assert.equal(d.action, "resume");
+  assert.equal(d.delayMs, 8_000, "the decision carries the delay rather than leaving the caller to invent one");
 });
 
 test("the ledger counts only identifies inside the rolling window", async () => {

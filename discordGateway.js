@@ -59,6 +59,27 @@ const DEFAULT_CAP = 1000;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * The MINIMUM gap between two identifies, enforced from the LEDGER.
+ *
+ * cap/window is one identify every 86.4s; anything faster than that is, on a
+ * sustained basis, a plan to exhaust the budget. 120s leaves 720/day against a
+ * cap of 1000 -- margin for the bursts a real outage produces without ever
+ * approaching the number that resets the token.
+ *
+ * WHY THIS AND NOT A BIGGER BACKOFF FLOOR. The backoff is keyed on an in-memory
+ * attempt counter, and attempt legitimately resets when a connection succeeds.
+ * So a server that accepts, sends READY, and drops -- an ordinary gateway
+ * outage -- resets the counter every cycle and the backoff never grows. An
+ * adversarial review found exactly that: a 5s floor and a resetting counter
+ * together produce one identify every five seconds indefinitely, which spends a
+ * whole day's budget in about 79 minutes.
+ *
+ * Deriving the spacing from the ledger instead makes it immune to that, and to
+ * a crash-restart loop, because the ledger is on disk and the counter is not.
+ */
+const MIN_IDENTIFY_SPACING_MS = 120_000;
+
+/**
  * The on-disk IDENTIFY ledger.
  *
  * Append-only lines of {at}. Append-only because a rewrite has a window where
@@ -71,6 +92,7 @@ class IdentifyBudget {
     this.cap = opts.cap === undefined ? DEFAULT_CAP : opts.cap;
     this.floor = opts.floor === undefined ? DEFAULT_FLOOR : opts.floor;
     this.windowMs = opts.windowMs === undefined ? WINDOW_MS : opts.windowMs;
+    this.spacingMs = opts.spacingMs === undefined ? MIN_IDENTIFY_SPACING_MS : opts.spacingMs;
   }
 
   /** Every identify in the rolling window. Re-read from disk on every call. */
@@ -101,6 +123,19 @@ class IdentifyBudget {
   }
 
   /**
+   * How long to wait before another identify may be sent, from the ledger.
+   *
+   * 0 when enough time has passed. This is the absolute rate limit, and it is
+   * the one that survives both a resetting attempt counter and a restart.
+   */
+  async waitMs(now) {
+    const at = await this.spent(now);
+    if (at.length === 0) return 0;
+    const newest = Math.max(...at);
+    return Math.max(0, this.spacingMs - (now - newest));
+  }
+
+  /**
    * Record an identify. CALL THIS BEFORE SENDING ONE.
    *
    * fsync'd, because the whole point is that it survives the crash that the
@@ -120,7 +155,7 @@ class IdentifyBudget {
   /** May we identify right now? Never throws for a spent budget -- it reports. */
   async check(now) {
     const remaining = await this.remaining(now);
-    if (remaining > this.floor) return { ok: true, remaining };
+    if (remaining > this.floor) return { ok: true, remaining, waitMs: await this.waitMs(now) };
     return {
       ok: false,
       remaining,
@@ -204,6 +239,11 @@ function decide(input) {
       url: session.resume_gateway_url,
       session_id: session.session_id,
       seq: session.seq,
+      // RESUMES BACK OFF TOO, on their own shorter ladder. They cost no budget,
+      // which made an unbounded fixed retry look free -- but a server that
+      // accepts a socket and drops it produces an unbounded hot loop against
+      // Discord either way, and "free" is not the same as "harmless".
+      delayMs: resumeBackoffMs(attempt || 0),
       // Resuming does NOT spend an identify, which is why it is always tried
       // first when the session might still be alive.
       spendsBudget: false,
@@ -218,12 +258,29 @@ function decide(input) {
     };
   }
 
+  // The delay is the LARGER of the ladder and the ledger-derived spacing. The
+  // ladder handles a burst; the spacing is what stops a sustained loop, and it
+  // is the half that cannot be defeated by a resetting counter or a restart.
+  const ladder = backoffMs(attempt || 0);
+  const spacing = (budget && typeof budget.waitMs === "number") ? budget.waitMs : 0;
   return {
     action: "identify",
-    delayMs: backoffMs(attempt || 0),
+    delayMs: Math.max(ladder, spacing),
+    ladderMs: ladder,
+    spacingMs: spacing,
     spendsBudget: true,
     why: sessionDead ? `the session is gone (close ${closeCode})` : "no saved session to resume",
   };
+}
+
+/**
+ * Backoff between RESUME attempts. Cheaper than identify because a resume
+ * spends no budget, but bounded because a hot loop is a hot loop.
+ */
+function resumeBackoffMs(attempt) {
+  const FLOOR = 1_000;
+  const CEILING = 30_000;
+  return Math.min(FLOOR * Math.pow(2, Math.max(0, attempt)), CEILING);
 }
 
 /**
@@ -245,6 +302,8 @@ function backoffMs(attempt) {
 }
 
 module.exports = {
+  resumeBackoffMs,
+  MIN_IDENTIFY_SPACING_MS,
   IdentifyBudget,
   SessionStore,
   decide,
