@@ -605,10 +605,16 @@ class Onboarding {
     });
   }
 
+  // Counted through the RAW client, which never joins. The library Intent's
+  // roomState() calls _ensureJoined() first, and when her join is refused it has
+  // the courier INVITE her and try again -- so asking "is this a DM?" about
+  // somebody else's DM put her in it. An admin's "!setavatar" to @tunnel did
+  // exactly that on 2026-09-24 (bug-20260925-7434f348): three members, and both
+  // avatar flows refused. A room she is not in answers -1, which is "not a DM".
   async joinedMemberCount(roomId) {
     try {
-      const state = await this.intent().roomState(roomId);
-      return state.filter((e) => e.type === "m.room.member" && e.content.membership === "join").length;
+      const members = await this.intent().matrixClient.getJoinedRoomMembers(roomId);
+      return Array.isArray(members) ? members.length : -1;
     } catch {
       return -1;
     }
