@@ -30,12 +30,12 @@ const TOKEN = "NOT.A.REAL.TOKEN";
 // transport: every decision it exercises comes from discordGateway.js, which is
 // tested as the pure function it is.
 class FakeSocket {
-  constructor(url) {
+  constructor(url, opened = FakeSocket.opened) {
     this.url = url;
     this.sent = [];
     this.closed = null;
     this.listeners = { message: [], close: [], error: [] };
-    FakeSocket.opened.push(this);
+    opened.push(this);
   }
   addEventListener(ev, fn) { this.listeners[ev].push(fn); }
   send(data) { this.sent.push(JSON.parse(data)); }
@@ -87,7 +87,14 @@ function fakeTimers() {
 }
 
 function rig(over = {}) {
-  FakeSocket.opened = [];
+  // EACH RIG COUNTS ONLY ITS OWN SOCKETS. A client from an earlier test can
+  // still be finishing a disk read when the next test starts; it used to push
+  // its socket into the one global list after this rig had reset it, and "no
+  // socket may be opened" then failed about 2 runs in 5 for a socket that was
+  // not this test's. The socket class is bound to this rig's list instead.
+  const opened = [];
+  FakeSocket.opened = opened;
+  class RigSocket extends FakeSocket { constructor(url) { super(url, opened); } }
   const dir = tmp();
   const timers = fakeTimers();
   const logs = [];
@@ -97,7 +104,7 @@ function rig(over = {}) {
     budget: new G.IdentifyBudget(path.join(dir, "identify.jsonl")),
     sessions: new G.SessionStore(path.join(dir, "session.json")),
     status: "online",
-    WebSocketImpl: FakeSocket,
+    WebSocketImpl: RigSocket,
     timers,
     now: () => Date.parse("2026-09-21T06:00:00.000Z"),
     log: (level, msg, fields) => logs.push({ level, msg, fields }),
