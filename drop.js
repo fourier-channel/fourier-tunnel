@@ -171,32 +171,45 @@ function entryId(messageRef, attachmentRef) {
 }
 
 /**
- * PUBLISH one entry, atomically.
+ * PUBLISH one entry, atomically -- any entry, not only media.
  *
  * Builds the whole entry under staging/ where nothing scans, then moves it into
- * ready/ with ONE rename. rename(2) within a filesystem is atomic, so the drain
+ * ready/ with ONE rename. rename(2) within a filesystem is atomic, so a reader
  * sees the entry whole or not at all -- there is no half-built state for a scan
  * to trip over, and no suffix convention for a reader to remember.
  *
- * Returns { ok: true, id, dir } or { ok: false, reason }.
+ * EVERY FILE AND BOTH DIRECTORIES ARE FSYNCED BEFORE IT RETURNS. A caller that
+ * tells a person "filed" on the strength of this return has made a promise
+ * about the disk, not about the page cache: without the syncs a crash after the
+ * reply could leave a published directory holding a zero-length file, and the
+ * person would have been told something false.
+ *
+ * `files` maps a plain file name to its bytes, written in the order given.
+ * Returns { ok: true, id, dir, alreadyQueued } or { ok: false, reason }.
  */
-async function publish(spoolRoot, sidecar, bytes) {
-  if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
-    return { ok: false, reason: "refusing to publish an entry with no bytes" };
+async function publishEntry(root, source, id, files, opts = {}) {
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+    return { ok: false, reason: `refusing entry id ${JSON.stringify(id)}: it must match /^[A-Za-z0-9_-]{1,64}$/` };
   }
-  const p = dropPaths(spoolRoot, sidecar.source);
-  const id = entryId(sidecar.message_ref, sidecar.attachment_ref);
+  const names = Object.keys(files || {});
+  if (names.length === 0 || names.some((n) => !/^[a-z][a-z0-9._-]{0,31}$/.test(n))) {
+    return { ok: false, reason: `refusing entry ${id}: it needs at least one plainly named file` };
+  }
+  if (names.some((n) => !Buffer.isBuffer(files[n]))) {
+    return { ok: false, reason: `refusing entry ${id}: every file must be a Buffer` };
+  }
+  const p = dropPaths(root, source);
   const staged = path.join(p.staging, id);
   const live = path.join(p.ready, id);
 
   // IT DOES NOT CREATE THE QUEUE IT DELIVERS INTO.
   //
   // mkdir -p made a wrong root succeed perfectly: a queue appears, every
-  // publish returns ok, and the drain -- looking at the real path -- reports
-  // "waiting 0" and exits 0. Both halves green, zero objects archived. The
-  // drain refuses to create what it drains for exactly this reason; the writer
-  // has the same duty on its side, and its failure is worse because it looks
-  // like success per image rather than once per pass.
+  // publish returns ok, and the reader -- looking at the real path -- reports
+  // "waiting 0" and exits 0. Both halves green, nothing delivered. The reader
+  // refuses to create what it reads for exactly this reason; the writer has
+  // the same duty on its side, and its failure is worse because it looks like
+  // success per entry rather than once per pass.
   try {
     const st = await fs.stat(p.ready);
     if (!st.isDirectory()) throw new Error("not a directory");
@@ -206,8 +219,8 @@ async function publish(spoolRoot, sidecar, bytes) {
       reason:
         `no drop queue at ${p.ready}. This writer does NOT create it, because creating it on demand makes a ` +
         "wrong root indistinguishable from a working one -- entries land inside the container and vanish with " +
-        "it while every publish reports success. Check the bind mount, and have fourier-sampling create the " +
-        "queue with: node tools/drop-drain.ts --source " + sidecar.source + " --init",
+        "it while every publish reports success. Check the bind mount. " +
+        (opts.missingQueueRemedy || "The queue is created once, deliberately, by whoever deploys its reader."),
     };
   }
 
@@ -215,34 +228,70 @@ async function publish(spoolRoot, sidecar, bytes) {
     await fs.mkdir(p.staging, { recursive: true });
     await fs.rm(staged, { recursive: true, force: true });
     await fs.mkdir(staged, { recursive: true });
-    await fs.writeFile(path.join(staged, "bytes"), bytes);
-    await fs.writeFile(path.join(staged, "entry.json"), JSON.stringify(sidecar) + "\n");
+    for (const n of names) {
+      const fh = await fs.open(path.join(staged, n), "w");
+      try {
+        await fh.writeFile(files[n]);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+    }
+    await syncDir(staged);
     // THE PUBLISH. One operation.
     try {
       await fs.rename(staged, live);
     } catch (err) {
       // rename(2) refuses to replace a non-empty directory (ENOTEMPTY, or
-      // EEXIST on some filesystems), so a re-delivery of an attachment already
+      // EEXIST on some filesystems), so a re-delivery of an entry already
       // queued lands here. That is not a failure: the entry is present and the
-      // drain will take it. Removing the live one to make room would be worse
-      // -- the drain may be reading it this instant, and an entry that vanishes
-      // mid-read is the one state the atomic publish exists to prevent.
+      // reader will take it. Removing the live one to make room would be worse
+      // -- the reader may be reading it this instant, and an entry that
+      // vanishes mid-read is the one state the atomic publish exists to prevent.
       //
-      // Same message and same attachment means the same bytes, so "already
-      // there" and "just written" are the same outcome.
+      // Ids are pure functions of what they describe, so "already there" and
+      // "just written" are the same outcome.
       if (err && (err.code === "ENOTEMPTY" || err.code === "EEXIST")) {
         await fs.rm(staged, { recursive: true, force: true }).catch(() => {});
         return { ok: true, id, dir: live, alreadyQueued: true };
       }
       throw err;
     }
+    await syncDir(p.ready);
+    await syncDir(p.staging);
     return { ok: true, id, dir: live, alreadyQueued: false };
   } catch (err) {
-    // Clean up a half-built staging directory so it does not accumulate on a
-    // tmpfs. Failing to clean up must not mask the original error.
+    // Clean up a half-built staging directory so it does not accumulate.
+    // Failing to clean up must not mask the original error.
     await fs.rm(staged, { recursive: true, force: true }).catch(() => {});
     return { ok: false, reason: `could not publish the entry: ${err && err.message ? err.message : String(err)}` };
   }
+}
+
+async function syncDir(dir) {
+  const fh = await fs.open(dir, "r");
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
+ * PUBLISH one media entry: the bytes and the sidecar that describes them.
+ *
+ * The media shape of publishEntry. The sidecar schema is fourier-sampling's
+ * (src/drop/types.ts), and so is the remedy for a missing queue.
+ */
+async function publish(spoolRoot, sidecar, bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+    return { ok: false, reason: "refusing to publish an entry with no bytes" };
+  }
+  const id = entryId(sidecar.message_ref, sidecar.attachment_ref);
+  return publishEntry(spoolRoot, sidecar.source, id,
+    { bytes, "entry.json": Buffer.from(JSON.stringify(sidecar) + "\n") },
+    { missingQueueRemedy: "Have fourier-sampling create the queue with: node tools/drop-drain.ts --source " +
+      sidecar.source + " --init" });
 }
 
 /**
@@ -291,6 +340,7 @@ function relativeQueuePath(source) {
 }
 
 module.exports = {
+  publishEntry,
   relativeQueuePath,
   DROP_SCHEMA_VERSION,
   ALLOWED_EXT,

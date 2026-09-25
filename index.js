@@ -9,6 +9,8 @@ const invites = require("./invites");
 const avatarCapability = require("./capabilities/avatar");
 const rooms = require("./rooms");
 const rescanCapability = require("./capabilities/rescan");
+const bugreportCapability = require("./capabilities/bugreport");
+const { publishEntry } = require("./drop");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
@@ -897,6 +899,13 @@ new Cli({
               return;
             }
 
+            // Bug reports, as Fourier-chan (capabilities/bugreport.js). BEFORE
+            // the denied-room return: a room is denied when the COURIER is
+            // removed, and a help room where Neru-chan was told to stop taking
+            // pictures must not also lose its bug reports. The capability keeps
+            // the deny list's rule for every room that is not a help room.
+            if (bugreport && (await bugreport.handle(event))) return;
+
             // Nothing else happens in a denied room. The guard in rooms.js is
             // what makes that true even for code paths nobody has thought of;
             // this just avoids doing the work to reach one.
@@ -972,6 +981,7 @@ new Cli({
       },
     });
     const onboarding = new Onboarding(bridge, config, AS_TOKEN, invites.audit);
+    let bugreport = null;   // set below, once the deny guard is in place
     console.log(`fourier-tunnel listening on port ${port}`);
     // EVERY intent, for every bot, comes through here -- index.js and
     // onboarding.js both call bridge.getIntent() -- so this is the one place
@@ -982,6 +992,34 @@ new Cli({
     // site and always will be.
     const rawGetIntent = bridge.getIntent.bind(bridge);
     bridge.getIntent = (...args) => rooms.guard(rawGetIntent(...args));
+
+    // Her bug intake. It speaks through an intent the deny guard does NOT
+    // wrap, because a help room is denied when the courier is removed from it,
+    // not her -- and it earns that by acting only in rooms her own
+    // /joined_rooms lists, read through the raw client, which never auto-joins.
+    // A misconfiguration disables the intake and says so; it does not take the
+    // courier down with it. The workbench on vesper reports a missing heartbeat
+    // as RED, so a disabled intake is not a quiet one.
+    const her = () => rawGetIntent(onboarding.userId);
+    try {
+      bugreport = bugreportCapability.fromConfig(config, {
+        root: process.env.ONBOARDING_STATE_DIR,
+        selfId: onboarding.userId,
+        isBotLike: (u) => onboarding.isBotLike(u),
+        joinedRooms: () => her().matrixClient.getJoinedRooms(),
+        joinedMembers: (room) => her().matrixClient.getJoinedRoomMembers(room),
+        sendText: (room, text) => her().sendText(room, text),
+        getEvent: (room, id) => her().matrixClient.getEvent(room, id),
+        publishEntry,
+        isDenied: rooms.isDenied,
+        audit: (rec) => invites.audit({ bot: "bugreport", ...rec }),
+      });
+      if (bugreport) console.log("[bugreport] taking reports in: " +
+        Object.values(config.bridge.bugreport.rooms).join(", "));
+    } catch (e) {
+      bugreport = null;
+      console.error("[bugreport] DISABLED:", e.message);
+    }
 
     bridge.run(port).then(async () => {
       try {
@@ -1000,6 +1038,7 @@ new Cli({
         console.error("[startup] onboarding user not ready:", e.message);
       }
       onboarding.start();
+      if (bugreport) bugreport.start();
     });
   },
 }).run();

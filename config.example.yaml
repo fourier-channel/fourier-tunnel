@@ -76,3 +76,19 @@ bridge:
     #   Do you agree? Type Yes to accept.
     # accept_hint: |-
     #   Invite sent! Check the top of your room list and accept.
+  # Bug reports: users type "!bugreport <what happened>" and Fourier-chan files
+  # it for the Developer's workbench (capabilities/bugreport.js; the queue that
+  # pulls them is fourier-coherence `coherence bugs`). Off unless enabled.
+  # Reports land under ONBOARDING_STATE_DIR/_drop/bugreport/, which must
+  # already exist -- she never creates the queue she writes into.
+  bugreport:
+    enabled: false
+    # Room IDs, not aliases: an alias can be repointed. Each is labelled in the
+    # report and in her notice. She also takes reports in a DM with her.
+    rooms:
+      "!bookhelpid:example.net": "booru help"
+      "!matrixhelpid:example.net": "matrix help"
+    # Her DM with the operator: every new report is announced there. She
+    # never creates this room; if she is not in it, nothing is announced and
+    # the workbench's heartbeat check says so.
+    notify_room: "!operatordm:example.net"

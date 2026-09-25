@@ -88,9 +88,10 @@ default. Read `docs/FIBONACCI-REVIEW.md` before touching the point system.
     mkdir -p onboarding-state
 
 `docker-compose.yaml` needs a `.env` and bind-mounts the three yaml files and
-`onboarding-state/` (the onboarding watermark lives there so a rebuild does
-not re-greet everyone). The invite-strike ledger and audit log do NOT have a
-mount and are lost on `--build`; known gap.
+`onboarding-state/`, mounted at `/state` (`ONBOARDING_STATE_DIR`). Everything
+the bridge must keep across a rebuild lives there: the onboarding watermark (so
+a rebuild does not re-greet everyone), the invite-strike ledger, the audit log,
+the denied-room list, and the bug-report queue.
 
 ### 2. Create a booru bot account
 
@@ -212,15 +213,50 @@ Sender must be in `bridge.admins`.
 - `!deniedrooms` -- in a DM; the rooms the bot is deliberately staying out of,
   with who decided and when. Nothing else can show this, since the list is the
   only record of a room the bot is not in on purpose.
+- `!rescan <mxc://url | md5>` -- in a DM; reads an already-posted image's own
+  metadata again and rewrites its creator provenance on the booru. Never
+  uploads, never re-runs the autotagger (`capabilities/rescan.js`).
 - `!join` -- for users: the on-ramp.
+
+### Bug reports (`!bugreport`)
+
+For users, as Fourier-chan: `!bugreport <what happened>` in a room listed in
+`bridge.bugreport.rooms` (the help rooms), or in a DM with her. She files it
+and answers with its id, `bug-YYYYMMDD-xxxxxxxx`, then announces it to the
+operator in `bridge.bugreport.notify_room`. Design: fourier-basis
+`docs/design/BUG_INTAKE.md`. The queue that pulls the reports and the way they
+get fixed is fourier-coherence `coherence bugs`, on vesper.
+
+- **A credential is refused before anything is written**, with the canon line:
+  it was not kept, treat it as exposed, change it now. The screen is a
+  heuristic. It is written so an ordinary "my password is incorrect" still
+  files.
+- **Persisted, then answered.** The entry is fsynced into
+  `$ONBOARDING_STATE_DIR/_drop/bugreport/ready/<id>/entry.json`, published by
+  one rename, before she replies. The library acknowledges a transaction
+  before handlers run, so "filed" must already be true when she says it. She
+  never creates the queue; a missing one is a reply saying nothing was saved.
+- **Only where she is joined**, read from her own `/joined_rooms`, never
+  through a call that auto-joins. A help room the courier was REMOVED from
+  (denied) still takes reports. Every other denied room stays silent.
+- **Limits:** 4000 characters; 3 reports per sender and 30 in total per hour,
+  held in memory.
+- **A heartbeat** at `_drop/bugreport/heartbeat.json` every five minutes names
+  each configured room and whether she is joined to it. The workbench treats a
+  stale or wrong heartbeat as an intake that cannot hear, which is RED.
+
+`bugreport` in `config.example.yaml` shows the keys. It is off unless
+`enabled: true`. A malformed block disables the intake at startup, loudly,
+and leaves the rest of the bridge running.
 
 ---
 
 ## Tests
 
-Nine plain `node --test` suites, one per module, no runner:
+Plain `node --test` suites, one per module (capabilities included), no
+runner -- `node --test` finds them and reports its own count:
 
-    for t in *.test.js; do node --test "$t"; done
+    npx --no-install eslint . && node --test
 
 `coherence.gate.yaml` declares the same command as this repo's gate.
 `package.json` has no scripts; `npm test` does nothing.
