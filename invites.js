@@ -79,7 +79,7 @@ function rejectionMessage(strikeNum, requiredLevel, joined) {
   if (strikeNum === 1) {
     return (
       `I can only be added to a room by someone with power level ${requiredLevel} or higher in that room. ` +
-      `It looks like that check didn't pass, ${action} — I'm assuming this was a mistake. ` +
+      `It looks like that check didn't pass, ${action} -- I'm assuming this was a mistake. ` +
       `If you believe you should be able to add me, please contact a server admin rather than trying repeatedly. ` +
       `Repeated attempts trigger escalating cooldowns. ` +
       `(Current cooldown: ${formatDuration(thisTimeout)}. Next attempt: ${formatDuration(nextTimeout)}.)`
