@@ -16,22 +16,15 @@
 // is in dozens; a Matrix message is not a report.
 const LIST_CAP = 60;
 
-// The bot identities this appservice can act as, most significant first.
+// The bot identities this appservice can act as. One since 2026-09-25: the
+// courier. Fourier-chan left for her own service on the bot hub with her own
+// registration (fourier-basis ops/hetzner/guide), so this appservice cannot
+// act as her and listing her here would describe a namespace it no longer has.
 // Pure: takes what it needs rather than reaching for config.
-function botIdentities({ domain, senderLocalpart, onboarding }) {
+function botIdentities({ domain, senderLocalpart }) {
   const ids = [];
   if (senderLocalpart) {
     ids.push({ label: "bridge", userId: `@${senderLocalpart}:${domain}` });
-  }
-  // Fourier-chan only exists when onboarding is on; listing her otherwise would
-  // report an empty set for a user that was never registered, which reads like
-  // "she is in no rooms" rather than "she does not exist".
-  if (onboarding && onboarding.enabled) {
-    const local = onboarding.localpart || "fourier";
-    const userId = `@${local}:${domain}`;
-    if (!ids.some((i) => i.userId === userId)) {
-      ids.push({ label: "onboarding", userId });
-    }
   }
   return ids;
 }

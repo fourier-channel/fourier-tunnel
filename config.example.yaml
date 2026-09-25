@@ -1,9 +1,6 @@
 homeserver:
   url: "http://synapse:8008"
   domain: "example.net"
-  # Synapse admin API token, used ONLY by the onboarding new-user watch.
-  # Absent: the watch stays off (logged once) and !join still works.
-  admin_token: "YOUR_SYNAPSE_ADMIN_TOKEN"
 danbooru:
   url: "http://danbooru:3000"
   # Dedicated Danbooru bot account and its API key (keep the real key out of git)
@@ -38,57 +35,9 @@ bridge:
     - "@admin:example.net"
   # Power level required in a room to invite the bot
   invite_power_level: 100
-  # Room/space a local user is invited to via the !join on-ramp command (a room ID)
-  onramp_room: "!yourspace:example.net"
   # The BRIDGE bot's display name (@tunnel stays the tunnel).
   display_name: "Fourier"
-  # Fourier-chan's onboarding: she is her OWN user (@<localpart>:<domain>,
-  # acted through the appservice namespace -- the registration must cover
-  # her MXID). She DMs every new local user the rules; "Yes" earns the
-  # invite to onramp_room. See onboarding.js for the defaults.
-  onboarding:
-    enabled: true
-    localpart: "fourier"
-    # Which point system runs: "fibonacci" (fibonacci.md), "tiers" (the
-    # 2026-09-06 design in progression.yaml), or "off". Default is OFF, so an
-    # upgrade never silently starts scoring people.
-    engine: "fibonacci"
-    fibonacci:
-      # WHO the engine runs for. Empty means nobody -- there is no wildcard.
-      # The operator's instruction 2026-09-08 was that it must not reach any
-      # other user until they have reviewed it.
-      whitelist:
-        - "@admin:example.net"
-      # On reaching the goal, raise the user's power level in a room.
-      # DISABLED, deliberately: it is the only step that grants authority
-      # automatically, partly on the strength of what a client reports about
-      # itself, and nothing here takes it back again.
-      on_pass:
-        enabled: false
-        # room: "!yourspace:example.net"
-        # power_level: 1
-    display_name: "Fourier-chan"
-    # How long a brand-new user can wait for her DM. One poll is ~15 ms of
-    # Synapse time, so keep this small; floor is 1000.
-    poll_interval_ms: 5000
-    # rules_text: |-
-    #   Welcome. The rules: ...
-    #   Do you agree? Type Yes to accept.
-    # accept_hint: |-
-    #   Invite sent! Check the top of your room list and accept.
-  # Bug reports: users type "!bugreport <what happened>" and Fourier-chan files
-  # it for the Developer's workbench (capabilities/bugreport.js; the queue that
-  # pulls them is fourier-coherence `coherence bugs`). Off unless enabled.
-  # Reports land under ONBOARDING_STATE_DIR/_drop/bugreport/, which must
-  # already exist -- she never creates the queue she writes into.
-  bugreport:
-    enabled: false
-    # Room IDs, not aliases: an alias can be repointed. Each is labelled in the
-    # report and in her notice. She also takes reports in a DM with her.
-    rooms:
-      "!bookhelpid:example.net": "booru help"
-      "!matrixhelpid:example.net": "matrix help"
-    # Her DM with the operator: every new report is announced there. She
-    # never creates this room; if she is not in it, nothing is announced and
-    # the workbench's heartbeat check says so.
-    notify_room: "!operatordm:example.net"
+  # Fourier-chan is NOT configured here. Since 2026-09-25 she is her own
+  # service on the bot hub (fourier-basis ops/hetzner/guide) with her own
+  # registration: onboarding, the !join on-ramp and !bugreport moved with her,
+  # and her keys (onramp_room, onboarding, bugreport, the admin token) with them.

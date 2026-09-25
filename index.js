@@ -9,8 +9,6 @@ const invites = require("./invites");
 const avatarCapability = require("./capabilities/avatar");
 const rooms = require("./rooms");
 const rescanCapability = require("./capabilities/rescan");
-const bugreportCapability = require("./capabilities/bugreport");
-const { publishEntry } = require("./drop");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
@@ -27,7 +25,6 @@ const { resolveHomeserverUrl } = require("./homeserver");
 // that otherwise worked.
 const BACKFILL_PACE_MS = 750;
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
-const { Onboarding } = require("./onboarding");
 
 const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
 
@@ -499,62 +496,6 @@ function inviteDeps(bridge) {
   };
 }
 
-// Handle the !join on-ramp command. DM-only: a local (:<domain>) user messages
-// "!join" to the bot and is invited into the main space. Invite-and-accept, NOT
-// force-join -- the Synapse admin join endpoint acts as @__oidc_admin (not in
-// the room) and refuses, so invite-and-accept is the mechanism (D-80cec7 /
-// G-6f1488). Remote users are refused with a helpful message.
-async function handleJoinCommand(bridge, event) {
-  const body = event.content && event.content.body;
-  if (!body || body.trim() !== "!join") return false;
-  const sender = event.sender;
-  const roomId = event.room_id;
-  const intent = bridge.getIntent();
-  // DM only: exactly two joined members (bot + user).
-  if ((await joinedMemberCount(bridge, roomId)) !== 2) return false;
-  // Local-only gate: sender MXID must be on this homeserver. This is a
-  // deliberate policy choice (local users self-serve; remote users need a
-  // human invite), NOT a technical constraint -- @tunnel can invite any MXID
-  // regardless of server. Revisit this gate if the server privacy model opens
-  // up (e.g. self-service on-ramp for all users).
-  const domain = config.homeserver.domain;
-  if (!sender.endsWith(":" + domain)) {
-    await intent.sendText(
-      roomId,
-      "The !join command is for " + domain + " members only. " +
-      "If you're on another server, message @saber:41chan.net to be invited to the space."
-    );
-    invites.audit({ kind: "onramp_refused_remote", sender });
-    return true;
-  }
-  const targetRoom = config.bridge.onramp_room;
-  // @tunnel (PL 100, seated in the space) invites the user. The user accepts the
-  // invite in their client to enter. We do NOT force-join: the Synapse admin
-  // join endpoint acts as @__oidc_admin (not in the room) and refuses, so
-  // invite-and-accept is the mechanism. Tolerate "already invited/joined".
-  try {
-    await intent.invite(targetRoom, sender);
-    await intent.sendText(
-      roomId,
-      "I've sent you an invite to the 41chan space. Accept it in your client to join. Welcome."
-    );
-    invites.audit({ kind: "onramp_invited", sender, room: targetRoom });
-  } catch (e) {
-    const msg = (e && e.message) || "";
-    if (/already|in room|is already (in|joined)/i.test(msg)) {
-      await intent.sendText(
-        roomId,
-        "You already have an invite to (or membership in) the 41chan space. Check your invites to accept."
-      );
-      invites.audit({ kind: "onramp_invite_noop", sender });
-    } else {
-      await intent.sendText(roomId, "Sorry, I couldn't invite you right now. Please message @saber:41chan.net.");
-      invites.audit({ kind: "onramp_invite_failed", sender, error: msg.slice(0, 300) });
-    }
-  }
-  return true;
-}
-
 // The bot admin list. `admins` is the name going forward; strike_reset_admins
 // is what deployments already have on disk, and reading both means this command
 // works today without anyone editing a config file on the server first.
@@ -563,8 +504,7 @@ function botAdmins() {
 }
 
 // Ask Synapse which rooms one bot identity is joined to, then name them.
-// Masquerades through the appservice token, the same way onboarding reads the
-// space hierarchy.
+// Masquerades through the appservice token.
 async function joinedRoomsFor(userId) {
   const base = config.homeserver.url.replace(/\/+$/, "");
   const auth = { Authorization: `Bearer ${AS_TOKEN}` };
@@ -684,7 +624,6 @@ async function handleListRoomsCommand(bridge, event) {
   const identities = listrooms.botIdentities({
     domain: config.homeserver.domain,
     senderLocalpart: _reg.sender_localpart,
-    onboarding: config.bridge.onboarding,
   });
 
   const sections = [];
@@ -899,13 +838,6 @@ new Cli({
               return;
             }
 
-            // Bug reports, as Fourier-chan (capabilities/bugreport.js). BEFORE
-            // the denied-room return: a room is denied when the COURIER is
-            // removed, and a help room where Neru-chan was told to stop taking
-            // pictures must not also lose its bug reports. The capability keeps
-            // the deny list's rule for every room that is not a help room.
-            if (bugreport && (await bugreport.handle(event))) return;
-
             // Nothing else happens in a denied room. The guard in rooms.js is
             // what makes that true even for code paths nobody has thought of;
             // this just avoids doing the work to reach one.
@@ -927,20 +859,6 @@ new Cli({
               // Deliberately no return: a join is not consumed by this.
             }
 
-            // Fourier-chan's onboarding DM (rules -> "Yes" -> invite).
-            // BEFORE the joined-guard below: her DMs contain @fourier, not
-            // @tunnel, and the handler scopes itself to rooms it opened for
-            // exactly one pending user.
-            if (event.type === "m.room.message" && event.content) {
-              if (onboarding && (await onboarding.handleReply(event))) return;
-              // Her !setavatar, from an admin in a DM with her.
-              if (onboarding && (await onboarding.handleAvatarFlow(event))) return;
-            }
-            // Someone inviting HER to a DM: she joins, so the DM exists.
-            if (onboarding && (await onboarding.handleDmInvite(event))) return;
-            // Progression: watch what users do; never consumes the event.
-            if (onboarding) { try { await onboarding.observeEvent(event); } catch (e) { console.error("[onboarding] observe failed:", e.message); } }
-
             // Skip any non-invite event from a room the bot isn't joined to.
             // This ACKs (drains) backlog left over from a previously over-broad
             // appservice namespace, and is correct defense-in-depth: the bridge
@@ -950,9 +868,6 @@ new Cli({
             }
 
             if (event.type === "m.room.message" && event.content) {
-              // Local on-ramp command (DM only) -- the fallback for anyone
-              // who closed the onboarding DM.
-              if (await handleJoinCommand(bridge, event)) return;
               // Admin reset command (DM only)
               if (await handleResetCommand(bridge, event)) return;
               if (await handleRoomDenyCommands(bridge, event)) return;
@@ -980,11 +895,16 @@ new Cli({
         },
       },
     });
-    const onboarding = new Onboarding(bridge, config, AS_TOKEN, invites.audit);
-    let bugreport = null;   // set below, once the deny guard is in place
+    // FOURIER-CHAN IS NOT HERE. Since 2026-09-25 she is her own service on the
+    // bot hub (fourier-basis ops/hetzner/guide) with her own registration:
+    // onboarding, the !join on-ramp and !bugreport moved with her. Operator:
+    // Fourier-chan "shouldn't need to run anything through Tunnel. We have a bot
+    // hub explicitly so they are separate entities." Her code ran first for every
+    // event this process heard, and the library's join-before-read made the
+    // courier invite her into an admin's DM (bug-20260925-7434f348).
     console.log(`fourier-tunnel listening on port ${port}`);
-    // EVERY intent, for every bot, comes through here -- index.js and
-    // onboarding.js both call bridge.getIntent() -- so this is the one place
+    // EVERY intent comes through here -- index.js calls bridge.getIntent()
+    // throughout -- so this is the one place
     // the denied-room guard has to be. Wrapping it here rather than at each
     // call site means a call site added tomorrow is covered today, which
     // matters because the thing being guarded (an automatic re-join inside
@@ -992,34 +912,6 @@ new Cli({
     // site and always will be.
     const rawGetIntent = bridge.getIntent.bind(bridge);
     bridge.getIntent = (...args) => rooms.guard(rawGetIntent(...args));
-
-    // Her bug intake. It speaks through an intent the deny guard does NOT
-    // wrap, because a help room is denied when the courier is removed from it,
-    // not her -- and it earns that by acting only in rooms her own
-    // /joined_rooms lists, read through the raw client, which never auto-joins.
-    // A misconfiguration disables the intake and says so; it does not take the
-    // courier down with it. The workbench on vesper reports a missing heartbeat
-    // as RED, so a disabled intake is not a quiet one.
-    const her = () => rawGetIntent(onboarding.userId);
-    try {
-      bugreport = bugreportCapability.fromConfig(config, {
-        root: process.env.ONBOARDING_STATE_DIR,
-        selfId: onboarding.userId,
-        isBotLike: (u) => onboarding.isBotLike(u),
-        joinedRooms: () => her().matrixClient.getJoinedRooms(),
-        joinedMembers: (room) => her().matrixClient.getJoinedRoomMembers(room),
-        sendText: (room, text) => her().sendText(room, text),
-        getEvent: (room, id) => her().matrixClient.getEvent(room, id),
-        publishEntry,
-        isDenied: rooms.isDenied,
-        audit: (rec) => invites.audit({ bot: "bugreport", ...rec }),
-      });
-      if (bugreport) console.log("[bugreport] taking reports in: " +
-        Object.values(config.bridge.bugreport.rooms).join(", "));
-    } catch (e) {
-      bugreport = null;
-      console.error("[bugreport] DISABLED:", e.message);
-    }
 
     bridge.run(port).then(async () => {
       try {
@@ -1030,15 +922,6 @@ new Cli({
       } catch (e) {
         console.error("[startup] failed to register bot user:", e.message);
       }
-      try {
-        // Fourier-chan is her own user; failing to raise her must not stop
-        // the tunnel from tagging.
-        await onboarding.ensureUser();
-      } catch (e) {
-        console.error("[startup] onboarding user not ready:", e.message);
-      }
-      onboarding.start();
-      if (bugreport) bugreport.start();
     });
   },
 }).run();

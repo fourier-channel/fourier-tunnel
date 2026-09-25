@@ -7,9 +7,15 @@
 A Matrix **application service** that mirrors images posted in Matrix rooms into
 a [Danbooru](https://github.com/danbooru/danbooru)-family image board, tags them
 through a separate tagging service, and writes the resulting tags back into the
-Matrix room as a queryable state event. It also carries a second bot identity,
-Fourier-chan, that greets new accounts and runs an optional onboarding
-progression.
+Matrix room as a queryable state event. It is the courier, Neru-chan
+(`@tunnel`), and nothing else.
+
+**Fourier-chan is not here.** Until 2026-09-25 this appservice also acted as
+@fourier: onboarding, the `!join` on-ramp, and `!bugreport`. She now has her own
+appservice registration and her own service on the bot hub: fourier-basis
+`ops/hetzner/guide/`, whose README is her runbook. Operator: *"Fourier-chan
+shouldn't need to run anything through Tunnel. We have a bot hub explicitly so
+they are separate entities."*
 
 Fourier is an umbrella project for targeted data aggregation, classification,
 and storage; **fourier-tunnel** (formerly BMB, the Booru-Matrix Bridge) is its
@@ -47,15 +53,6 @@ per run, once per room per process. It can only see as far back as the room's
 history visibility lets it, and it says how far it got rather than claiming
 completeness. An admin can re-run it with `!backfill` in the room.
 
-**Fourier-chan.** When `homeserver.admin_token` is set, a second bot user
-polls the homeserver's admin API for new accounts, DMs each one the rules,
-invites them to an on-ramp room on a literal "Yes", and joins the space's
-rooms to observe. The onboarding **engine** is `off` unless configured;
-`fibonacci` scores activity against a goal and publishes a meter state event
-in the user's DM, gated by an explicit whitelist with no wildcard; `tiers` is
-the older engine. The only privilege-granting step (`on_pass`) is disabled by
-default. Read `docs/FIBONACCI-REVIEW.md` before touching the point system.
-
 ---
 
 ## Requirements
@@ -83,15 +80,12 @@ default. Read `docs/FIBONACCI-REVIEW.md` before touching the point system.
     cd fourier-tunnel
     cp config.example.yaml config.yaml
     cp tunnel-registration.example.yaml tunnel-registration.yaml
-    cp progression.example.yaml progression.yaml
-    cp onboarding-tasks.example.yaml onboarding-tasks.yaml
     mkdir -p onboarding-state
 
-`docker-compose.yaml` needs a `.env` and bind-mounts the three yaml files and
+`docker-compose.yaml` needs a `.env` and bind-mounts `config.yaml` and
 `onboarding-state/`, mounted at `/state` (`ONBOARDING_STATE_DIR`). Everything
-the bridge must keep across a rebuild lives there: the onboarding watermark (so
-a rebuild does not re-greet everyone), the invite-strike ledger, the audit log,
-the denied-room list, and the bug-report queue.
+the bridge must keep across a rebuild lives there: the invite-strike ledger,
+the audit log and the denied-room list. The directory keeps its old name.
 
 ### 2. Create a booru bot account
 
@@ -112,8 +106,9 @@ Put the username and key into `config.yaml`.
 
 Put both into `tunnel-registration.yaml`. `sender_localpart` is the bot's
 localpart, and `url` must use the compose `container_name`
-(`http://fourier-tunnel:8009`). The users namespace must cover BOTH the
-bridge bot and Fourier-chan's localpart or onboarding cannot act.
+(`http://fourier-tunnel:8009`). The users namespace is the bridge bot alone:
+Fourier-chan has her own registration (`fourier-guide`), and a namespace that
+claimed her would send her events here again.
 
 ### 4. Register the appservice with Synapse
 
@@ -131,10 +126,9 @@ with `inhibit_login`, which is the only form this homeserver accepts; two
 `config.example.yaml` is annotated. The keys that matter beyond credentials:
 `autotagger.*`, `bridge.admins` (who may run admin commands;
 `strike_reset_admins` is the deprecated alias), `bridge.invite_power_level`
-(no code default: unset rejects every invite), `bridge.onramp_room`,
-`bridge.display_name`, `bridge.disabled_rooms` (per-room tagging kill
-switch), `tag_in_dms`, `default_rating`, and the `bridge.onboarding` block
-(engine, whitelist, on_pass).
+(no code default: unset rejects every invite), `bridge.display_name`,
+`bridge.disabled_rooms` (per-room tagging kill switch), `tag_in_dms` and
+`default_rating`.
 
 ### 6. Build and run
 
@@ -216,38 +210,6 @@ Sender must be in `bridge.admins`.
 - `!rescan <mxc://url | md5>` -- in a DM; reads an already-posted image's own
   metadata again and rewrites its creator provenance on the booru. Never
   uploads, never re-runs the autotagger (`capabilities/rescan.js`).
-- `!join` -- for users: the on-ramp.
-
-### Bug reports (`!bugreport`)
-
-For users, as Fourier-chan: `!bugreport <what happened>` in a room listed in
-`bridge.bugreport.rooms` (the help rooms), or in a DM with her. She files it
-and answers with its id, `bug-YYYYMMDD-xxxxxxxx`, then announces it to the
-operator in `bridge.bugreport.notify_room`. Design: fourier-basis
-`docs/design/BUG_INTAKE.md`. The queue that pulls the reports and the way they
-get fixed is fourier-coherence `coherence bugs`, on vesper.
-
-- **A credential is refused before anything is written**, with the canon line:
-  it was not kept, treat it as exposed, change it now. The screen is a
-  heuristic. It is written so an ordinary "my password is incorrect" still
-  files.
-- **Persisted, then answered.** The entry is fsynced into
-  `$ONBOARDING_STATE_DIR/_drop/bugreport/ready/<id>/entry.json`, published by
-  one rename, before she replies. The library acknowledges a transaction
-  before handlers run, so "filed" must already be true when she says it. She
-  never creates the queue; a missing one is a reply saying nothing was saved.
-- **Only where she is joined**, read from her own `/joined_rooms`, never
-  through a call that auto-joins. A help room the courier was REMOVED from
-  (denied) still takes reports. Every other denied room stays silent.
-- **Limits:** 4000 characters; 3 reports per sender and 30 in total per hour,
-  held in memory.
-- **A heartbeat** at `_drop/bugreport/heartbeat.json` every five minutes names
-  each configured room and whether she is joined to it. The workbench treats a
-  stale or wrong heartbeat as an intake that cannot hear, which is RED.
-
-`bugreport` in `config.example.yaml` shows the keys. It is off unless
-`enabled: true`. A malformed block disables the intake at startup, loudly,
-and leaves the rest of the bridge running.
 
 ---
 

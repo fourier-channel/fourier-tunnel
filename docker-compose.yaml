@@ -9,8 +9,9 @@ services:
     env_file:
       - .env
     environment:
-      # Where the onboarding watermark lives -- a MOUNTED path, so a rebuild
-      # cannot throw it away and re-greet everyone (2026-09-05 incident).
+      # What must survive a rebuild -- the invite-strike ledger, the audit log,
+      # the denied-room list -- lives on a MOUNTED path. (It held Fourier-chan's
+      # onboarding watermark too, until she moved to her own service.)
       ONBOARDING_STATE_DIR: /state
     volumes:
       # config.yaml is also COPYed into the image by the Dockerfile; this mount
@@ -18,8 +19,6 @@ services:
       # mount, an edit here silently did nothing until the next `--build`,
       # which is how a config change that looked applied was not.
       - ./config.yaml:/app/config.yaml:ro
-      - ./progression.yaml:/app/progression.yaml
-      - ./onboarding-tasks.yaml:/app/onboarding-tasks.yaml:ro
       - ./onboarding-state:/state
     restart: unless-stopped
     networks:

@@ -16,33 +16,13 @@ const {
 
 const DOMAIN = "41chan.net";
 
-test("both bot identities are listed, bridge first", () => {
-  const ids = botIdentities({
-    domain: DOMAIN,
-    senderLocalpart: "tunnel",
-    onboarding: { enabled: true, localpart: "fourier" },
-  });
-  assert.deepEqual(ids.map((i) => i.userId), ["@tunnel:41chan.net", "@fourier:41chan.net"]);
-});
-
-test("Fourier-chan is omitted when onboarding is off", () => {
-  // Listing her anyway would report an empty set for a user that was never
-  // registered, which reads as "in no rooms" rather than "does not exist".
-  const ids = botIdentities({
-    domain: DOMAIN,
-    senderLocalpart: "tunnel",
-    onboarding: { enabled: false, localpart: "fourier" },
-  });
+test("the courier is the one identity listed -- Fourier-chan is not this appservice's any more", () => {
+  const ids = botIdentities({ domain: DOMAIN, senderLocalpart: "tunnel" });
   assert.deepEqual(ids.map((i) => i.userId), ["@tunnel:41chan.net"]);
 });
 
-test("an identity is never listed twice", () => {
-  const ids = botIdentities({
-    domain: DOMAIN,
-    senderLocalpart: "fourier",
-    onboarding: { enabled: true, localpart: "fourier" },
-  });
-  assert.equal(ids.length, 1);
+test("no sender localpart, no identity", () => {
+  assert.deepEqual(botIdentities({ domain: DOMAIN }), []);
 });
 
 test("no rooms and a failed lookup do not read the same", () => {
