@@ -224,3 +224,14 @@ test("nothing about unfetchable is said when nothing was refused", async () => {
   assert.equal(r.unfetchable, 0);
   assert.doesNotMatch(summarise(r), /unfetchable/);
 });
+
+test("a picture refused by the strip is its own fact: not done, not failed, and said in words", async () => {
+  const r = await catchUpRoom({
+    roomId: "!r:x",
+    adminPage: pager({ undefined: { chunk: [img("mxc://a/2"), img("mxc://a/1")], end: null } }),
+    onImage: async (e) => (e.content.url === "mxc://a/1" ? "strip-refused" : "posted"),
+    log: () => {},
+  });
+  assert.deepEqual([r.done, r.refused, r.failed], [1, 1, 0]);
+  assert.match(summarise(r), /1 NOT posted: generation data would not strip/);
+});

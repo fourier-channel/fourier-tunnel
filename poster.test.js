@@ -3,13 +3,17 @@
 // Tests for Matrix poster attribution.
 //
 // The property that matters is EXACTNESS: 41chan_<localpart> must correspond to
-// exactly one MXID and back again, because the operator's ruling makes that tag
-// the statement "this post belongs to that account". A tag that merely
-// resembles a localpart would attribute someone's picture to someone else.
+// exactly one MXID, because the operator's ruling makes that tag the public
+// label "this post is that account's". A tag that merely resembles a localpart
+// would attribute someone's picture to someone else. The label is not the
+// proof: who created a post is the record the tunnel writes at creation, and
+// there is deliberately no tag-to-MXID inverse to tempt anyone into reading
+// creatorship back off a tag any member can edit.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { posterTagFor, mxidForPosterTag, localpartIfLocal } = require("./poster");
+const poster = require("./poster");
+const { posterTagFor, localpartIfLocal } = poster;
 
 const D = "41chan.net";
 
@@ -25,9 +29,9 @@ test("a REMOTE sender gets no tag", () => {
   assert.equal(posterTagFor("@sir_toot:cutefunny.art", D), null);
 });
 
-test("the tag round-trips back to the exact MXID", () => {
+test("the tag is exactly 41chan_ and the localpart, nothing folded", () => {
   for (const mxid of ["@saber:41chan.net", "@a-b_c:41chan.net", "@x9:41chan.net"]) {
-    assert.equal(mxidForPosterTag(posterTagFor(mxid, D), D), mxid);
+    assert.equal(posterTagFor(mxid, D), `41chan_${localpartIfLocal(mxid, D)}`);
   }
 });
 
@@ -58,8 +62,9 @@ test("localpartIfLocal only accepts this homeserver", () => {
   assert.equal(localpartIfLocal("@saber:evil.com", D), null);
 });
 
-test("a tag that is not ours parses to nothing", () => {
-  assert.equal(mxidForPosterTag("4chan_anonymous", D), null);
-  assert.equal(mxidForPosterTag("1girl", D), null);
-  assert.equal(mxidForPosterTag("41chan_", D), null);
+test("there is no way back from a tag to an MXID: a tag is a label anyone can edit, not proof of a creator", () => {
+  // It existed once, and was used to decide who could read a post's private
+  // generation record from the post's member-editable tags.
+  assert.equal(poster.mxidForPosterTag, undefined);
+  assert.deepEqual(Object.keys(poster).sort(), ["SAFE", "localpartIfLocal", "posterTagFor"]);
 });

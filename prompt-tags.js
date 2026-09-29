@@ -125,8 +125,15 @@ function webpTiff(buf) {
 // means "undefined". The UTF-16 byte order is decided by looking at the text:
 // the wrong order turns every character into a CJK code point, so the decode
 // with more plain ASCII in it is the right one.
+//
+// NO KNOWN PREFIX, NO PREFIX. Pillow sets exif[0x9286] to a plain string and
+// writes it with no charset at all -- Fooocus saves its whole generation
+// record that way -- so the first 8 bytes are TEXT. Dropping them on the
+// assumption they were a header cut '{"prompt' off the front of the only
+// private copy the booru keeps. Only the four headers the EXIF spec names are
+// taken as one.
 function decodeUserComment(raw) {
-  if (raw.length < 8) return raw.toString("utf8");
+  if (raw.length < 8) return raw.toString("utf8").replace(/\0+$/, "");
   const prefix = raw.subarray(0, 8).toString("latin1");
   const body = raw.subarray(8);
   if (prefix === "UNICODE\0") {
@@ -137,7 +144,8 @@ function decodeUserComment(raw) {
     return (ascii(be) >= ascii(le) ? be : le).replace(/\0+$/, "");
   }
   if (prefix === "JIS\0\0\0\0\0") return body.toString("latin1");
-  return body.toString("utf8").replace(/\0+$/, "");
+  if (prefix === "ASCII\0\0\0" || prefix === "\0\0\0\0\0\0\0\0") return body.toString("utf8").replace(/\0+$/, "");
+  return raw.toString("utf8").replace(/\0+$/, "");
 }
 
 // { UserComment?, ImageDescription? } read from a TIFF payload: IFD0 and the
@@ -185,6 +193,14 @@ function exifChunks(fields) {
   for (const text of [fields.UserComment, fields.ImageDescription]) {
     if (typeof text !== "string" || !text.trim()) continue;
     const trimmed = text.trim();
+    // ComfyUI's WebP saver labels each entry it writes, "<key>:<json>": the
+    // graph under "prompt", anything else (a custom node's note, a version)
+    // is not a prompt and must not be read as one.
+    const labelled = /^([\w.-]{1,64}):\s*([[{][\s\S]*)$/.exec(trimmed);
+    if (labelled) {
+      if (labelled[1] === "prompt" && chunks.prompt === undefined) chunks.prompt = labelled[2];
+      continue;
+    }
     if (trimmed.startsWith("{")) {
       try {
         const j = JSON.parse(trimmed);
@@ -389,4 +405,68 @@ function extractCreatorTags(buffer, contentType, opts) {
   return { tags: [], meta: [], characters: [] };
 }
 
-module.exports = { extractCreatorTags, normalizeTerm, expandTerm, OC_PREFIX, OC_NAME, embeddedChunks, pngTextChunks, exifTextFields, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };
+// The same embeddings, rebuilt from the fields strip-generation.js TOOK OUT of
+// an image ({ "png:parameters": text, "exif:UserComment": text, ... }) rather
+// than read from its bytes.
+//
+// WHY FROM WHAT WAS TAKEN. Creator tags are private; the stripped file is
+// public. Read from the raw bytes, a caption the strip rightly left in the file
+// -- a camera's "OLYMPUS DIGITAL CAMERA", a sentence in a UserComment -- became
+// private creator tags while the same text was served to everyone: one text,
+// treated as the prompt by one half of the tunnel and published by the other.
+// Read from what was taken, the private tags come only from private text.
+//
+// Two shapes prompt-tags never read from bytes are read here, because the
+// strip identified them: Easy Diffusion's "prompt" chunk, which is the bare
+// prompt rather than a ComfyUI graph, and ComfyUI's WebP saver, which puts its
+// graph in EXIF Model as "prompt:{...}".
+function chunksFromFields(fields) {
+  const f = fields || {};
+  const chunks = {};
+  for (const k of ["parameters", "prompt", "Comment", "Description"]) {
+    if (typeof f[`png:${k}`] === "string") chunks[k] = f[`png:${k}`];
+  }
+  if (typeof chunks.prompt === "string" && !chunks.prompt.trim().startsWith("{")) {
+    if (chunks.parameters === undefined) chunks.parameters = chunks.prompt;
+    delete chunks.prompt;
+  }
+  const exif = exifChunks({ UserComment: f["exif:UserComment"], ImageDescription: f["exif:ImageDescription"] });
+  for (const [k, v] of Object.entries(exif)) if (chunks[k] === undefined) chunks[k] = v;
+  const model = typeof f["exif:Model"] === "string" ? /^prompt:\s*(\{[\s\S]*\})\s*$/.exec(f["exif:Model"]) : null;
+  if (model && chunks.prompt === undefined) chunks.prompt = model[1];
+  // Mochi Diffusion writes its record as labelled lines ("Include in Image:
+  // <prompt>") into a caption -- IPTC, EXIF or XMP -- rather than a chunk of
+  // its own; the prompt is that one line. Up to a newline, a tag, or an XML
+  // entity (a newline inside XMP arrives as "&#xA;").
+  if (!Object.keys(chunks).length) {
+    for (const v of Object.values(f)) {
+      const m = typeof v === "string" ? /(?:^|\n|&#x?[0-9a-f]+;|>)\s*Include in Image:[ \t]*([^\n<&]*)/i.exec(v) : null;
+      if (m && m[1].trim()) { chunks.parameters = m[1].trim(); break; }
+    }
+  }
+  // The stealth copy in a PNG's pixels (strip-generation.js), read only when
+  // the text chunks it duplicates are gone: NovelAI's is its chunks as JSON
+  // ({"Description", "Comment", ...}), the A1111 extension's the bare
+  // "parameters" text.
+  const stealth = f["png:stealth"];
+  if (typeof stealth === "string" && !Object.keys(chunks).length) {
+    let j = null;
+    try { j = JSON.parse(stealth); } catch { j = null; }
+    if (j && typeof j === "object") {
+      for (const k of ["Comment", "Description"]) if (typeof j[k] === "string") chunks[k] = j[k];
+    } else if (!stealth.startsWith("[undecodable ")) {
+      chunks.parameters = stealth;
+    }
+  }
+  return chunks;
+}
+
+// Public: the fields a strip removed -> creator tags. Never throws.
+function extractCreatorTagsFromFields(fields, opts) {
+  try {
+    return promptToTags(rawPrompt(chunksFromFields(fields)), opts);
+  } catch { /* fail soft */ }
+  return { tags: [], meta: [], characters: [] };
+}
+
+module.exports = { extractCreatorTags, extractCreatorTagsFromFields, chunksFromFields, normalizeTerm, expandTerm, OC_PREFIX, OC_NAME, embeddedChunks, pngTextChunks, exifTextFields, exifChunks, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };

@@ -178,3 +178,15 @@ test("the cap counts blocked pictures too, so a blocked room cannot walk forever
   assert.equal(r.blocked, 2);
   assert.equal(r.capped, true);
 });
+
+test("a picture refused by the strip is counted apart from done, and the summary says it was NOT posted", async () => {
+  const r = await backfillRoom({
+    roomId: "!r:x",
+    fetchPage: async (f) => (f ? { chunk: [], end: null } : { chunk: [img("mxc://a/2"), img("mxc://a/1")], end: "p1" }),
+    onImage: async (e) => (e.content.url === "mxc://a/1" ? "strip-refused" : "posted"),
+    log: () => {},
+  });
+  assert.deepEqual([r.done, r.refused, r.failed], [1, 1, 0]);
+  assert.match(summarise(r), /1 NOT posted: generation data would not strip/);
+  assert.doesNotMatch(summarise({ ...r, refused: 0 }), /NOT posted/);
+});

@@ -177,8 +177,9 @@ async function main() {
     console.log("\n  Dry run: nothing was downloaded, uploaded, posted or written.");
     console.log("  Re-run with --apply to do the work.");
   }
-  // A run that could not finish is not a success, whatever it managed.
-  return result.failed > 0 || result.truncated ? 1 : 0;
+  // A run that could not finish is not a success, whatever it managed -- and
+  // neither is one that refused to post a picture it could not strip.
+  return result.failed > 0 || result.refused > 0 || result.truncated ? 1 : 0;
 }
 
 // The exit code is set in ONE place, off main's return, rather than assigned to

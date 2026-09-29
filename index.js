@@ -4,7 +4,9 @@ const axios = require("axios");
 const { Cli, AppServiceRegistration, Bridge } = require("matrix-appservice-bridge");
 const { DanbooruClient } = require("./danbooru");
 const { autotag } = require("./autotagger");
-const { extractCreatorTags } = require("./prompt-tags");
+const { extractCreatorTags, extractCreatorTagsFromFields } = require("./prompt-tags");
+const { stripGeneration } = require("./strip-generation");
+const imagePlan = require("./image-plan");
 const invites = require("./invites");
 const avatarCapability = require("./capabilities/avatar");
 const rooms = require("./rooms");
@@ -26,7 +28,17 @@ const { resolveHomeserverUrl } = require("./homeserver");
 const BACKFILL_PACE_MS = 750;
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
-const config = yaml.load(fs.readFileSync(require("path").join(__dirname, "config.yaml"), "utf8"));
+// WHERE THE CONFIG AND THE REGISTRATION ARE READ FROM. Beside this file, as
+// always, unless FOURIER_TUNNEL_CONFIG / FOURIER_TUNNEL_REGISTRATION name
+// another path. That is for index.test.js, which loads this module against a
+// throwaway config pointing at fake servers: nothing tested handleImageEvent
+// itself while both files were only ever read from here, and so nothing
+// noticed when the line that decides WHICH bytes reach the booru could be
+// changed back to the raw ones. Unset in production.
+const CONFIG_PATH = process.env.FOURIER_TUNNEL_CONFIG || require("path").join(__dirname, "config.yaml");
+const REGISTRATION_PATH = process.env.FOURIER_TUNNEL_REGISTRATION || require("path").join(__dirname, "tunnel-registration.yaml");
+
+const config = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8"));
 
 // ONE homeserver URL for the whole process, resolved once.
 //
@@ -87,7 +99,7 @@ async function ensureBotUser(config, reg) {
   throw new Error(`${body.errcode || res.status}: ${body.error || "register failed"}`);
 }
 
-const _reg = yaml.load(fs.readFileSync(require("path").join(__dirname, "tunnel-registration.yaml"), "utf8"));
+const _reg = yaml.load(fs.readFileSync(REGISTRATION_PATH, "utf8"));
 const AS_TOKEN = _reg.as_token;
 
 const TAG_STATE_TYPE = "net.41chan.media.tags";
@@ -308,13 +320,47 @@ async function handleImageEvent(bridge, event) {
   const filename =
     (event.content && event.content.body) || mxcUrl.split("/").pop() || "image";
 
-  // Duplicate check: if Danbooru already has a post with this image's md5, skip
-  // the (re-)upload -- which on this fork fails with a 500 on duplicate md5 -- and
+  // WHAT THIS IMAGE MEANS, decided in image-plan.js where it can be tested:
+  // the generation data stripped out (operator ruling 2026-09-28: it must never
+  // be served from the booru's originals), creator tags from what the strip
+  // took, then the duplicate check -- stripped md5, the booru's record of the
+  // raw md5, then the raw md5 itself for posts made before the strip existed.
+  const plan = await imagePlan.planImage({ buffer, contentType, sender: event.sender }, {
+    strip: stripGeneration,
+    creatorTags: extractCreatorTagsFromFields,
+    findPostByMd5: (md5) => danbooru.findPostByMd5(md5),
+    findByRawMd5: (rawMd5) => danbooru.findGenerationByRawMd5(rawMd5),
+    maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
+    log: (line) => console.warn(line),
+  });
+  if (plan.action === "refuse") {
+    // NOTHING is uploaded. A file that may still carry a prompt is not posted
+    // on the strength of a stripper that thinks it did its job; the image
+    // stays in Matrix and a later !backfill picks it up once the stripper
+    // knows the embedding.
+    console.error(`[strip] refusing to post ${mxcUrl}: ${plan.reason}`);
+    return plan.status;
+  }
+
+  // Duplicate check: if Danbooru already has a post for these bytes, skip the
+  // (re-)upload -- which on this fork fails with a 500 on duplicate md5 -- and
   // just point the room's tag state at the existing post. This makes a re-posted
   // image an intended [skip], and still tags the new room correctly.
-  const md5 = require("crypto").createHash("md5").update(buffer).digest("hex");
-  const existing = await danbooru.findPostByMd5(md5);
-  if (existing) {
+  if (plan.action === "duplicate") {
+    const existing = plan.post;
+    // Before the state write, which can return early: the private record does
+    // not depend on this room's power levels. The poster is THIS sender, and no
+    // creator is recorded from here: the booru keeps an existing record from
+    // anyone else (a 409 poster_mismatch, logged as "keeps", not as a failure;
+    // its other 409s are failures in words of their own), and a post's
+    // creator is written once, by the event that created it.
+    if (plan.record) {
+      await imagePlan.recordGeneration(
+        (md5, body) => danbooru.recordGenerationMetadata(md5, body),
+        plan.record,
+        { log: (line) => console.warn(line), info: (line) => console.log(line), postId: existing.id, mxc: mxcUrl },
+      );
+    }
     // Provenance was already recorded when this post was first created. Pull the
     // PUBLIC-SAFE projection so the new room's state matches and never carries
     // private creator tags. Fall back to tag_string for legacy posts with no
@@ -347,39 +393,37 @@ async function handleImageEvent(bridge, event) {
       console.warn(`[tag-state] post #${existing.id} is on the booru but its state was refused in ${roomId}: ${err.message}`);
       return "tags-blocked";
     }
-    console.log(`[skip] duplicate md5 ${md5} -> existing post #${existing.id}`);
+    console.log(`[skip] duplicate md5 ${plan.md5} (${plan.via} bytes) -> existing post #${existing.id}`);
     return "posted";
   }
 
-  const upload = await danbooru.createUploadFromBytes(buffer, filename, contentType);
+  // THE STRIPPED BYTES are what the booru gets, and so what R2 and Cloudflare
+  // serve. Pixels identical to the raw file; only generation text is gone.
+  const upload = await danbooru.createUploadFromBytes(plan.upload.buffer, filename, contentType);
   const completed = await danbooru.waitForUpload(upload.id);
   const uma = completed.upload_media_assets && completed.upload_media_assets[0];
   const uploadMediaAssetId = uma && uma.id;
   if (!uploadMediaAssetId) throw new Error(`No upload media asset produced for upload ${upload.id}`);
 
-  // Two tag sources on the in-flight bytes, both fail-soft:
-  //   AUTO    -- fourier-spectrum (WD ViT v3).
-  //   CREATOR -- the generation prompt embedded in the image (AI-gen PNGs).
+  // Two tag sources, both fail-soft:
+  //   AUTO    -- fourier-spectrum (WD ViT v3), on the bytes the booru holds.
+  //   CREATOR -- the generation prompt embedded in the image, already read by
+  //              planImage from the text the strip took out of it: private
+  //              tags from private text, never from anything left public.
   // A tagger/scrape outage posts with whatever it got rather than wedging the bridge.
   let derived = null;
   try {
-    derived = await autotag(buffer, config);
+    derived = await autotag(plan.upload.buffer, config);
   } catch (err) {
     console.warn(`[autotag] fourier-spectrum unavailable, posting untagged: ${err.message}`);
   }
   const autoTags = (derived && derived.tags) || [];
-  let creatorTags = [], metaTags = [], ocTags = [];
-  try {
-    const scraped = extractCreatorTags(buffer, contentType, { max: config.autotagger && config.autotagger.max_creator_tags });
-    creatorTags = scraped.tags;
-    metaTags = scraped.meta;
-    // Original characters (oc_<name>): the creator naming a character. PUBLIC,
-    // unlike the rest of the prompt -- a name is the point of a name -- so
-    // they go into tag_string below and the booru files them as characters.
-    ocTags = scraped.characters || [];
-  } catch (err) {
-    console.warn(`[creator-tags] prompt scrape failed: ${err.message}`);
-  }
+  const creatorTags = plan.scraped.tags || [];
+  const metaTags = plan.scraped.meta || [];
+  // Original characters (oc_<name>): the creator naming a character. PUBLIC,
+  // unlike the rest of the prompt -- a name is the point of a name -- so
+  // they go into tag_string below and the booru files them as characters.
+  const ocTags = plan.scraped.characters || [];
   // Provenance partition (UI: creator=green, auto=orange, both=gradient; meta =
   // de-emphasised quality/meta section). Creator-only display is privacy-gated
   // chanbooru-side (hidden by default); the bridge still records it.
@@ -392,15 +436,21 @@ async function handleImageEvent(bridge, event) {
   // derived, may leak model names / private notes) never enter it; they travel
   // solely in the provenance partition below, where the booru stores them
   // private-by-default and withholds them from every public projection.
-  // WHO POSTED IT. Minted from the sender of this event, which this homeserver
-  // authenticated, so the tag matches the MXID exactly and the post is
-  // thereafter under that account's control. Null for a remote sender or a
-  // localpart that is not tag-safe; see poster.js.
+  // WHO POSTED IT, as a public label. Minted from the sender of this event,
+  // which this homeserver authenticated, so the tag matches the MXID exactly.
+  // It is a LABEL, not proof: any member can edit a post's tags, so what the
+  // booru trusts for "who is the creator" is the record written just after
+  // createPost below, never this tag. Null for a remote sender or a localpart
+  // that is not tag-safe; see poster.js.
   const posterTag = poster.posterTagFor(event.sender, config.homeserver.domain);
   if (!posterTag) {
     console.warn(`[poster] no artist tag for sender ${event.sender}; posting unattributed`);
   }
-  const publicTags = [...new Set([...autoTags, ...metaTags, ...ocTags, ...(posterTag ? [posterTag] : [])])];
+  // "ai-generated" when the strip removed a generator's own signal: the booru
+  // used to derive it from the file's metadata, and the file it reads no longer
+  // has any. Not when it removed only something shaped like a prompt, which a
+  // photo's caption can be.
+  const publicTags = imagePlan.publicTagsFor({ autoTags, metaTags, ocTags, posterTag, aiGenerated: plan.aiGenerated });
   const rating = (derived && derived.rating) || config.bridge.default_rating;
 
   const post = await danbooru.createPost(uploadMediaAssetId, {
@@ -409,16 +459,42 @@ async function handleImageEvent(bridge, event) {
     source: mxcUrl,
   });
 
-  // Now that the post exists, the tag exists too -- as a general tag. Promote
-  // it. Deliberately after createPost for that reason.
+  // WHO MADE IT, recorded once, now, from the event this homeserver
+  // authenticated (operator ruling 2026-09-29: the creator decides who sees a
+  // post's private data). First after the post exists, before anything private
+  // is hung on it. Fail-soft and loud: without it the private data is visible
+  // to nobody, which is the safe way to be wrong.
   //
   // Fail-soft from here down: the post is CREATED. Anything after it that
   // throws must not report the picture as lost, or a run reads as a total
   // failure while the booru fills up correctly.
+  await imagePlan.recordCreator(
+    (postId, mxid) => danbooru.recordPostCreator(postId, mxid),
+    { postId: post.id, mxid: event.sender, log: (line) => console.warn(line) },
+  );
+
+  // Now that the post exists, the tag exists too -- as a general tag. Promote
+  // it. Deliberately after createPost for that reason.
   try {
     await categoriseArtist(posterTag);
   } catch (err) {
     console.warn(`[poster] artist tag not categorised for post #${post.id}: ${err.message}`);
+  }
+
+  // The generation data the strip removed, to the booru's PRIVATE store, now
+  // that there is a post to hang it on. Keyed by the md5 of the bytes the booru
+  // holds; the booru's own md5 wins if it ever disagrees with ours, because
+  // that is the md5 its readers will ask by.
+  if (plan.record) {
+    const booruMd5 = (post && post.md5) || plan.upload.md5;
+    if (booruMd5 !== plan.upload.md5) {
+      console.warn(`[generation] post #${post.id}: the booru reports md5 ${booruMd5} for bytes we hashed as ${plan.upload.md5}; recording under the booru's`);
+    }
+    await imagePlan.recordGeneration(
+      (md5, body) => danbooru.recordGenerationMetadata(md5, body),
+      { ...plan.record, md5: booruMd5 },
+      { log: (line) => console.warn(line), info: (line) => console.log(line), postId: post.id, mxc: mxcUrl },
+    );
   }
 
   // Single write path (the tag hub): hand the FULL partition to the booru. It
@@ -467,7 +543,9 @@ async function handleImageEvent(bridge, event) {
     console.warn(`[tag-state] post #${post.id} was created but its state was refused in ${roomId}: ${err.message}`);
     return "tags-blocked";
   }
-  console.log(`[done] post #${post.id} tagged (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta / ${ocTags.length} oc)`);
+  const stripped = Object.keys(plan.removed).length;
+  console.log(`[done] post #${post.id} tagged (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta / ${ocTags.length} oc)` +
+    (stripped ? `, ${stripped} generation field(s) stripped from the file` : ""));
   return "posted";
 }
 
@@ -735,7 +813,11 @@ function rescanDeps(bridge) {
     findPostByMd5: (md5) => danbooru.findPostByMd5(md5),
     getTagProjection: (id) => danbooru.getTagProjection(id),
     recordTagSources: (id, partition) => danbooru.recordTagSources(id, partition),
+    recordGenerationMetadata: (md5, body) => danbooru.recordGenerationMetadata(md5, body),
+    findByRawMd5: (rawMd5) => danbooru.findGenerationByRawMd5(rawMd5),
     extract: extractCreatorTags,
+    creatorTags: extractCreatorTagsFromFields,
+    strip: stripGeneration,
     maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
     sendText: (room, text) => bridge.getIntent().sendText(room, text),
     admins: botAdmins(),

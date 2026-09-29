@@ -16,7 +16,9 @@
 // different in kind. It is minted from the sender of a Matrix event on this
 // homeserver, so it EXACTLY matches an MXID the server already authenticated.
 // Posting as @saber:41chan.net makes 41chan_saber the creator, and that post is
-// thereafter explicitly under that account's control.
+// thereafter explicitly under that account's control. (What ENFORCES that
+// control is the creator record the tunnel writes when it makes the post, not
+// this tag, which anyone can edit on the booru: see the end of this file.)
 //
 // That exactness is the load-bearing property. Anything that made the tag
 // disagree with the localpart would break the identity mapping, so the slug
@@ -48,13 +50,13 @@ function posterTagFor(mxid, domain) {
   return `41chan_${local}`;
 }
 
-// The inverse, so a claim or an ownership check can go from tag back to MXID
-// without re-deriving the rule in a second place.
-function mxidForPosterTag(tag, domain) {
-  if (typeof tag !== "string") return null;
-  const m = /^41chan_(.+)$/.exec(tag);
-  if (!m || !SAFE.test(m[1])) return null;
-  return `@${m[1]}:${domain}`;
-}
+// THERE IS NO INVERSE HERE, ON PURPOSE. There was one (mxidForPosterTag), and
+// the generation-data work used it to decide who a post's creator was by
+// reading the post's 41chan_ tags -- which any member can edit (chanbooru
+// PostPolicy#update?), so a member could add their own tag to someone's post
+// and take over its private record. The tag is a public label. Who created a
+// post is the record the tunnel writes once, when it creates the post
+// (danbooru.js recordPostCreator; operator ruling 2026-09-29), and nothing
+// derived from tags may stand in for it.
 
-module.exports = { posterTagFor, mxidForPosterTag, localpartIfLocal, SAFE };
+module.exports = { posterTagFor, localpartIfLocal, SAFE };

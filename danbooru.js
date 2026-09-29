@@ -104,6 +104,66 @@ class DanbooruClient {
     return resp.data; // { post_id, recorded, projection: { tags, sources } }
   }
 
+  // Hand the booru the generation data strip-generation.js took out of an
+  // image, to keep PRIVATELY: readable by the post's creator and whoever the
+  // creator allows, never served (operator rulings 2026-09-28 and 2026-09-29).
+  // Keyed by the md5 of the bytes the booru HOLDS -- the stripped ones -- and
+  // upserted by it.
+  //   rawMd5  the md5 of the bytes BEFORE the strip. The booru keeps the first
+  //           one it is sent, and answers findGenerationByRawMd5 with it.
+  //   source  "matrix" | "discord"
+  //   poster  who sent these bytes (an MXID), or null for an admin's !rescan.
+  //           The booru replaces an existing record's fields only when this
+  //           equals the poster it already has, or is null; otherwise it
+  //           answers 409 and changes nothing -- which is how a stranger's
+  //           re-post of someone's picture is kept off their record.
+  //   fields  { "png:parameters": "<original text>", "exif:UserComment": ..., ... }
+  // The booru never echoes the text back and neither does this: an error names
+  // the status and the booru's own { error, fix }, never a field and never the
+  // URL, which carries the api_key in its query string. A refusal throws a
+  // BooruRefusal carrying .status and the booru's machine-readable .reason, so
+  // a caller can tell one 409 from another and either from a failure:
+  //   poster_mismatch    a record from a different poster exists and stands
+  //   raw_md5_conflict   this raw md5 is already filed under another md5;
+  //                      nothing was written for this one
+  //   raw_md5_mismatch   the record for this md5 names a different raw md5;
+  //                      its fields were not replaced
+  async recordGenerationMetadata(md5, { rawMd5, source, poster, fields }) {
+    const resp = await this._client().post(
+      "/fourier/generation_metadata.json",
+      { md5, raw_md5: rawMd5 || null, source, poster: poster || null, fields },
+      { validateStatus: () => true },
+    );
+    if (resp.status === 200 && resp.data && typeof resp.data === "object" && typeof resp.data.md5 === "string") return resp.data;
+    throw refusal("generation_metadata", resp);
+  }
+
+  // Record who CREATED a post: the Matrix account whose event made it, once, at
+  // creation (operator ruling 2026-09-29: the creator decides who sees a post's
+  // private data). The booru never overwrites a recorded creator -- a different
+  // one is a 409 -- because a post's tags are editable by any member and so
+  // prove nothing about who made it; this record is the proof.
+  async recordPostCreator(postId, mxid) {
+    const resp = await this._client().post(
+      `/fourier/posts/${postId}/creator.json`,
+      { mxid },
+      { validateStatus: () => true },
+    );
+    if (resp.status === 200 && resp.data && typeof resp.data === "object" && resp.data.mxid === mxid) return resp.data;
+    if (resp.status === 200) throw new BooruRefusal(`posts/${postId}/creator -> 200 but the booru names ${JSON.stringify(resp.data && resp.data.mxid)}, not ${mxid}`, 200, {});
+    throw refusal(`posts/${postId}/creator`, resp);
+  }
+
+  // The booru md5 of the post whose generation record was filed from these RAW
+  // bytes, or null. This is how a re-post is recognised after the strip rules
+  // change: md5(strip(raw)) moves with the rules, md5(raw) does not.
+  async findGenerationByRawMd5(rawMd5) {
+    const resp = await this._client().get(`/fourier/generation_metadata/raw/${rawMd5}.json`, { validateStatus: () => true });
+    if (resp.status === 404) return null;
+    if (resp.status === 200 && resp.data && typeof resp.data.md5 === "string" && /^[0-9a-f]{32}$/.test(resp.data.md5)) return resp.data.md5;
+    throw refusal("generation_metadata/raw", resp);
+  }
+
   // Fetch a post's PUBLIC-SAFE tag projection (used for a duplicate image whose
   // provenance is already recorded). Never includes private creator tags.
   async getTagProjection(postId) {
@@ -154,4 +214,25 @@ class DanbooruClient {
   }
 }
 
-module.exports = { DanbooruClient, sleep };
+// A booru answer that is not success, told by its status and, where the booru
+// gives one, its machine-readable `reason`. The message names the endpoint,
+// the status, the reason and the booru's own { error, fix } -- never a field
+// and never the URL.
+class BooruRefusal extends Error {
+  constructor(message, status, body) {
+    super(message);
+    this.name = "BooruRefusal";
+    this.status = status;
+    this.error = body && body.error;
+    this.fix = body && body.fix;
+    this.reason = body && typeof body.reason === "string" ? body.reason : undefined;
+  }
+}
+function refusal(what, resp) {
+  const body = resp.data && typeof resp.data === "object" ? resp.data : {};
+  const why = [body.error, body.fix && `fix: ${body.fix}`].filter(Boolean).join(" -- ");
+  const reason = typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "";
+  return new BooruRefusal(`${what} -> ${resp.status}${reason}${why ? `: ${why}` : ": the booru gave no reason"}`, resp.status, body);
+}
+
+module.exports = { DanbooruClient, BooruRefusal, sleep };

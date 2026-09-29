@@ -67,20 +67,23 @@ async function backfillRoom({ roomId, fetchPage, onImage, cap = DEFAULT_CAP, log
     throw new TypeError("backfillRoom requires log(): a failure nobody can read is not a report");
   }
   let from;
-  let seen = 0, done = 0, blocked = 0, failed = 0, pages = 0;
+  let seen = 0, done = 0, blocked = 0, refused = 0, failed = 0, pages = 0;
   const started = Date.now();
 
-  while (pages < MAX_PAGES && done + blocked + failed < cap) {
+  while (pages < MAX_PAGES && done + blocked + refused + failed < cap) {
     const page = await fetchPage(from);
     pages++;
     const images = imagesIn(page && page.chunk);
     seen += images.length;
 
     for (const ev of images) {
-      if (done + blocked + failed >= cap) break;
+      if (done + blocked + refused + failed >= cap) break;
       try {
         const outcome = await onImage(ev);
         if (outcome === "tags-blocked") blocked++;
+        // Generation data that would not strip: the picture was NOT posted
+        // (image-plan.js). Counting it as done would say it was.
+        else if (outcome === "strip-refused") refused++;
         else done++;
       } catch (err) {
         failed++;
@@ -94,13 +97,14 @@ async function backfillRoom({ roomId, fetchPage, onImage, cap = DEFAULT_CAP, log
     from = page.end;
   }
 
-  return { roomId, seen, done, blocked, failed, pages, capped: done + blocked + failed >= cap, ms: Date.now() - started };
+  return { roomId, seen, done, blocked, refused, failed, pages, capped: done + blocked + refused + failed >= cap, ms: Date.now() - started };
 }
 
 /** One line an operator can read without decoding it. */
 function summarise(r) {
   const bits = [`${r.done} done`];
   if (r.blocked) bits.push(`${r.blocked} posted but tag state blocked`);
+  if (r.refused) bits.push(`${r.refused} NOT posted: generation data would not strip (see the [strip] lines)`);
   if (r.failed) bits.push(`${r.failed} failed`);
   if (r.capped) bits.push(`stopped at the cap`);
   return `[backfill] ${r.roomId}: ${r.seen} image(s) found, ${bits.join(", ")} in ${Math.round(r.ms / 1000)}s`;

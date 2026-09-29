@@ -282,6 +282,14 @@ async function syncDir(dir) {
  *
  * The media shape of publishEntry. The sidecar schema is fourier-sampling's
  * (src/drop/types.ts), and so is the remedy for a missing queue.
+ *
+ * `bytes` MUST ALREADY BE STRIPPED (strip-generation.js; operator ruling
+ * 2026-09-28): what lands here ends up served from R2, and generation data
+ * must never be. The text the strip removed does not travel in the sidecar;
+ * it goes to the booru's private store by md5, with the raw md5 beside it,
+ * the way the live path sends it (danbooru.js recordGenerationMetadata), and
+ * the post's creator is recorded once the post exists (recordPostCreator;
+ * ruling 2026-09-29). This module is not wired live.
  */
 async function publish(spoolRoot, sidecar, bytes) {
   if (!Buffer.isBuffer(bytes) || bytes.length === 0) {

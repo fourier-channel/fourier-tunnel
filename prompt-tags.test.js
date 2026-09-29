@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const zlib = require("node:zlib");
-const { extractCreatorTags, pngTextChunks, promptToTags } = require("./prompt-tags");
+const { extractCreatorTags, extractCreatorTagsFromFields, pngTextChunks, promptToTags } = require("./prompt-tags");
 
 const SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 function chunk(type, data) {
@@ -228,4 +228,44 @@ test("original characters: both shapes, and a weighted token split from the word
 test("splitting leaves qualifiers, weights and emphasis exactly as before", () => {
   assert.deepEqual(promptToTags("hilda (pokemon), (smile:1.2), ((masterpiece)), hilda \\(pokemon\\):1.3").tags, ["hilda_(pokemon)", "smile"]);
   assert.deepEqual(promptToTags("1girl (smile:1.2) solo").tags, ["1girl", "smile", "solo"]);
+});
+
+// --- UserComment's charset header -------------------------------------------
+
+test("decodeUserComment: only the four headers the EXIF spec names are dropped; anything else is text from its first byte", () => {
+  const { decodeUserComment } = require("./prompt-tags");
+  const record = "{\"prompt\": \"a lighthouse\", \"styles\": [\"fooocus_v2\"]}";
+  assert.equal(decodeUserComment(Buffer.from(record, "utf8")), record, "Pillow writes no header at all (Fooocus)");
+  assert.equal(decodeUserComment(Buffer.from("a lighthouse on a cliff\0\0", "utf8")), "a lighthouse on a cliff");
+  assert.equal(decodeUserComment(ascii("a cat")), "a cat");
+  assert.equal(decodeUserComment(Buffer.concat([Buffer.alloc(8), Buffer.from("a cat\0")])), "a cat", "all-NUL: undefined charset");
+  assert.equal(decodeUserComment(unicodeBE("a cat")), "a cat");
+  assert.equal(decodeUserComment(unicodeLE("a cat")), "a cat");
+  assert.equal(decodeUserComment(Buffer.concat([Buffer.from("JIS\0\0\0\0\0", "latin1"), Buffer.from("abc")])), "abc");
+  assert.equal(decodeUserComment(Buffer.from("short")), "short");
+  // And through the whole reader: the prompt a header-less comment holds.
+  assert.deepEqual(extractCreatorTags(jpeg(tiff({ userComment: Buffer.from(record, "utf8") })), "image/jpeg").tags, ["a_lighthouse"]);
+});
+
+// --- creator tags from what the strip took: shapes only it identifies ----------
+
+test("from the fields: a ComfyUI WebP's labelled extra entries are not a prompt; its graph is", () => {
+  const graph = JSON.stringify({ 6: { class_type: "CLIPTextEncode", inputs: { text: "a red fox, snow" } } });
+  const fields = { "exif:ImageDescription": "comfy_version:{\"v\": \"0.3.10\"}", "exif:Model": `prompt:${graph}`, "exif:DocumentName": "custom_note:{\"text\": \"x\"}" };
+  assert.deepEqual(extractCreatorTagsFromFields(fields).tags, ["a_red_fox", "snow"]);
+});
+
+test("from the fields: Mochi Diffusion's \"Include in Image:\" line is the prompt, in whichever caption it came", () => {
+  const mochi = "Metadata Version: 2\nInclude in Image: a lighthouse, dramatic sky\nExclude from Image: blurry\nSteps: 30";
+  assert.deepEqual(extractCreatorTagsFromFields({ "iptc:Caption-Abstract": mochi }).tags, ["a_lighthouse", "dramatic_sky"]);
+  const inXmp = "<dc:description><rdf:Alt><rdf:li>Metadata Version: 2&#xA;Include in Image: a lighthouse, dramatic sky&#xA;Steps: 30</rdf:li></rdf:Alt></dc:description>";
+  assert.deepEqual(extractCreatorTagsFromFields({ xmp: inXmp }).tags, ["a_lighthouse", "dramatic_sky"]);
+});
+
+test("from the fields: the stealth copy is read only when nothing else is there -- NovelAI's JSON, or the extension's bare text", () => {
+  const nai = JSON.stringify({ Description: "1girl, silver hair", Comment: JSON.stringify({ prompt: "1girl, silver hair" }) });
+  assert.deepEqual(extractCreatorTagsFromFields({ "png:stealth": nai }).tags, ["1girl", "silver_hair"]);
+  assert.deepEqual(extractCreatorTagsFromFields({ "png:stealth": "1girl, hoodie\nNegative prompt: x" }).tags, ["1girl", "hoodie"]);
+  assert.deepEqual(extractCreatorTagsFromFields({ "png:parameters": "a cat\nSteps: 1", "png:stealth": "1girl, hoodie" }).tags, ["a_cat"], "the text chunk it duplicates wins");
+  assert.deepEqual(extractCreatorTagsFromFields({ "png:stealth": "[undecodable stealth_pngcomp payload, 80 bits declared, base64] AAAA" }).tags, []);
 });

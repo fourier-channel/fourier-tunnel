@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// Re-read one image's metadata and rewrite its creator provenance, from the
-// command line: `node rescan.js <mxc://... | md5> [more...]`. The same
-// capability the bot's !rescan runs, with the same real dependencies, for an
-// operator at a shell rather than in a DM. Nothing here starts the bridge.
+// Re-read one image's metadata and rewrite its creator provenance and its
+// private generation record, from the command line:
+// `node rescan.js <mxc://... | md5> [more...]`. The same capability the bot's
+// !rescan runs, with the same real dependencies, for an operator at a shell
+// rather than in a DM. Nothing here starts the bridge.
 "use strict";
 
 const fs = require("fs");
@@ -10,7 +11,8 @@ const path = require("path");
 const yaml = require("js-yaml");
 const axios = require("axios");
 const { DanbooruClient } = require("./danbooru");
-const { extractCreatorTags } = require("./prompt-tags");
+const { extractCreatorTags, extractCreatorTagsFromFields } = require("./prompt-tags");
+const { stripGeneration } = require("./strip-generation");
 const { rescan } = require("./capabilities/rescan");
 
 const config = yaml.load(fs.readFileSync(path.join(__dirname, "config.yaml"), "utf8"));
@@ -33,7 +35,11 @@ async function main() {
     findPostByMd5: (md5) => danbooru.findPostByMd5(md5),
     getTagProjection: (id) => danbooru.getTagProjection(id),
     recordTagSources: (id, partition) => danbooru.recordTagSources(id, partition),
+    recordGenerationMetadata: (md5, body) => danbooru.recordGenerationMetadata(md5, body),
+    findByRawMd5: (rawMd5) => danbooru.findGenerationByRawMd5(rawMd5),
     extract: extractCreatorTags,
+    creatorTags: extractCreatorTagsFromFields,
+    strip: stripGeneration,
     maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
     audit: (record) => console.log("[audit]", JSON.stringify(record)),
   };
