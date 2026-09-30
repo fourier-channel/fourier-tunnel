@@ -22,6 +22,8 @@ const zlib = require("node:zlib");
 const crypto = require("node:crypto");
 const { stripGeneration, crc32 } = require("./strip-generation");
 const { extractCreatorTags } = require("./prompt-tags");
+const { createCanon, keys } = require("./canon");
+const { DanbooruClient } = require("./danbooru");
 
 const md5 = (b) => crypto.createHash("md5").update(b).digest("hex");
 const ALICE = "@alice:41chan.net";
@@ -100,8 +102,20 @@ function reset() {
     tagSources: [],      // POST /posts/:id/tag_sources.json bodies
     state: [],           // state events the bridge sent
     replies: {},         // overrides: { creator: [status, body], generation: [status, body] }
+    bucket: new Map(),   // R2, in memory: key -> { body, type }
   };
 }
+
+// R2 for canon.js, over world.bucket. Real canon, real strip, real booru client
+// against the stand-in: only the object store is in memory.
+const md5hex = (b) => crypto.createHash("md5").update(b).digest("hex");
+const store = {
+  async head(k) { const o = world.bucket.get(k); return o ? { size: o.body.length, etag: md5hex(o.body), type: o.type } : null; },
+  async get(k) { const o = world.bucket.get(k); return o ? Buffer.from(o.body) : null; },
+  async put(k, body, type) { world.bucket.set(k, { body: Buffer.from(body), type }); return md5hex(body); },
+  async copy(from, to) { world.bucket.set(to, { ...world.bucket.get(from) }); },
+  async remove(k) { world.bucket.delete(k); },
+};
 reset();
 
 function multipartFile(req, body) {
@@ -194,6 +208,12 @@ before(async () => {
   process.env.ONBOARDING_STATE_DIR = dir;
   delete process.env.HOMESERVER_URL;
   index = require("./index");
+  index.setCanon(createCanon({
+    store,
+    mediaInfo: async (id) => (world.media[id] ? { media_type: world.media[id].type, user_id: world.media[id].sender } : null),
+    booru: new DanbooruClient(index.config.danbooru),
+    log: (line) => console.warn(line),
+  }));
 });
 after(() => {
   server.close();
@@ -204,7 +224,8 @@ beforeEach(reset);
 
 // One image event through the real handler, with everything it logs.
 async function post(id, bytes, type, sender) {
-  world.media[id] = { bytes, type };
+  world.media[id] = { bytes, type, sender };
+  world.bucket.set(keys.source(id), { body: Buffer.from(bytes), type });
   const lines = [];
   const saved = { log: console.log, warn: console.warn, error: console.error };
   for (const k of Object.keys(saved)) console[k] = (...a) => lines.push(`${k}: ${a.join(" ")}`);
@@ -235,16 +256,25 @@ test("a new AI image: the STRIPPED bytes are what the booru and spectrum get, an
   assert.equal(world.uploads[0].indexOf("Negative prompt"), -1, "no prompt in what was uploaded");
   assert.ok(world.tagged[0].equals(stripped), "spectrum was sent the stripped bytes too");
 
-  // The duplicate check asked all three ways BEFORE anything was uploaded.
+  // Canon filed the record FIRST (one writer of it), then the duplicate check
+  // asked all three ways, all BEFORE anything was uploaded. Nothing was
+  // downloaded from Synapse: its copy is not the file.
   const lookups = world.requests.slice(0, at("POST /uploads.json"));
-  assert.deepEqual(lookups.filter((r) => r !== "GET /_matrix/client/v1/media/download/41chan.net/a1111"), [
+  assert.deepEqual(lookups, [
+    "POST /fourier/generation_metadata.json",
     "GET /posts.json", `GET /fourier/generation_metadata/raw/${md5(A1111_PNG)}.json`, "GET /posts.json",
   ]);
 
   const created = at("POST /posts.json");
   const creator = at(`POST /fourier/posts/${POST_ID}/creator.json`);
-  const record = at("POST /fourier/generation_metadata.json");
-  assert.ok(created >= 0 && creator > created && record > creator, `post, then creator, then record: ${world.requests.join(", ")}`);
+  assert.ok(created >= 0 && creator > created, `post, then creator: ${world.requests.join(", ")}`);
+  assert.equal(world.requests.filter((r) => r === "POST /fourier/generation_metadata.json").length, 1, "one record, from canon");
+
+  // THE ONE FILE: the stripped bytes, at their md5, in the bucket; Synapse's
+  // original moved to superseded/, not deleted.
+  assert.ok(world.bucket.get(`media/${md5(stripped)}.png`).body.equals(stripped));
+  assert.equal(world.bucket.has(keys.source("a1111")), false);
+  assert.ok(world.bucket.get(keys.superseded("a1111")).body.equals(A1111_PNG));
   assert.deepEqual(world.creators, [{ postId: POST_ID, mxid: ALICE }]);
   assert.deepEqual(world.metadata, [{ md5: md5(stripped), raw_md5: md5(A1111_PNG), source: "matrix", poster: ALICE, fields: { "png:parameters": PARAMS } }]);
 
@@ -255,11 +285,12 @@ test("a new AI image: the STRIPPED bytes are what the booru and spectrum get, an
 });
 
 test("an image the strip refuses uploads NOTHING -- not the file, not a post, not a creator, not a record", async () => {
-  const { outcome, lines } = await post("avif", AVIF_WITH_EXIF, "image/avif", ALICE);
+  const { outcome, lines } = await post("avif1", AVIF_WITH_EXIF, "image/avif", ALICE);
   assert.equal(outcome, "strip-refused");
-  assert.deepEqual(world.requests, ["GET /_matrix/client/v1/media/download/41chan.net/avif"], "the download, and nothing after it");
+  assert.deepEqual(world.requests, [], "nothing asked of anyone");
+  assert.ok(world.bucket.has(keys.source("avif1")), "its original stays where it is");
   assert.equal(world.uploads.length + world.tagged.length + world.creators.length + world.metadata.length, 0);
-  assert.ok(lines.some((l) => /^error: \[strip\] refusing to post mxc:\/\/41chan.net\/avif: .*an Exif item/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /^error: \[strip\] refusing to post mxc:\/\/41chan.net\/avif1: .*an Exif item/.test(l)), lines.join("\n"));
 });
 
 test("a plain picture goes up byte for byte: its creator is recorded, no record is sent, and it is not ai-generated", async () => {
@@ -282,8 +313,8 @@ test("someone else re-posting it: nothing uploaded, NO creator recorded, the rec
   assert.equal(world.uploads.length, 0, "not uploaded twice");
   assert.deepEqual(world.creators, [], "a re-post never records a creator");
   assert.deepEqual(world.metadata, [{ md5: md5(stripped), raw_md5: md5(A1111_PNG), source: "matrix", poster: ALICE, fields: { "png:parameters": PARAMS } }]);
-  assert.ok(lines.some((l) => /^log: \[generation\] post #42 keeps the record it already has/.test(l)), lines.join("\n"));
-  assert.ok(!lines.some((l) => /NOT RECORDED/.test(l)), "a 409 is not reported as a failure");
+  assert.ok(lines.some((l) => /^warn: \[canon\] repost: the booru keeps the record it already has for /.test(l)), lines.join("\n"));
+  assert.ok(!lines.some((l) => /NOT filed|NOT RECORDED/.test(l)), "a 409 from another poster is not reported as a failure");
   assert.equal(world.state[0].content.post_id, POST_ID);
 });
 
@@ -294,7 +325,9 @@ test("a picture posted under OLDER strip rules is found through the booru's raw-
   const { outcome } = await post("older", A1111_PNG, "image/png", BOB);
   assert.equal(outcome, "posted");
   assert.equal(world.uploads.length, 0);
-  assert.equal(world.metadata[0].md5, older, "the record is keyed by the md5 of the bytes the booru holds");
+  // Canon files the record for the ONE file -- the stripped bytes under today's
+  // rules -- once, with the uploader as poster.
+  assert.equal(world.metadata[0].md5, md5(stripGeneration(A1111_PNG, "image/png").buffer));
   assert.equal(world.metadata[0].poster, BOB);
 });
 
@@ -312,14 +345,14 @@ test("a raw_md5 already filed under another md5 is NOT \"kept\": the new post ha
   world.replies.generation = [409, { error: "raw_md5 is already filed under md5 0123", fix: "GET the raw lookup", reason: "raw_md5_conflict" }];
   const { outcome, lines } = await post("conflict", A1111_PNG, "image/png", ALICE);
   assert.equal(outcome, "posted", "the post itself is made");
-  assert.ok(lines.some((l) => /^warn: \[generation\] NOT RECORDED for post #42 .*already filed under a DIFFERENT md5.*Fix: GET \/fourier\/generation_metadata\/raw\//.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /^warn: \[canon\] conflict: NOT filed under .*already filed under a DIFFERENT md5.*Fix: GET \/fourier\/generation_metadata\/raw\//.test(l)), lines.join("\n"));
   assert.ok(!lines.some((l) => /keeps the record it already has/.test(l)), "never the line a stood record gets");
 });
 
 test("the private creator tags come from what the strip TOOK -- never from the raw bytes -- whichever way the two differ", async () => {
   // Easy Diffusion: only the strip can read the prompt.
   assert.deepEqual(extractCreatorTags(ED_PNG, "image/png").tags, [], "precondition: nothing readable from the raw bytes");
-  const ed = await post("ed", ED_PNG, "image/png", ALICE);
+  const ed = await post("edpng", ED_PNG, "image/png", ALICE);
   assert.equal(ed.outcome, "posted", ed.lines.join("\n"));
   assert.deepEqual(world.tagSources[0].creator, ["a_lighthouse", "stormy_sea", "gulls"], "the prompt the strip took, as private creator tags");
   assert.ok(!world.created[0].post.tag_string.split(" ").includes("gulls"), "and none of it public");

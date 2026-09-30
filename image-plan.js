@@ -111,7 +111,7 @@ function publicTagsFor({ autoTags = [], metaTags = [], ocTags = [], posterTag = 
  *   whose it is. On "upload" its md5 is the stripped md5 and the caller swaps
  *   in the booru's if the created post reports a different one.
  */
-async function planImage({ buffer, contentType, sender }, deps) {
+async function planImage({ buffer, contentType, sender, rawMd5: knownRawMd5 }, deps) {
   const { strip, creatorTags, findPostByMd5, findByRawMd5, log } = deps;
   if (typeof log !== "function") throw new TypeError("planImage requires log(): a failure nobody can read is not a report");
 
@@ -122,7 +122,9 @@ async function planImage({ buffer, contentType, sender }, deps) {
   } catch (err) {
     return { action: "refuse", status: STRIP_REFUSED, reason: err && err.message ? err.message : String(err) };
   }
-  const rawMd5 = md5hex(buffer);
+  // canon.js knows the raw md5 even when the raw bytes are no longer at hand
+  // (an image made canonical earlier, its original since reviewed and deleted).
+  const rawMd5 = knownRawMd5 || md5hex(buffer);
   const upload = { buffer: stripped.buffer, md5: stripped.changed ? md5hex(stripped.buffer) : rawMd5 };
   const removed = stripped.removed || {};
 

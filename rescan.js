@@ -16,15 +16,32 @@ const { stripGeneration } = require("./strip-generation");
 const { rescan } = require("./capabilities/rescan");
 
 const config = yaml.load(fs.readFileSync(path.join(__dirname, "config.yaml"), "utf8"));
-const reg = yaml.load(fs.readFileSync(path.join(__dirname, "tunnel-registration.yaml"), "utf8"));
 const danbooru = new DanbooruClient(config.danbooru);
 
+// The raw original through canon.js, as the bot's !rescan reads it (index.js
+// canonRawForRescan): superseded/ holds it once the image is canonical, until
+// the operator deletes it; otherwise the one file. Synapse's own copy is not
+// asked for -- after canon it is not where Synapse would look.
+const canonLib = require("./canon");
+const canon = canonLib.createCanon({
+  store: canonLib.r2Store(canonLib.r2FromEnv()),
+  mediaInfo: canonLib.synapseMediaInfo({ axios, homeserverUrl: config.homeserver.url, domain: config.homeserver.domain, adminToken: config.homeserver.admin_token }),
+  booru: danbooru,
+  log: (line) => console.warn(line),
+});
 async function download(mxcUrl) {
-  const m = mxcUrl.match(/^mxc:\/\/([^/]+)\/(.+)$/);
+  const m = mxcUrl.match(/^mxc:\/\/([^/]+)\/([^/?#]+)$/);
   if (!m) throw new Error(`Invalid mxc URL: ${mxcUrl}`);
-  const url = `${config.homeserver.url}/_matrix/client/v1/media/download/${m[1]}/${m[2]}`;
-  const resp = await axios.get(url, { headers: { Authorization: `Bearer ${reg.as_token}` }, responseType: "arraybuffer", timeout: 30000 });
-  return { buffer: Buffer.from(resp.data), contentType: resp.headers["content-type"] || "application/octet-stream" };
+  if (m[1] !== config.homeserver.domain) throw new Error(`${mxcUrl} is not media on this homeserver`);
+  const c = await canon.canonicalize(m[2], { withBytes: true });
+  if (c.kind !== "canonical") throw new Error(`${mxcUrl} is ${c.kind}${c.reason ? `: ${c.reason}` : ""}`);
+  // No raw original, no rescan: re-reading the STRIPPED file finds no prompt,
+  // and a rescan that reads nothing replaces the post's creator tags with
+  // nothing. Refused in words instead.
+  if (!c.raw) {
+    throw new Error(`the original of ${mxcUrl}, the only file that carried its generation data, is gone (superseded/ was cleared). There is nothing to re-read; the post's creator tags are left as they are.`);
+  }
+  return { buffer: c.raw, contentType: c.media_type };
 }
 
 async function main() {

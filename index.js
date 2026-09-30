@@ -45,13 +45,65 @@ const config = yaml.load(fs.readFileSync(CONFIG_PATH, "utf8"));
 // config.yaml names Synapse by its compose-network hostname, which is correct
 // inside the bridge container and unreachable from anywhere else. HOMESERVER_URL
 // says where it answers from HERE. Resolved back INTO the config so that all
-// five call sites -- registration, media download, history paging, joined_rooms
+// call sites -- registration, canon's media lookup, history paging, joined_rooms
 // and the Bridge itself -- agree by construction rather than by everyone
 // remembering to check. tools/catch-up-room.js used to resolve its own URL for
 // paging and leave downloadFromSynapse on the configured one; the run walked the
 // room fine and then failed all 419 downloads with EAI_AGAIN synapse.
 config.homeserver.url = resolveHomeserverUrl(process.env, config.homeserver.url);
 const danbooru = new DanbooruClient(config.danbooru);
+
+// ONE FILE PER IMAGE (canon.js). Every Matrix image the tunnel handles -- and
+// every one the media gate is asked for, through the service below -- becomes
+// the one stripped file in R2 before anything else touches it. Built on first
+// use, so a process that never handles an image never needs R2 credentials.
+const canonLib = require("./canon");
+let canonInstance = null;
+function getCanon() {
+  if (!canonInstance) {
+    canonInstance = canonLib.createCanon({
+      store: canonLib.r2Store(canonLib.r2FromEnv()),
+      mediaInfo: canonLib.synapseMediaInfo({
+        axios,
+        homeserverUrl: config.homeserver.url,
+        domain: config.homeserver.domain,
+        adminToken: config.homeserver.admin_token,
+      }),
+      booru: danbooru,
+      log: (line) => console.warn(line),
+    });
+  }
+  return canonInstance;
+}
+// Tests hand in a canon over an in-memory bucket.
+function setCanon(c) {
+  canonInstance = c;
+}
+
+// The media gate (fourier-auth) asks here for any Matrix original it has no
+// index entry for, so no link ever leads to a file that still has a prompt in
+// it. Internal: the port is published to no host, only the docker networks
+// this container shares with the gate. POST /canon/<mediaId> -> the index entry.
+function startCanonService(port) {
+  const http = require("http");
+  const server = http.createServer((req, res) => {
+    const reply = (status, body) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    const m = /^\/canon\/([A-Za-z0-9_-]{1,128})$/.exec((req.url || "").split("?")[0]);
+    if (req.method !== "POST" || !m) return reply(404, { error: "no such route", fix: "POST /canon/<mediaId>" });
+    getCanon().canonicalize(m[1]).then(
+      (idx) => reply(200, idx),
+      (err) => {
+        console.error(`[canon] ${m[1]}: ${err.message}`);
+        reply(err.status || 500, { error: err.message, retryable: err.retryable !== false });
+      },
+    );
+  });
+  server.listen(port, "0.0.0.0", () => console.log(`[canon] answering the media gate on ${port} (docker networks only)`));
+  return server;
+}
 
 // Load the appservice token from the registration file for authenticated
 // media downloads from Synapse.
@@ -141,45 +193,6 @@ function isRoomDisabled(roomId) {
   return (config.bridge.disabled_rooms || []).includes(roomId);
 }
 
-async function downloadFromSynapse(mxcUrl, asToken) {
-  const match = mxcUrl.match(/^mxc:\/\/([^/]+)\/(.+)$/);
-  if (!match) throw new Error(`Invalid mxc URL: ${mxcUrl}`);
-  const [, serverName, mediaId] = match;
-  const url = `${config.homeserver.url}/_matrix/client/v1/media/download/${serverName}/${mediaId}`;
-  let resp;
-  try {
-    resp = await axios.get(url, {
-      headers: { Authorization: `Bearer ${asToken}` },
-      responseType: "arraybuffer",
-      timeout: 30000,
-    });
-  } catch (err) {
-    // Axios says only "Request failed with status code 403". Synapse says WHY,
-    // in the body, and the difference decides what an operator should do:
-    // "Federation denied with matrix.org" is PERMANENT under an empty
-    // federation_domain_whitelist and no amount of rerunning reaches it, while a
-    // 404 is a missing file and a 429 is worth retrying. 59 images in one room
-    // failed identically for weeks behind that one unreadable sentence.
-    const status = err.response && err.response.status;
-    let detail = "";
-    if (err.response && err.response.data) {
-      try {
-        const body = JSON.parse(Buffer.from(err.response.data).toString("utf8"));
-        detail = [body.errcode, body.error].filter(Boolean).join(" ");
-      } catch {
-        detail = ""; // a non-JSON body tells us nothing; the status still does
-      }
-    }
-    throw new Error(
-      `media download ${serverName}/${mediaId} -> ${status || err.code || "failed"}` +
-      (detail ? `: ${detail}` : ""),
-    );
-  }
-  return {
-    buffer: Buffer.from(resp.data),
-    contentType: resp.headers["content-type"] || "application/octet-stream",
-  };
-}
 
 // Artist tags already put in their category this process. The poster tag
 // repeats on every image the same person posts, and without this that is two
@@ -315,8 +328,28 @@ async function handleImageEvent(bridge, event) {
   }
   console.log(`[image] ${mxcUrl} in ${roomId}`);
 
-  const asToken = AS_TOKEN;
-  const { buffer, contentType } = await downloadFromSynapse(mxcUrl, asToken);
+  // THE ONE FILE (canon.js): the image made canonical -- stripped, stored once
+  // as media/<md5>.<ext>, its generation data filed privately, Synapse's
+  // original moved aside -- BEFORE anything is posted. The bytes the booru gets
+  // are those same bytes, so the booru's upload lands on that same key and is
+  // not a second copy. Nothing is downloaded from Synapse any more: its copy is
+  // not the file.
+  const mxc = /^mxc:\/\/([^/]+)\/([^/?#]+)$/.exec(mxcUrl);
+  if (!mxc || mxc[1] !== config.homeserver.domain) {
+    console.warn(`[canon] ${mxcUrl} is not media on this homeserver; not posted`);
+    return "not-local";
+  }
+  const canonical = await getCanon().canonicalize(mxc[2], { withBytes: true, poster: event.sender });
+  if (canonical.kind === "refused") {
+    console.error(`[strip] refusing to post ${mxcUrl}: ${canonical.reason}`);
+    return imagePlan.STRIP_REFUSED;
+  }
+  if (canonical.kind !== "canonical") {
+    console.warn(`[canon] ${mxcUrl} is ${canonical.media_type}, not an image the booru takes; not posted`);
+    return "not-image";
+  }
+  const contentType = canonical.media_type;
+  const buffer = canonical.raw || canonical.bytes;
   const filename =
     (event.content && event.content.body) || mxcUrl.split("/").pop() || "image";
 
@@ -325,8 +358,10 @@ async function handleImageEvent(bridge, event) {
   // be served from the booru's originals), creator tags from what the strip
   // took, then the duplicate check -- stripped md5, the booru's record of the
   // raw md5, then the raw md5 itself for posts made before the strip existed.
-  const plan = await imagePlan.planImage({ buffer, contentType, sender: event.sender }, {
-    strip: stripGeneration,
+  const plan = await imagePlan.planImage({ buffer, contentType, sender: event.sender, rawMd5: canonical.raw_md5 }, {
+    // Canon already stripped it; the plan must post EXACTLY those bytes, never a
+    // re-strip that newer rules could make into a different file.
+    strip: () => ({ buffer: canonical.bytes, removed: canonical.removed || {}, changed: canonical.stripped, confident: canonical.confident }),
     creatorTags: extractCreatorTagsFromFields,
     findPostByMd5: (md5) => danbooru.findPostByMd5(md5),
     findByRawMd5: (rawMd5) => danbooru.findGenerationByRawMd5(rawMd5),
@@ -354,13 +389,8 @@ async function handleImageEvent(bridge, event) {
     // anyone else (a 409 poster_mismatch, logged as "keeps", not as a failure;
     // its other 409s are failures in words of their own), and a post's
     // creator is written once, by the event that created it.
-    if (plan.record) {
-      await imagePlan.recordGeneration(
-        (md5, body) => danbooru.recordGenerationMetadata(md5, body),
-        plan.record,
-        { log: (line) => console.warn(line), info: (line) => console.log(line), postId: existing.id, mxc: mxcUrl },
-      );
-    }
+    // The generation record is canon.js's to file, once per image, with the
+    // uploader as poster -- not this handler's, so there is one writer of it.
     // Provenance was already recorded when this post was first created. Pull the
     // PUBLIC-SAFE projection so the new room's state matches and never carries
     // private creator tags. Fall back to tag_string for legacy posts with no
@@ -481,21 +511,8 @@ async function handleImageEvent(bridge, event) {
     console.warn(`[poster] artist tag not categorised for post #${post.id}: ${err.message}`);
   }
 
-  // The generation data the strip removed, to the booru's PRIVATE store, now
-  // that there is a post to hang it on. Keyed by the md5 of the bytes the booru
-  // holds; the booru's own md5 wins if it ever disagrees with ours, because
-  // that is the md5 its readers will ask by.
-  if (plan.record) {
-    const booruMd5 = (post && post.md5) || plan.upload.md5;
-    if (booruMd5 !== plan.upload.md5) {
-      console.warn(`[generation] post #${post.id}: the booru reports md5 ${booruMd5} for bytes we hashed as ${plan.upload.md5}; recording under the booru's`);
-    }
-    await imagePlan.recordGeneration(
-      (md5, body) => danbooru.recordGenerationMetadata(md5, body),
-      { ...plan.record, md5: booruMd5 },
-      { log: (line) => console.warn(line), info: (line) => console.log(line), postId: post.id, mxc: mxcUrl },
-    );
-  }
+  // The generation data went to the booru's private store already, from canon.js,
+  // keyed by the md5 of the one file -- the same bytes this post holds.
 
   // Single write path (the tag hub): hand the FULL partition to the booru. It
   // records it, keeps creator-only tags private, fans out to consumers, and hands
@@ -803,13 +820,32 @@ async function handleResetCommand(bridge, event) {
   return true;
 }
 
+// What !rescan reads: the RAW original through canon.js (superseded/ holds it
+// once the image is canonical, until the operator deletes it), else the one
+// file itself -- which still finds the post, with no generation text to re-read.
+// Synapse's own copy is not asked for: after canon it is not where Synapse
+// would look.
+async function canonRawForRescan(mxcUrl) {
+  const m = /^mxc:\/\/([^/]+)\/([^/?#]+)$/.exec(mxcUrl);
+  if (!m || m[1] !== config.homeserver.domain) throw new Error(`${mxcUrl} is not media on this homeserver`);
+  const c = await getCanon().canonicalize(m[2], { withBytes: true });
+  if (c.kind !== "canonical") throw new Error(`${mxcUrl} is ${c.kind}${c.reason ? `: ${c.reason}` : ""}`);
+  // No raw original, no rescan: re-reading the STRIPPED file finds no prompt,
+  // and a rescan that reads nothing replaces the post's creator tags with
+  // nothing. Refused in words instead.
+  if (!c.raw) {
+    throw new Error(`the original of ${mxcUrl}, the only file that carried its generation data, is gone (superseded/ was cleared). There is nothing to re-read; the post's creator tags are left as they are.`);
+  }
+  return { buffer: c.raw, contentType: c.media_type };
+}
+
 // The bridge bot's !rescan, through the shared capability: an admin, in a
 // DM, names an mxc url or an md5, and the image's own metadata is read again
 // and its creator provenance rewritten on the booru. The same deps the CLI
 // (rescan.js) hands it, so the two cannot drift.
 function rescanDeps(bridge) {
   return {
-    download: (mxc) => downloadFromSynapse(mxc, AS_TOKEN),
+    download: (mxc) => canonRawForRescan(mxc),
     findPostByMd5: (md5) => danbooru.findPostByMd5(md5),
     getTagProjection: (id) => danbooru.getTagProjection(id),
     recordTagSources: (id, partition) => danbooru.recordTagSources(id, partition),
@@ -995,6 +1031,12 @@ new Cli({
     const rawGetIntent = bridge.getIntent.bind(bridge);
     bridge.getIntent = (...args) => rooms.guard(rawGetIntent(...args));
 
+    // The media gate's way to ask for any Matrix original not yet canonical.
+    // Built now, not on first image: a tunnel that cannot reach R2 must say so
+    // at startup, not the first time somebody opens a picture.
+    getCanon();
+    startCanonService((config.canon && config.canon.port) || 8011);
+
     bridge.run(port).then(async () => {
       try {
         await ensureBotUser(config, _reg);
@@ -1013,4 +1055,4 @@ new Cli({
 // writer. handleImageEvent takes anything with getIntent().sendStateEvent --
 // the real Bridge in the service, a thin stand-in in a tool -- because that is
 // the only thing it asks of it.
-module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config };
+module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, startCanonService };
