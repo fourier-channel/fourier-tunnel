@@ -128,6 +128,14 @@ function r2FromEnv(env = process.env) {
       region: "auto",
       endpoint: env.R2_ENDPOINT,
       credentials: { accessKeyId: env.R2_ACCESS_KEY_ID, secretAccessKey: env.R2_SECRET_ACCESS_KEY },
+      // The SDK adds a CRC32 checksum to every upload by default (since 3.729)
+      // and then refuses a request that also carries the Content-MD5 this
+      // module sends for integrity: "You can only specify one non-default
+      // checksum at a time" -- measured on the first live canonical write,
+      // 2026-09-30. Checksums only when an operation requires one, which is
+      // also what R2 documents for these defaults; Content-MD5 stays.
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
     }),
   };
 }
