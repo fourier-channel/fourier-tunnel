@@ -80,6 +80,32 @@ function setCanon(c) {
   canonInstance = c;
 }
 
+// ONE SET OF RENDITIONS: every 15 minutes, move Synapse's renditions of images
+// the booru now holds to superseded/ (canon.retireSweep; the booru's variants
+// are the renditions -- fourier-auth mediar2.js serves them). Each sweep lists
+// local_thumbnails/ once; a failure is logged and the next sweep tries again.
+const RETIRE_SWEEP_MS = 15 * 60 * 1000;
+function startThumbnailRetirement(intervalMs = RETIRE_SWEEP_MS) {
+  let running = false;
+  const sweep = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const r = await getCanon().retireSweep();
+      if (r.moved || r.failed) {
+        console.log(`[canon] renditions: ${r.moved} of booru-held images moved to superseded/, ${r.failed} not (see above); ${JSON.stringify(r.tally)}`);
+      }
+    } catch (err) {
+      console.error(`[canon] rendition sweep failed: ${err.message}; the next sweep tries again`);
+    } finally {
+      running = false;
+    }
+  };
+  const timer = setInterval(sweep, intervalMs);
+  if (timer.unref) timer.unref();
+  return timer;
+}
+
 // The media gate (fourier-auth) asks here for any Matrix original it has no
 // index entry for, so no link ever leads to a file that still has a prompt in
 // it. Internal: the port is published to no host, only the docker networks
@@ -1036,6 +1062,7 @@ new Cli({
     // at startup, not the first time somebody opens a picture.
     getCanon();
     startCanonService((config.canon && config.canon.port) || 8011);
+    startThumbnailRetirement();
 
     bridge.run(port).then(async () => {
       try {

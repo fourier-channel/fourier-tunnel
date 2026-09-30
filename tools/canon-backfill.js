@@ -9,6 +9,8 @@
 //   docker exec fourier-tunnel node tools/canon-backfill.js                  report only
 //   docker exec fourier-tunnel node tools/canon-backfill.js --apply          do it
 //   ... --booru-duplicates                                                    also the booru's copies
+//   ... --retire-thumbnails     Synapse's renditions of booru-held images, to superseded/
+//                               (the booru's variants are the one set; canon.js retireSynapseThumbnails)
 //
 // Without --apply it WRITES NOTHING: every image is read and stripped in memory
 // and the line it would produce is printed. Flags are matched exactly; an
@@ -29,15 +31,16 @@ const { DanbooruClient } = require("../danbooru");
 const canonLib = require("../canon");
 const { resolveHomeserverUrl } = require("../homeserver");
 
-const FLAGS = new Set(["--apply", "--booru-duplicates"]);
+const FLAGS = new Set(["--apply", "--booru-duplicates", "--retire-thumbnails"]);
 const args = process.argv.slice(2);
 const unknown = args.filter((a) => !FLAGS.has(a));
 if (unknown.length) {
-  console.error(`FAIL: unknown option(s) ${unknown.join(" ")}. fix: the options are --apply and --booru-duplicates, spelled out in full.`);
+  console.error(`FAIL: unknown option(s) ${unknown.join(" ")}. fix: the options are --apply, --booru-duplicates and --retire-thumbnails, spelled out in full.`);
   process.exit(2);
 }
 const APPLY = args.includes("--apply");
 const BOORU = args.includes("--booru-duplicates");
+const THUMBS = args.includes("--retire-thumbnails");
 
 const config = yaml.load(fs.readFileSync(process.env.FOURIER_TUNNEL_CONFIG || path.join(__dirname, "..", "config.yaml"), "utf8"));
 config.homeserver.url = resolveHomeserverUrl(process.env, config.homeserver.url);
@@ -164,6 +167,13 @@ async function booruDuplicates(summary) {
 
 (async () => {
   const summary = { canonical: 0, source: 0, refused: 0, stripped: 0, withFields: 0, recordPending: 0, errors: 0, dups: 0, moved: 0, keep: 0, isOne: 0, absent: 0 };
+  if (THUMBS) {
+    // On its own: the originals were made canonical by the first backfill, and
+    // this pass only moves renditions. A dry run lists what would move.
+    const r = await canon.retireSweep({ dryRun: !APPLY });
+    console.log(`# renditions: ${r.images} media id(s) with Synapse renditions; ${JSON.stringify(r.tally)}; moved=${r.moved} failed=${r.failed}`);
+    process.exit(r.failed ? 1 : 0);
+  }
   await canonAll(summary);
   if (BOORU) await booruDuplicates(summary);
   console.log(`# ${APPLY ? "APPLIED" : "DRY RUN"}: ${JSON.stringify(summary)}`);

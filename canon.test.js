@@ -31,7 +31,7 @@ function png(parameters) {
 const PROMPT = "masterpiece, best quality, 1girl, looking at viewer\nNegative prompt: lowres\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1, Model: secretmodel";
 
 function fakeStore(initial = {}) {
-  const objects = new Map(Object.entries(initial).map(([k, v]) => [k, { body: v.body, type: v.type }]));
+  const objects = new Map(Object.entries(initial).map(([k, v]) => [k, { body: v.body, type: v.type, modified: v.modified }]));
   const writes = [];
   const store = {
     objects,
@@ -61,6 +61,10 @@ function fakeStore(initial = {}) {
     },
     async list(prefix) {
       return [...objects.keys()].filter((k) => k.startsWith(prefix));
+    },
+    // Objects carry `modified` when a test sets it; otherwise they are old.
+    async listDated(prefix) {
+      return [...objects.entries()].filter(([k]) => k.startsWith(prefix)).map(([key, o]) => ({ key, modified: o.modified || new Date(0) }));
     },
   };
   return store;
@@ -369,4 +373,92 @@ test("moveSource refuses a multipart original when no raw md5 is known, and remo
   await assert.rejects(() => canon.moveSource(ID, undefined), /not verified/);
   assert.ok(store.objects.has(keys.source(ID)), "source kept");
   assert.equal(await canon.moveSource(ID, md5hex(raw)), "moved", "and moves once the md5 is known");
+});
+
+// ONE SET OF RENDITIONS (operator, 2026-09-30): Synapse's renditions of an image
+// the booru holds are moved to superseded/; the booru's variants are the set.
+const { RETIRE_THUMBNAILS_AFTER_MS } = require("./canon");
+const MD5 = "60afcbe772caded03b35238685f63696";
+const RAW = "535f0df6cc535647290653d9ce222874";
+const T0 = new Date("2026-09-30T12:00:00Z");
+const LATER = T0.getTime() + RETIRE_THUMBNAILS_AFTER_MS + 1;
+const thumbKeys = ["96-96-image-jpeg-crop", "320-231-image-jpeg-scale"].map((n) => `${keys.thumbnails(ID)}${n}`);
+
+function renditionRig({ variantsUnder = MD5, variantsAt = T0, index = { kind: "canonical", key: `media/${MD5}.jpg`, md5: MD5, raw_md5: RAW }, extra = {} } = {}) {
+  const init = { ...extra };
+  if (index) init[keys.index(ID)] = { body: Buffer.from(JSON.stringify(index)), type: "application/json" };
+  for (const k of thumbKeys) init[k] = { body: Buffer.from(`thumb ${k}`), type: "image/jpeg" };
+  if (variantsUnder) {
+    for (const n of ["180x180.jpg", "360x360.jpg", "720x720.webp", "sample.jpg"]) {
+      init[`variants/${variantsUnder}/${n}`] = { body: Buffer.from(n), type: "image/jpeg", modified: variantsAt };
+    }
+  }
+  const store = fakeStore(init);
+  const lines = [];
+  const canon = createCanon({ store, mediaInfo: async () => null, booru: {}, log: (l) => lines.push(l) });
+  return { store, canon, lines };
+}
+
+test("a booru-held image: Synapse's renditions move to superseded/, the variants stay", async () => {
+  const { store, canon } = renditionRig();
+  const r = await canon.retireSynapseThumbnails(ID, { now: LATER });
+  assert.equal(r.status, "retired");
+  assert.equal(r.moved, 2);
+  for (const k of thumbKeys) {
+    assert.ok(!store.objects.has(k), `${k} left at Synapse's key`);
+    assert.ok(store.objects.has(`superseded/${k}`), `${k} not in superseded/`);
+  }
+  assert.ok(store.objects.has(`variants/${MD5}/360x360.jpg`), "the booru's variants are the set and stay");
+  assert.ok(!store.writes.some(([op, key]) => op === "remove" && key.startsWith("variants/")), "nothing of the booru's is touched");
+});
+
+test("variants younger than the gate's memory of 'none': nothing moves yet", async () => {
+  const { store, canon } = renditionRig({ variantsAt: new Date(LATER - 60 * 1000) });
+  const r = await canon.retireSynapseThumbnails(ID, { now: LATER });
+  assert.equal(r.status, "too-recent");
+  for (const k of thumbKeys) assert.ok(store.objects.has(k));
+});
+
+test("an image the booru does not hold keeps Synapse's renditions -- its only set", async () => {
+  const { store, canon } = renditionRig({ variantsUnder: null });
+  assert.equal((await canon.retireSynapseThumbnails(ID, { now: LATER })).status, "not-on-booru");
+  for (const k of thumbKeys) assert.ok(store.objects.has(k));
+  const noIndex = renditionRig({ index: null });
+  assert.equal((await noIndex.canon.retireSynapseThumbnails(ID, { now: LATER })).status, "no-index");
+});
+
+test("a tunnel post made before stripping: variants under the raw md5 count", async () => {
+  const { canon } = renditionRig({ variantsUnder: RAW });
+  const r = await canon.retireSynapseThumbnails(ID, { now: LATER });
+  assert.equal(r.status, "retired");
+  assert.equal(r.variantsUnder, RAW);
+});
+
+test("an older object already at the superseded/ key: the rendition stays, loudly", async () => {
+  const clash = { [`superseded/${thumbKeys[0]}`]: { body: Buffer.from("pre-strip bytes of another size"), type: "image/jpeg" } };
+  const { store, canon, lines } = renditionRig({ extra: clash });
+  const r = await canon.retireSynapseThumbnails(ID, { now: LATER });
+  assert.equal(r.moved, 1);
+  assert.equal(r.failed, 1);
+  assert.ok(store.objects.has(thumbKeys[0]), "never removed without a verified copy");
+  assert.ok(lines.some((l) => l.includes("NOT retired")));
+});
+
+test("a dry run moves nothing and says what it would", async () => {
+  const { store, canon } = renditionRig();
+  const r = await canon.retireSynapseThumbnails(ID, { now: LATER, dryRun: true });
+  assert.equal(r.status, "would-retire");
+  assert.equal(r.count, 2);
+  assert.equal(store.writes.length, 0);
+});
+
+test("the sweep finds every media id with renditions and retires only booru-held ones", async () => {
+  const other = "ZyXwVuTsRqPoNmLkJiHgFeDc";
+  const otherThumb = `${keys.thumbnails(other)}96-96-image-jpeg-crop`;
+  const { store, canon } = renditionRig({ extra: { [otherThumb]: { body: Buffer.from("avatar"), type: "image/jpeg" } } });
+  const r = await canon.retireSweep({ now: LATER });
+  assert.equal(r.images, 2);
+  assert.equal(r.moved, 2);
+  assert.deepEqual(r.tally, { retired: 1, "no-index": 1 });
+  assert.ok(store.objects.has(otherThumb), "an avatar's only renditions stay");
 });
