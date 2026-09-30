@@ -221,7 +221,14 @@ function createCanon({ store, mediaInfo, booru, log = () => {} }) {
   // Finish moving Synapse's original out of the way. Safe to call any number of
   // times: copy only if the destination is not already whole, delete only once
   // the destination is verified.
-  async function moveSource(mediaId) {
+  //
+  // A MULTIPART source (Synapse's storage provider uploads files above ~8MB in
+  // parts) has an ETag of "<hash>-<parts>" that no single-part copy can equal:
+  // the copy's ETag is the plain md5 of its bytes. So such a copy is verified
+  // against the raw md5 canon recorded for that original instead, and without
+  // one the source stays -- measured 2026-09-30, 52 originals refused this way
+  // by the first backfill, every copy whole and the same size.
+  async function moveSource(mediaId, rawMd5) {
     const from = keys.source(mediaId);
     const to = keys.superseded(mediaId);
     const src = await store.head(from);
@@ -231,7 +238,9 @@ function createCanon({ store, mediaInfo, booru, log = () => {} }) {
       await store.copy(from, to);
       dst = await store.head(to);
     }
-    if (!dst || dst.size !== src.size || (src.etag && dst.etag && src.etag !== dst.etag)) {
+    const multipart = typeof src.etag === "string" && src.etag.includes("-");
+    const sameBytes = multipart ? !!rawMd5 && dst && dst.etag === rawMd5 : !(src.etag && dst && dst.etag && src.etag !== dst.etag);
+    if (!dst || dst.size !== src.size || !sameBytes) {
       throw new CanonError(
         `move of ${from} not verified: ${to} is ${dst ? `${dst.size} bytes, etag ${dst.etag}` : "missing"}, source is ${src.size} bytes, etag ${src.etag}. ` +
           "The source was NOT removed. Fix: compare the two objects in the bucket and rerun.",
@@ -263,7 +272,7 @@ function createCanon({ store, mediaInfo, booru, log = () => {} }) {
   async function settleMove(mediaId, idx) {
     if (!(idx.fields === 0 || idx.record === "filed")) return "kept: generation data not filed";
     try {
-      return await moveSource(mediaId);
+      return await moveSource(mediaId, idx.raw_md5);
     } catch (err) {
       log(`[canon] ${mediaId}: move NOT done (${err.message}); retried on the next touch`);
       return "move failed";

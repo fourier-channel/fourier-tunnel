@@ -328,3 +328,45 @@ test("a refused image is asked again on the next touch, and served once the stri
   const r = await canon.canonicalize(ID);
   assert.equal(r.kind, "canonical", "re-evaluated, not stuck");
 });
+
+test("a MULTIPART original moves once its copy matches the raw md5 canon recorded -- and only then", async () => {
+  const raw = png(PROMPT);
+  const { store, canon } = rig({ body: raw });
+  // Synapse's provider uploaded it in parts: its ETag is "<hash>-2", which no copy can equal.
+  const plainHead = store.head;
+  store.head = async (key) => {
+    const h = await plainHead(key);
+    return h && key === keys.source(ID) ? { ...h, etag: "0123456789abcdef0123456789abcdef-2" } : h;
+  };
+  const r = await canon.canonicalize(ID);
+  assert.equal(r.moved, "moved", "verified by the raw md5, not the multipart ETag");
+  assert.equal(store.objects.has(keys.source(ID)), false);
+  assert.ok(store.objects.get(keys.superseded(ID)).body.equals(raw));
+});
+
+test("a multipart original whose raw md5 is unknown is NOT moved", async () => {
+  const { store, canon } = rig({ body: png(null) });
+  const plainHead = store.head;
+  store.head = async (key) => {
+    const h = await plainHead(key);
+    return h && key === keys.source(ID) ? { ...h, etag: "0123456789abcdef0123456789abcdef-3" } : h;
+  };
+  const r = await canon.canonicalize(ID);
+  // A clean image's raw md5 IS known (it is the file's own md5), so this one moves;
+  // the unknown case is the index with no raw_md5 at all.
+  assert.equal(r.moved, "moved");
+  assert.equal(await canon.moveSource("QqQqQqQqQqQqQqQq", undefined), "absent", "nothing there, nothing moved");
+});
+
+test("moveSource refuses a multipart original when no raw md5 is known, and removes nothing", async () => {
+  const raw = png(null);
+  const { store, canon } = rig({ body: raw });
+  const plainHead = store.head;
+  store.head = async (key) => {
+    const h = await plainHead(key);
+    return h && key === keys.source(ID) ? { ...h, etag: "0123456789abcdef0123456789abcdef-3" } : h;
+  };
+  await assert.rejects(() => canon.moveSource(ID, undefined), /not verified/);
+  assert.ok(store.objects.has(keys.source(ID)), "source kept");
+  assert.equal(await canon.moveSource(ID, md5hex(raw)), "moved", "and moves once the md5 is known");
+});
