@@ -428,3 +428,27 @@ DEPLOY notes (gated, not done here):
   watch stays off.
 - Dockerfile already ships *.js, so onboarding.js rides along (the per-file
   COPY foot-gun that bit three times does not bite here).
+
+## 2026-10-01 -- the backfill resumes; the container moves to Node 22
+
+Two defects found by a read-only investigation on 2026-09-30, fixed in
+fourier-tunnel b0de3cd and 1fc6611.
+
+BACKFILL HORIZON. backfillRoom paged back from the live edge at most 40 pages
+and kept no cursor, and a spent page budget printed the same summary as a
+finished room. 38 images in 8 watched rooms sat beyond that line, and
+!backfill could not reach them either, since it also started at the live
+edge. Now each room's progress is persisted (backfill-state.js), every run
+resumes from the cursor, a sweep in the bridge resumes unfinished rooms one at
+a time every 10 minutes, failed pictures are retried by event id, and the
+summary says when older history is still unwalked. Tests 371 -> 389.
+
+NODE. The entry above (section 5) records "nedb ... crashes on Node 22+.
+Node 20 is the practical ceiling". That was one major wrong. Measured
+2026-10-01 with the library's own nedb stores: Node 20 and 22 work, 23 and 24
+throw "util.isDate is not a function". Node 20 was end-of-life on 2026-04-30
+and the bridge's own dependencies declare node >=22. The image is now
+node:22-slim with `npm ci`; engines ">=22 <23" with engine-strict; and
+nedb-compat.test.js pins the ceiling. Suite inside the built image: 391 tests,
+390 pass, 1 skipped (sibling checkout not mounted).
+

@@ -27,17 +27,29 @@ first component.
 
 1. A user posts an image in a Matrix room the bridge is in.
 2. The bridge downloads the image from the homeserver (authenticated media API).
-3. It checks the booru by md5. A known image is not re-uploaded; the room's
-   tag state is pointed at the existing post.
-4. It sends the bytes to the **autotagger** (fourier-spectrum, WD ViT v3) and
+3. It reads the image's generation data (AI prompts, settings, workflows) and
+   STRIPS it from the bytes, losslessly: whole text chunks, EXIF comment fields
+   blanked in place, single XMP properties, NovelAI's alpha-channel copy
+   (`strip-generation.js`). Colour profiles, orientation and every other field
+   stay. An image whose generation data cannot be removed or verified is NOT
+   posted (`[strip] refusing to post`). Operator ruling 2026-09-28.
+4. It checks the booru by md5 of the STRIPPED bytes, then by the original's md5
+   through the booru's private record, then by the original's own md5 (posts
+   made before stripping). A known image is not re-uploaded; the room's tag
+   state is pointed at the existing post.
+5. It sends the stripped bytes to the **autotagger** (fourier-spectrum, WD ViT v3) and
    receives tags. Tagging happens here, before any post exists; the booru
    receives finished tags.
-5. It creates the booru post with those tags, an artist tag minted from the
-   Matrix sender (`41chan_<localpart>`, local users only, promoted to the
-   artist category), a rating, and a provenance partition of tag sources.
-   Prompt tags scraped from AI-image PNG metadata are kept private: they
-   never enter the booru's tag string or the room state.
-6. The tags are written into the room as a `net.41chan.media.tags` state
+6. It creates the booru post from the stripped bytes with those tags, an
+   artist tag minted from the Matrix sender (`41chan_<localpart>`, local users
+   only, promoted to the artist category), `ai-generated` when a generator's
+   data was found, a rating, and a provenance partition of tag sources. It then
+   records the post's CREATOR (the Matrix sender) with the booru, once, and
+   files the stripped generation data in the booru's private store.
+   Prompt-derived tags and the generation data are visible ONLY to that
+   creator -- no admin or moderator bypass (operator ruling 2026-09-29). They
+   never enter the booru's tag string, the image file, or the room state.
+7. The tags are written into the room as a `net.41chan.media.tags` state
    event, keyed by the image's MXC URI, with the post id, rating, an
    `updated_by` of the bot's localpart, and a `sources` object naming which
    tags came from the creator, the autotagger, both, or metadata.
@@ -49,9 +61,22 @@ API.
 
 **Backfill.** On joining a room the bot walks the room's history backwards
 and replays every image through the same path, up to 500 images and 40 pages
-per run, once per room per process. It can only see as far back as the room's
-history visibility lets it, and it says how far it got rather than claiming
-completeness. An admin can re-run it with `!backfill` in the room.
+per run. Where a run stops is kept per room in `backfill-state.json` (the
+state directory, below): the cursor to resume from, whether the room's start
+was reached, and the pictures that failed. The next run resumes from the
+cursor rather than starting again at the newest message, so no room is
+limited to what one run can reach. A sweep inside the bridge, every 10 minutes
+(first 2 minutes after start), resumes each joined room not yet walked to its
+start, one room at a time, skipping a room walked in the last 5 minutes, a
+denied or disabled room, and a DM unless `tag_in_dms` is on. A failed picture
+is re-read by its event id and retried on the next run (a deleted one is
+dropped, never posted from memory); after 5 failures it is set aside under
+`abandoned`. A room walked to its start is not walked again by the join
+trigger; a real rejoin walks only the gap since the last walk. The bot can
+only see as far back as the room's history visibility lets it, and each run's
+summary line says whether older history is still unwalked and why the run
+stopped. An admin can resume a room with `!backfill`, or walk it again from
+the newest message with `!backfill restart`.
 
 ---
 
@@ -67,8 +92,14 @@ completeness. An admin can re-run it with `!backfill` in the room.
   it nothing is tagged.
 - **Docker** + **Docker Compose**; the bridge must share Docker networks with
   Synapse, the booru and the tagger.
-- Node 20 inside the container (a transitive dependency is incompatible with
-  Node 22+).
+- Node 22 inside the container, and no higher: nedb (loaded by
+  matrix-appservice-bridge for its user and room stores) calls
+  `util.isDate`, which Node 23 removed, so the bridge crashes on 23 and 24.
+  `package.json` `engines` (`>=22 <23`) with `engine-strict` in `.npmrc`
+  makes npm refuse any other Node, and `nedb-compat.test.js` measures the
+  boundary on every run. A host `npm install` on another Node is refused too:
+  install under Node 22, and `npm run test:image` runs the suite on the
+  Dockerfile's base image.
 
 ---
 
@@ -85,7 +116,8 @@ completeness. An admin can re-run it with `!backfill` in the room.
 `docker-compose.yaml` needs a `.env` and bind-mounts `config.yaml` and
 `onboarding-state/`, mounted at `/state` (`ONBOARDING_STATE_DIR`). Everything
 the bridge must keep across a rebuild lives there: the invite-strike ledger,
-the audit log and the denied-room list. The directory keeps its old name.
+the audit log, the denied-room list and each room's backfill progress
+(`backfill-state.json`). The directory keeps its old name.
 
 ### 2. Create a booru bot account
 
@@ -194,7 +226,10 @@ arrived after the pictures did has the same sealed window.
 
 Sender must be in `bridge.admins`.
 
-- `!backfill` -- in the room to catch up; re-walks even if already done.
+- `!backfill` -- in the room to catch up; resumes where the last walk
+  stopped, or walks again from the newest message if the room was finished.
+  `!backfill restart` always walks again from the newest message -- how tag
+  state that was blocked on an earlier run gets written.
 - `!listrooms` -- in a DM with the bot; lists the rooms each bot identity is in.
 - `!resetstrikes @user:domain` -- in a DM; clears a user's invite strikes.
 - `!setavatar` -- in a DM; then post an image within 2 minutes.
@@ -208,8 +243,10 @@ Sender must be in `bridge.admins`.
   with who decided and when. Nothing else can show this, since the list is the
   only record of a room the bot is not in on purpose.
 - `!rescan <mxc://url | md5>` -- in a DM; reads an already-posted image's own
-  metadata again and rewrites its creator provenance on the booru. Never
-  uploads, never re-runs the autotagger (`capabilities/rescan.js`).
+  metadata again (from the Matrix original, stripped the same way), rewrites
+  its creator provenance on the booru and re-files its generation data. Never
+  uploads, never re-runs the autotagger, never records or changes the post's
+  creator (`capabilities/rescan.js`).
 
 ---
 
@@ -230,7 +267,9 @@ runner -- `node --test` finds them and reports its own count:
 - `config.yaml` (booru API key, admin token) and `tunnel-registration.yaml`
   (appservice tokens) are gitignored. Never commit the real files.
 - The bot reads only `m.room.power_levels` during invite authorization.
-- Creator-only prompt tags never leave the bridge.
+- Generation data leaves the bridge only into the booru's private store, and
+  prompt-derived tags only as private rows; both are readable by the post's
+  recorded creator alone. The posted file carries neither.
 
 ---
 
