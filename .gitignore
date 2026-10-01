@@ -1,5 +1,8 @@
 node_modules/
 strikes.json
+# Per-room history-walk progress (backfill-state.js). Lives in the mounted state
+# directory in production; beside the code only on a dev checkout.
+backfill-state.json
 audit.log
 *.tmp
 config.yaml

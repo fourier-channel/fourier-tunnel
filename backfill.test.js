@@ -6,7 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { backfillRoom, imagesIn, summarise, MAX_PAGES } = require("./backfill");
+const { backfillRoom, imagesIn, summarise, planWalk, nextState, retryable, MAX_PAGES, MAX_ATTEMPTS } = require("./backfill");
 
 const img = (url) => ({ type: "m.room.message", content: { msgtype: "m.image", url } });
 const txt = (body) => ({ type: "m.room.message", content: { msgtype: "m.text", body } });
@@ -189,4 +189,192 @@ test("a picture refused by the strip is counted apart from done, and the summary
   assert.deepEqual([r.done, r.refused, r.failed], [1, 1, 0]);
   assert.match(summarise(r), /1 NOT posted: generation data would not strip/);
   assert.doesNotMatch(summarise({ ...r, refused: 0 }), /NOT posted/);
+});
+
+// --- THE HORIZON (2026-10-01) ----------------------------------------------------
+//
+// Every run used to start at the live edge and walk at most MAX_PAGES pages, keep
+// no cursor, and report a spent page budget exactly like a finished room. 38
+// pictures in 8 watched rooms sat beyond that line, and !backfill could never get
+// past it either. These pin the three facts that were missing: where to resume,
+// whether the start was really reached, and which pictures to retry.
+
+const ev = (id, url) => ({ event_id: id, type: "m.room.message", content: { msgtype: "m.image", url } });
+
+test("a page budget spent with history left is NOT the start of the room, and is not the cap either", async () => {
+  let n = 0;
+  const r = await backfillRoom({
+    roomId: "!r:x",
+    fetchPage: async () => ({ chunk: [], end: `p${++n}` }),   // page 40 still hands back a token
+    onImage: async () => {},
+    log: () => {},
+  });
+  assert.equal(r.pages, MAX_PAGES);
+  assert.equal(r.reachedStart, false, "older history remains");
+  assert.equal(r.capped, false, "the picture cap was never the reason");
+  assert.equal(r.cursor, `p${MAX_PAGES}`, "the next run resumes from the last token");
+  assert.match(summarise(r), /OLDER HISTORY NOT YET WALKED/);
+  assert.match(summarise(r), /40-page budget/);
+});
+
+test("the start of the room is reached only when the homeserver hands back no token", async () => {
+  const r = await backfillRoom({
+    roomId: "!r:x",
+    fetchPage: async (f) => (f ? { chunk: [], start: f } : { chunk: [], start: "edge", end: "p1" }),
+    onImage: async () => {},
+    log: () => {},
+  });
+  assert.equal(r.reachedStart, true);
+  assert.equal(r.head, "edge", "where the live edge was when this walk began");
+  assert.match(summarise(r), /reached the start of the room/);
+  assert.doesNotMatch(summarise(r), /NOT YET WALKED/);
+});
+
+test("a run handed a cursor starts there, not at the live edge", async () => {
+  const asked = [];
+  const r = await backfillRoom({
+    roomId: "!r:x", from: "c7",
+    fetchPage: async (f) => { asked.push(f); return { chunk: [], end: null }; },
+    onImage: async () => {},
+    log: () => {},
+  });
+  assert.deepEqual(asked, ["c7"]);
+  assert.equal(r.head, undefined, "a resumed walk does not know where the live edge is");
+});
+
+test("`to` reaches the homeserver, so a rejoin's gap walk stops at the last head", async () => {
+  const asked = [];
+  await backfillRoom({
+    roomId: "!r:x", to: "oldhead",
+    fetchPage: async (f, t) => { asked.push([f, t]); return { chunk: [], end: null }; },
+    onImage: async () => {},
+    log: () => {},
+  });
+  assert.deepEqual(asked, [[undefined, "oldhead"]]);
+});
+
+test("a failed picture is counted, logged AND returned with the id that lets a later run retry it", async () => {
+  const r = await backfillRoom({
+    roomId: "!r:x",
+    fetchPage: async (f) => (f ? { chunk: [], end: null } : { chunk: [ev("$2", "mxc://a/2"), ev("$1", "mxc://a/1")], end: "p1" }),
+    onImage: async (e) => { if (e.content.url === "mxc://a/1") throw new Error("boom"); },
+    log: () => {},
+  });
+  assert.equal(r.failed, 1);
+  assert.deepEqual(r.failedMediaIds, ["mxc://a/1"]);
+  assert.deepEqual(r.failures, [{ eventId: "$1", url: "mxc://a/1", attempts: 1, error: "boom" }]);
+});
+
+test("stopping part-way through a page leaves the cursor AT that page, so the rest is not skipped", async () => {
+  const r = await backfillRoom({
+    roomId: "!r:x", cap: 1, from: "c3",
+    fetchPage: async () => ({ chunk: [ev("$2", "mxc://a/2"), ev("$1", "mxc://a/1")], end: "c4" }),
+    onImage: async () => {},
+    log: () => {},
+  });
+  assert.equal(r.done, 1);
+  assert.equal(r.capped, true);
+  assert.equal(r.cursor, "c3", "mxc://a/2 is still on page c3");
+  assert.equal(r.reachedStart, false);
+});
+
+test("a homeserver error mid-walk keeps the pages already walked and says why it stopped", async () => {
+  const lines = [];
+  const r = await backfillRoom({
+    roomId: "!r:x",
+    fetchPage: async (f) => { if (f === "p2") throw new Error("messages 502"); return { chunk: [], end: f ? "p2" : "p1" }; },
+    onImage: async () => {},
+    log: (l) => lines.push(l),
+  });
+  assert.equal(r.pages, 2);
+  assert.equal(r.cursor, "p2", "resumes at the page that failed");
+  assert.equal(r.error, "messages 502");
+  assert.equal(r.reachedStart, false);
+  assert.match(lines.join("\n"), /messages 502/);
+  assert.match(summarise(r), /stopped by an error: messages 502/);
+});
+
+test("a token that never moves is NOT reported as the start of the room", async () => {
+  const r = await backfillRoom({
+    roomId: "!r:x",
+    fetchPage: async () => ({ chunk: [], end: "same" }),
+    onImage: async () => {},
+    log: () => {},
+  });
+  assert.equal(r.stalled, true);
+  assert.equal(r.reachedStart, false);
+  assert.match(summarise(r), /token stopped moving/);
+});
+
+test("earlier failures are re-read and retried first; a deleted one is dropped, never posted from memory", async () => {
+  const replayed = [];
+  const events = { $ok: ev("$ok", "mxc://a/ok"), $again: ev("$again", "mxc://a/again"), $gone: { event_id: "$gone", type: "m.room.message", content: {} } };
+  const r = await backfillRoom({
+    roomId: "!r:x",
+    retry: [
+      { eventId: "$ok", url: "mxc://a/ok", attempts: 1 },
+      { eventId: "$again", url: "mxc://a/again", attempts: 2 },
+      { eventId: "$gone", url: "mxc://a/gone", attempts: 1 },
+    ],
+    fetchEvent: async (id) => events[id],
+    fetchPage: async () => ({ chunk: [], end: null }),
+    onImage: async (e) => { replayed.push(e.content.url); if (e.content.url === "mxc://a/again") throw new Error("still broken"); },
+    log: () => {},
+  });
+  assert.deepEqual(replayed, ["mxc://a/ok", "mxc://a/again"], "the redacted one was not replayed");
+  assert.equal(r.retried, 2);
+  assert.equal(r.done, 1);
+  assert.deepEqual(r.failures.map((f) => [f.eventId, f.attempts]), [["$again", 3]]);
+  assert.deepEqual(r.dropped.map((f) => f.eventId), ["$gone"]);
+});
+
+test("planWalk: what each trigger does with what earlier runs left", () => {
+  const none = undefined;
+  const partway = { cursor: "c9", head: "h1", reachedStart: false, failed: [] };
+  const finished = { cursor: "c40", head: "h1", reachedStart: true, failed: [] };
+  const owed = { ...finished, failed: [{ eventId: "$1", url: "mxc://a/1", attempts: 1 }] };
+  const givenUp = { ...finished, failed: [{ eventId: "$1", url: "mxc://a/1", attempts: MAX_ATTEMPTS }] };
+  const neverStarted = { reachedStart: false, failed: [], lastError: "messages 403" };
+
+  assert.equal(planWalk(none, { trigger: "join" }).kind, "initial");
+  assert.equal(planWalk(neverStarted, { trigger: "sweep" }).kind, "initial");
+  assert.deepEqual(planWalk(partway, { trigger: "join" }), { kind: "resume", from: "c9", to: undefined });
+  assert.deepEqual(planWalk(partway, { trigger: "sweep" }), { kind: "resume", from: "c9", to: undefined });
+  assert.deepEqual(planWalk(partway, { trigger: "command" }), { kind: "resume", from: "c9", to: undefined });
+  assert.equal(planWalk(finished, { trigger: "join" }).kind, "skip", "a second walk of a finished room is wasted work");
+  assert.equal(planWalk(finished, { trigger: "sweep" }).kind, "skip");
+  assert.equal(planWalk(finished, { trigger: "command" }).kind, "initial", "an explicit ask overrides done");
+  assert.equal(planWalk(partway, { trigger: "command", restart: true }).kind, "initial");
+  assert.equal(planWalk(owed, { trigger: "sweep" }).kind, "retry");
+  assert.equal(planWalk(givenUp, { trigger: "sweep" }).kind, "skip", "an abandoned picture is not retried for ever");
+  assert.deepEqual(planWalk(finished, { trigger: "rejoin" }), { kind: "gap", from: undefined, to: "h1" });
+});
+
+test("nextState: progress only moves forward, and each side of the walk keeps its own marker", () => {
+  const before = { cursor: "c9", head: "h1", reachedStart: false, failed: [] };
+  const resumed = nextState(before, { kind: "resume" }, { pages: 3, cursor: "c12", reachedStart: false, failures: [] }, 1000);
+  assert.deepEqual([resumed.cursor, resumed.head, resumed.reachedStart, resumed.lastRunAt], ["c12", "h1", false, 1000]);
+
+  const gap = nextState(resumed, { kind: "gap" }, { pages: 1, cursor: "x", head: "h2", reachedStart: true, failures: [] }, 2000);
+  assert.deepEqual([gap.cursor, gap.head, gap.reachedStart], ["c12", "h2", false], "a gap walk never moves the older side");
+
+  const failedFirst = nextState(before, { kind: "resume" }, { pages: 0, cursor: "c9", reachedStart: false, failures: [], error: "messages 502" }, 3000);
+  assert.deepEqual([failedFirst.cursor, failedFirst.lastError], ["c9", "messages 502"]);
+
+  const first = nextState(undefined, { kind: "initial" }, { pages: 2, cursor: undefined, head: "h0", reachedStart: true, failures: [] }, 4000);
+  assert.deepEqual([first.head, first.reachedStart], ["h0", true]);
+  assert.equal(nextState(first, { kind: "initial" }, { pages: 1, reachedStart: true, failures: [] }).lastError, undefined);
+});
+
+test("nextState: failures replace the retried list, and one that keeps failing is set aside, not dropped", () => {
+  const before = { reachedStart: true, failed: [{ eventId: "$1", url: "mxc://a/1", attempts: MAX_ATTEMPTS - 1 }] };
+  const after = nextState(before, { kind: "retry" }, {
+    pages: 0, failures: [{ eventId: "$1", url: "mxc://a/1", attempts: MAX_ATTEMPTS, error: "still" }, { eventId: "$2", url: "mxc://a/2", attempts: 1, error: "new" }],
+  });
+  assert.deepEqual(after.failed.map((f) => f.eventId), ["$2"]);
+  assert.deepEqual(after.abandoned.map((f) => f.eventId), ["$1"], "kept with its error, out of the retry list");
+  assert.deepEqual(retryable(after).map((f) => f.eventId), ["$2"]);
+  const fixed = nextState(after, { kind: "retry" }, { pages: 0, failures: [] });
+  assert.deepEqual(fixed.failed, []);
+  assert.deepEqual(fixed.abandoned.map((f) => f.eventId), ["$1"]);
 });

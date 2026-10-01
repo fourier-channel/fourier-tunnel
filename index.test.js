@@ -103,6 +103,10 @@ function reset() {
     state: [],           // state events the bridge sent
     replies: {},         // overrides: { creator: [status, body], generation: [status, body] }
     bucket: new Map(),   // R2, in memory: key -> { body, type }
+    history: {},         // room id -> { [from token or "edge"]: /messages page }
+    paged: [],           // { room, from, to } for every /messages call, in order
+    events: {},          // event id -> event, for /rooms/:room/event/:id
+    joined: [],          // what /joined_rooms answers
   };
 }
 
@@ -126,6 +130,20 @@ function multipartFile(req, body) {
 }
 
 const ROUTES = [
+  ["GET", /^\/_matrix\/client\/v3\/rooms\/([^/]+)\/messages$/, (req, m, body, url) => {
+    if (req.headers.authorization !== "Bearer TESTTOKEN") return [401, { errcode: "M_UNAUTHORIZED" }];
+    const room = decodeURIComponent(m[1]);
+    const from = url.searchParams.get("from") || undefined;
+    const to = url.searchParams.get("to") || undefined;
+    world.paged.push({ room, from, to });
+    const page = (world.history[room] || {})[from || "edge"];
+    return page ? [200, page] : [200, { chunk: [] }];
+  }],
+  ["GET", /^\/_matrix\/client\/v3\/rooms\/([^/]+)\/event\/([^/]+)$/, (req, m) => {
+    const e = world.events[decodeURIComponent(m[2])];
+    return e ? [200, e] : [404, { errcode: "M_NOT_FOUND" }];
+  }],
+  ["GET", /^\/_matrix\/client\/v3\/joined_rooms$/, () => [200, { joined_rooms: world.joined }]],
   ["GET", /^\/_matrix\/client\/v1\/media\/download\/[^/]+\/(.+)$/, (req, m) => {
     if (req.headers.authorization !== "Bearer TESTTOKEN") return [401, { errcode: "M_UNAUTHORIZED" }];
     const media = world.media[m[1]];
@@ -366,4 +384,137 @@ test("the private creator tags come from what the strip TOOK -- never from the r
   assert.ok(world.uploads[0].includes(CAPTION), "the caption is kept in the file");
   assert.deepEqual(world.tagSources[0].creator, [], "so it is nobody's private creator tag");
   assert.deepEqual(world.metadata, [], "and nothing was recorded privately");
+});
+
+// --- THE HISTORY WALK, through backfillRoomNow ------------------------------------
+//
+// The persisted state is what makes a walk resumable, so these drive the REAL
+// backfillRoomNow and the real sweep against the stand-in homeserver, with the
+// state file in this test's ONBOARDING_STATE_DIR. 2026-10-01: 38 pictures in 8
+// rooms sat beyond a 40-page horizon that no run, automatic or typed, could
+// ever get past.
+
+const BOT = "@tunnel:41chan.net";
+const backfillState = () => JSON.parse(fs.readFileSync(path.join(dir, "backfill-state.json"), "utf8"));
+const writeBackfillState = (obj) => fs.writeFileSync(path.join(dir, "backfill-state.json"), JSON.stringify(obj));
+async function quietly(fn) {
+  const lines = [];
+  const saved = { log: console.log, warn: console.warn, error: console.error };
+  for (const k of Object.keys(saved)) console[k] = (...a) => lines.push(`${k}: ${a.join(" ")}`);
+  try {
+    return { value: await fn(), lines };
+  } finally {
+    Object.assign(console, saved);
+  }
+}
+
+test("a room walked to its start is not walked again by the automatic trigger", async () => {
+  const room = "!done:41chan.net";
+  world.history[room] = { edge: { chunk: [], start: "h0", end: "p1" }, p1: { chunk: [] } };
+  const first = await quietly(() => index.backfillRoomNow(bridge, room, BOT, { trigger: "join" }));
+  assert.equal(first.value.reachedStart, true, first.lines.join("\n"));
+  assert.equal(world.paged.length, 2);
+  assert.equal(backfillState()[room].reachedStart, true, "persisted, so a restart remembers it");
+
+  world.paged = [];
+  const second = await quietly(() => index.backfillRoomNow(bridge, room, BOT, { trigger: "join" }));
+  assert.match(second.value.skipped, /walked to the start/);
+  assert.deepEqual(world.paged, [], "no history was read");
+});
+
+test("a room NOT walked to its start resumes from its saved cursor, and the picture beyond the old horizon is posted", async () => {
+  const room = "!deep:41chan.net";
+  writeBackfillState({ ...backfillState(), [room]: { head: "h0", cursor: "c40", reachedStart: false, failed: [], lastRunAt: 1 } });
+  world.media.oldpic1 = { bytes: PLAIN_PNG, type: "image/png", sender: ALICE };
+  world.bucket.set(keys.source("oldpic1"), { body: Buffer.from(PLAIN_PNG), type: "image/png" });
+  world.history[room] = {
+    c40: { chunk: [{ event_id: "$oldpic1", type: "m.room.message", sender: ALICE, content: { msgtype: "m.image", url: "mxc://41chan.net/oldpic1", body: "oldpic1.png" } }], start: "c40" },
+  };
+  const { value: r, lines } = await quietly(() => index.backfillRoomNow(bridge, room, BOT, { trigger: "sweep" }));
+  assert.deepEqual(world.paged.map((p) => p.from), ["c40"], "started at the cursor, not the live edge");
+  assert.equal(r.done, 1, lines.join("\n"));
+  assert.equal(world.created.length, 1, "the old picture reached the booru");
+  const rec = backfillState()[room];
+  assert.equal(rec.reachedStart, true);
+  assert.equal(rec.head, "h0", "a resume leaves the head alone");
+});
+
+test("a picture that failed is retried on the next run, re-read by its event id", async () => {
+  const room = "!retry:41chan.net";
+  writeBackfillState({ ...backfillState(), [room]: { head: "h0", cursor: "c1", reachedStart: true, lastRunAt: 1,
+    failed: [{ eventId: "$r1", url: "mxc://41chan.net/retrypic1", attempts: 1, error: "earlier" }] } });
+  world.media.retrypic1 = { bytes: PLAIN_PNG, type: "image/png", sender: BOB };
+  world.bucket.set(keys.source("retrypic1"), { body: Buffer.from(PLAIN_PNG), type: "image/png" });
+  world.events.$r1 = { event_id: "$r1", type: "m.room.message", sender: BOB, content: { msgtype: "m.image", url: "mxc://41chan.net/retrypic1", body: "retrypic1.png" } };
+  const { value: r, lines } = await quietly(() => index.backfillRoomNow(bridge, room, BOT, { trigger: "sweep" }));
+  assert.equal(r.kind, "retry", lines.join("\n"));
+  assert.equal(r.retried, 1);
+  assert.equal(r.done, 1);
+  assert.deepEqual(world.paged, [], "a retry walks no pages");
+  assert.deepEqual(backfillState()[room].failed, []);
+});
+
+test("a denied room is refused whatever its saved state, and the sweep passes it by", async () => {
+  const rooms = require("./rooms");
+  const room = "!denied:41chan.net";
+  rooms.deny(room, { by: "@admin:41chan.net", reason: "test" });
+  writeBackfillState({ ...backfillState(), [room]: { cursor: "c3", reachedStart: false, failed: [], lastRunAt: 1 } });
+  world.history[room] = { c3: { chunk: [] } };
+  const { value } = await quietly(() => index.backfillRoomNow(bridge, room, BOT, { trigger: "command" }));
+  assert.match(value.skipped, /denied/);
+  world.joined = [room];
+  const swept = await quietly(() => index.backfillSweep(bridge, BOT));
+  assert.deepEqual(swept.value, []);
+  assert.deepEqual(world.paged, [], "nothing of it was read");
+});
+
+test("the sweep walks every unfinished room one at a time, and leaves alone what was walked minutes ago", async () => {
+  const fresh = "!fresh:41chan.net", partway = "!partway:41chan.net", recent = "!recent:41chan.net", done = "!finished:41chan.net";
+  const now = Date.now();
+  writeBackfillState({
+    ...backfillState(),
+    [partway]: { head: "h0", cursor: "q5", reachedStart: false, failed: [], lastRunAt: now - 60 * 60 * 1000 },
+    [recent]: { head: "h0", cursor: "q5", reachedStart: false, failed: [], lastRunAt: now - 1000 },
+    [done]: { head: "h0", reachedStart: true, failed: [], lastRunAt: 1 },
+  });
+  world.history[fresh] = { edge: { chunk: [], start: "hf" } };
+  world.history[partway] = { q5: { chunk: [] } };
+  world.joined = [fresh, partway, recent, done];
+  const { value, lines } = await quietly(() => index.backfillSweep(bridge, BOT));
+  assert.deepEqual(world.paged.map((p) => [p.room, p.from]), [[fresh, undefined], [partway, "q5"]], lines.join("\n"));
+  assert.deepEqual(value.map((r) => r.roomId), [fresh, partway]);
+  const state = backfillState();
+  assert.equal(state[fresh].reachedStart, true);
+  assert.equal(state[fresh].head, "hf");
+  assert.equal(state[partway].reachedStart, true);
+  assert.equal(state[recent].lastRunAt, now - 1000, "untouched");
+});
+
+test("a replayed duplicate whose room already carries its tags writes no new state event; a stale one is rewritten", async () => {
+  // Post it once, so the booru holds it and the room's state names it.
+  await post("replaypic", PLAIN_PNG, "image/png", ALICE);
+  const written = world.state[0];
+  assert.ok(written, "the first sighting wrote the room's tag state");
+  const ev = { room_id: "!room:41chan.net", sender: ALICE, content: { url: "mxc://41chan.net/replaypic", body: "replaypic.png", msgtype: "m.image" } };
+
+  const sent = [];
+  const reading = (content) => ({ getIntent: () => ({
+    getStateEvent: async () => content,
+    sendStateEvent: async (room, type, key, c) => { sent.push(c); },
+  }) });
+  const same = await quietly(() => index.handleImageEvent(reading(written.content), ev));
+  assert.equal(same.value, "posted");
+  assert.deepEqual(sent, [], "nothing changed, so nothing was sent");
+  assert.ok(same.lines.some((l) => /already carries its tags/.test(l)), same.lines.join("\n"));
+
+  const stale = await quietly(() => index.handleImageEvent(reading({ ...written.content, tags: ["old_tag"] }), ev));
+  assert.equal(stale.value, "posted");
+  assert.equal(sent.length, 1, "a state that says something else is rewritten");
+
+  const unreadable = { getIntent: () => ({
+    getStateEvent: async () => { throw new Error("M_NOT_FOUND"); },
+    sendStateEvent: async (room, type, key, c) => { sent.push(c); },
+  }) };
+  await quietly(() => index.handleImageEvent(unreadable, ev));
+  assert.equal(sent.length, 2, "absent state is written");
 });

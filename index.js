@@ -14,6 +14,7 @@ const rescanCapability = require("./capabilities/rescan");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
+const backfillState = require("./backfill-state");
 const { resolveHomeserverUrl } = require("./homeserver");
 
 // PACING BETWEEN BACKFILLED IMAGES.
@@ -86,10 +87,9 @@ function setCanon(c) {
 // local_thumbnails/ once; a failure is logged and the next sweep tries again.
 const RETIRE_SWEEP_MS = 15 * 60 * 1000;
 function startThumbnailRetirement(intervalMs = RETIRE_SWEEP_MS) {
-  let running = false;
-  const sweep = async () => {
-    if (running) return;
-    running = true;
+  // everyInterval (below) drops a tick that arrives while the last sweep is
+  // still running, so two sweeps never list local_thumbnails/ at once.
+  return everyInterval(async () => {
     try {
       const r = await getCanon().retireSweep();
       if (r.moved || r.failed) {
@@ -97,13 +97,8 @@ function startThumbnailRetirement(intervalMs = RETIRE_SWEEP_MS) {
       }
     } catch (err) {
       console.error(`[canon] rendition sweep failed: ${err.message}; the next sweep tries again`);
-    } finally {
-      running = false;
     }
-  };
-  const timer = setInterval(sweep, intervalMs);
-  if (timer.unref) timer.unref();
-  return timer;
+  }, intervalMs);
 }
 
 // The media gate (fourier-auth) asks here for any Matrix original it has no
@@ -250,17 +245,22 @@ async function categoriseArtist(tag) {
   }
 }
 
-// Rooms whose history has been walked this process. The join trigger fires
-// once per actual join, so this only guards a room being re-entered or an
-// admin running the command twice in a row -- both harmless, since replaying an
-// image is a no-op at the booru, but both a pile of pointless downloads.
-const backfilledRooms = new Set();
+// ONE WALK AT A TIME, across every room and every trigger. A restart can make
+// the bot's membership event fire in every room within seconds (2026-09-26:
+// fifteen rooms at once), and fifteen parallel walks are fifteen bursts of
+// downloads, booru lookups and state events against Synapse and the booru.
+// Queued, they are one. `backfillInFlight` is the rooms queued or running, so
+// a second trigger for the same room is not queued behind the first.
+const backfillInFlight = new Set();
+let backfillQueue = Promise.resolve();
 
 // Read one page of a room's history as the bot, oldest-going-backwards.
-async function historyPage(roomId, botUserId, from) {
+// `to` stops the page at an earlier walk's head (a rejoin's gap walk).
+async function historyPage(roomId, botUserId, from, to) {
   const base = config.homeserver.url.replace(/\/+$/, "");
   const params = new URLSearchParams({ dir: "b", limit: "100", user_id: botUserId });
   if (from) params.set("from", from);
+  if (to) params.set("to", to);
   const res = await fetch(
     `${base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?${params}`,
     { headers: { Authorization: `Bearer ${AS_TOKEN}` } },
@@ -269,14 +269,21 @@ async function historyPage(roomId, botUserId, from) {
   return res.json();
 }
 
-// Walk a room the bot has entered and replay its images through the live
-// handler. Safe to repeat: that handler skips an upload whose md5 the booru
-// already has and just writes the room's tag state.
-//
-// How far back this can see is the ROOM's business, not ours: under
-// history_visibility "invited" the bot's own invite is the earliest event it
-// may read, and two rooms on this server are set that way. The summary reports
-// what was found rather than claiming the room is now complete.
+// Re-read one event as the bot, to retry a picture that failed on an earlier
+// run. A 404 is "gone" (resolves null), so a deleted picture is dropped
+// rather than posted from memory.
+async function roomEvent(roomId, botUserId, eventId) {
+  const base = config.homeserver.url.replace(/\/+$/, "");
+  const params = new URLSearchParams({ user_id: botUserId });
+  const res = await fetch(
+    `${base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}?${params}`,
+    { headers: { Authorization: `Bearer ${AS_TOKEN}` } },
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`event ${res.status}`);
+  return res.json();
+}
+
 // Can the bot write the tag state event in this room?
 //
 // Asked BEFORE a backfill because of an ordering trap that is easy to walk
@@ -305,10 +312,52 @@ async function canWriteTags(bridge, roomId, botUserId) {
   }
 }
 
-async function backfillRoomNow(bridge, roomId, botUserId) {
-  if (isRoomDisabled(roomId)) return null;
-  if (backfilledRooms.has(roomId)) return null;
-  backfilledRooms.add(roomId);
+// Walk a room the bot is in and replay its images through the live handler.
+// Safe to repeat: that handler skips an upload whose md5 the booru already has
+// and just writes the room's tag state.
+//
+// WHAT A RUN DOES is decided from the room's persisted record
+// (backfill-state.js, read now -- never a copy held in memory) by
+// backfill.planWalk: the first walk of a room starts at the live edge; a room
+// not yet walked to its start RESUMES from its cursor; a finished room is
+// skipped by the automatic triggers unless a failed picture is owed a retry;
+// an admin's !backfill walks a finished room again; a rejoin walks the gap
+// since the last walk began. The record is written back after every run,
+// including one that failed part-way, so pages walked are never walked twice
+// for nothing.
+//
+// How far back this can see is the ROOM's business, not ours: under
+// history_visibility "invited" the bot's own invite is the earliest event it
+// may read, and two rooms on this server are set that way.
+//
+// Resolves { skipped } when there was nothing to do, { error } when the run
+// could not start, otherwise the walk's result. Never rejects.
+async function backfillRoomNow(bridge, roomId, botUserId, { trigger = "join", restart = false } = {}) {
+  if (isRoomDisabled(roomId)) return { roomId, skipped: "tagging is disabled for this room" };
+  // Belt and braces: the event loop already drops a denied room's events, and
+  // the guarded intent would refuse the writes, but the sweep and the history
+  // reads reach Synapse by fetch, around the guard.
+  if (rooms.isDenied(roomId)) return { roomId, skipped: "the room is on the denied list" };
+  if (backfillInFlight.has(roomId)) return { roomId, skipped: "a walk of this room is already queued or running" };
+  backfillInFlight.add(roomId);
+  const run = backfillQueue.then(() => walkRoom(bridge, roomId, botUserId, { trigger, restart }));
+  backfillQueue = run.catch(() => {});
+  try {
+    return await run;
+  } catch (err) {
+    console.warn(`[backfill] ${roomId} failed: ${err.message}`);
+    return { roomId, error: err.message };
+  } finally {
+    backfillInFlight.delete(roomId);
+  }
+}
+
+async function walkRoom(bridge, roomId, botUserId, { trigger, restart }) {
+  // Re-checked at the head of the queue: a room can be denied while it waits.
+  if (rooms.isDenied(roomId)) return { roomId, skipped: "the room is on the denied list" };
+  const saved = backfillState.get(roomId);
+  const plan = backfill.planWalk(saved, { trigger, restart });
+  if (plan.kind === "skip") return { roomId, skipped: "its history has been walked to the start" };
 
   const perm = await canWriteTags(bridge, roomId, botUserId);
   if (!perm.ok) {
@@ -317,31 +366,117 @@ async function backfillRoomNow(bridge, roomId, botUserId) {
       `(bot has ${perm.have}, needs ${perm.need}). Images will still reach the ` +
       `booru, but NO tags will be written back to this room. Fix with: run ` +
       `tools/grant-tag-write.sh (it picks up this room now the bot is in it), then ` +
-      `send !backfill here to write the tag state that this run will miss.`
+      `send !backfill restart here to write the tag state that this run will miss.`
     );
   }
-  try {
-    const result = await backfill.backfillRoom({
-      roomId,
-      fetchPage: (from) => historyPage(roomId, botUserId, from),
-      onImage: async (ev) => {
-        const outcome = await handleImageEvent(bridge, { ...ev, room_id: roomId });
-        // Paced: each image is a download, a hash, maybe an upload and a state
-        // event. Synapse rate-limits state events and will start refusing.
-        await sleep(BACKFILL_PACE_MS);
-        return outcome;
-      },
-      // Named, not swallowed. Passing this is now mandatory; see backfillRoom.
-      log: (line) => console.warn(line),
-    });
-    const note = perm.ok ? "" : "  (tag write-back BLOCKED: see the warning above)";
-    console.log(backfill.summarise(result) + note);
-    return { ...result, tagsBlocked: !perm.ok };
-  } catch (err) {
-    backfilledRooms.delete(roomId); // let a later attempt try again
-    console.warn(`[backfill] ${roomId} failed: ${err.message}`);
-    return null;
+  if (plan.kind !== "initial" || saved) {
+    console.log(`[backfill] ${roomId}: ${plan.kind}${plan.from ? " from the saved cursor" : ""} (${trigger})`);
   }
+  const result = await backfill.backfillRoom({
+    roomId,
+    from: plan.from,
+    to: plan.to,
+    // A retry-only run walks no pages.
+    maxPages: plan.kind === "retry" ? 0 : backfill.MAX_PAGES,
+    retry: backfill.retryable(saved),
+    fetchPage: (from, to) => historyPage(roomId, botUserId, from, to),
+    fetchEvent: (eventId) => roomEvent(roomId, botUserId, eventId),
+    onImage: async (ev) => {
+      const outcome = await handleImageEvent(bridge, { ...ev, room_id: roomId });
+      // Paced: each image is a download, a hash, maybe an upload and a state
+      // event. Synapse rate-limits state events and will start refusing.
+      await sleep(BACKFILL_PACE_MS);
+      return outcome;
+    },
+    // Named, not swallowed. Passing this is now mandatory; see backfillRoom.
+    log: (line) => console.warn(line),
+  });
+  const full = { ...result, kind: plan.kind, tagsBlocked: !perm.ok };
+  backfillState.put(roomId, backfill.nextState(saved, plan, full));
+  const note = perm.ok ? "" : "  (tag write-back BLOCKED: see the warning above)";
+  console.log(backfill.summarise(full) + note);
+  return full;
+}
+
+// THE SWEEP: every room the bot sits in whose history is not yet walked to its
+// start -- or that never had a walk at all, or owes a failed picture a retry --
+// is resumed, ONE ROOM AT A TIME, through the same queue as everything else.
+// Without it a room only progressed when somebody noticed and typed !backfill,
+// which is what left one room at 0 of 9 for over a month.
+//
+// Skipped: denied and disabled rooms; a room walked in the last few minutes
+// (so a sweep does not chase an admin's !backfill or a join's walk); and a DM
+// unless tag_in_dms is on, the same rule the live path keeps -- an admin's DM
+// with the bot is where avatar pictures are sent, and they are not for the
+// booru.
+const BACKFILL_SWEEP_MS = 10 * 60 * 1000;
+const BACKFILL_SWEEP_FIRST_MS = 2 * 60 * 1000;
+const BACKFILL_RECENT_MS = 5 * 60 * 1000;
+
+async function joinedRoomIds(userId) {
+  const base = config.homeserver.url.replace(/\/+$/, "");
+  const q = `user_id=${encodeURIComponent(userId)}`;
+  const res = await fetch(`${base}/_matrix/client/v3/joined_rooms?${q}`, { headers: { Authorization: `Bearer ${AS_TOKEN}` } });
+  if (!res.ok) throw new Error(`joined_rooms ${res.status}`);
+  return (await res.json()).joined_rooms || [];
+}
+
+async function backfillSweep(bridge, botUserId, { now = Date.now } = {}) {
+  const ids = await joinedRoomIds(botUserId);
+  const walked = [];
+  for (const roomId of ids) {
+    if (isRoomDisabled(roomId) || rooms.isDenied(roomId)) continue;
+    const saved = backfillState.get(roomId);
+    if (saved && saved.lastRunAt && now() - saved.lastRunAt < BACKFILL_RECENT_MS) continue;
+    if (backfill.planWalk(saved, { trigger: "sweep" }).kind === "skip") continue;
+    if (!config.bridge.tag_in_dms && (await joinedMemberCount(bridge, roomId)) === 2) continue;
+    const r = await backfillRoomNow(bridge, roomId, botUserId, { trigger: "sweep" });
+    walked.push(r);
+  }
+  return walked;
+}
+
+// A periodic job that never overlaps itself: a tick that arrives while the
+// last one is still running is dropped, not queued.
+function everyInterval(job, intervalMs, firstMs = intervalMs) {
+  let current = null;
+  const tick = () => {
+    if (current) return;
+    current = Promise.resolve().then(job).finally(() => { current = null; });
+  };
+  const first = setTimeout(tick, firstMs);
+  const timer = setInterval(tick, intervalMs);
+  if (first.unref) first.unref();
+  if (timer.unref) timer.unref();
+  return timer;
+}
+
+function startBackfillSweep(bridge, botUserId) {
+  return everyInterval(async () => {
+    try {
+      const walked = await backfillSweep(bridge, botUserId);
+      const ran = walked.filter((r) => r && !r.skipped);
+      if (ran.length) console.log(`[backfill] sweep: ${ran.length} room(s) walked`);
+    } catch (err) {
+      console.error(`[backfill] sweep failed: ${err.message}; the next sweep tries again`);
+    }
+  }, BACKFILL_SWEEP_MS, BACKFILL_SWEEP_FIRST_MS);
+}
+
+// Does the room's tag state for this picture already say exactly this?
+async function tagStateIsCurrent(bridge, roomId, key, post, projection) {
+  let current;
+  try {
+    current = await bridge.getIntent().getStateEvent(roomId, TAG_STATE_TYPE, key);
+  } catch {
+    return false; // absent (404) or unreadable: write it
+  }
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  return Boolean(current) &&
+    current.post_id === post.id &&
+    current.rating === (post.rating || config.bridge.default_rating) &&
+    same(current.tags, projection.tags) &&
+    same(current.sources, projection.sources);
 }
 
 async function handleImageEvent(bridge, event) {
@@ -433,6 +568,15 @@ async function handleImageEvent(bridge, event) {
         tags: tagString.split(/\s+/).filter(Boolean),
         sources: { creator: [], auto: [], both: [], meta: [] },
       };
+    }
+    // A REPLAY (backfill, the sweep, !backfill restart) meets every picture it
+    // already handled, and each write is a new state event in the room even
+    // when nothing changed -- updated_at alone makes it differ. The state is
+    // keyed by this picture's mxc, so if it already names this post with these
+    // tags there is nothing to say. A read that fails writes, as before.
+    if (await tagStateIsCurrent(bridge, roomId, mxcUrl, existing, projection)) {
+      console.log(`[skip] duplicate md5 ${plan.md5} -> existing post #${existing.id}; the room already carries its tags`);
+      return "posted";
     }
     try {
       await bridge.getIntent().sendStateEvent(roomId, TAG_STATE_TYPE, mxcUrl, {
@@ -770,9 +914,16 @@ async function handleListRoomsCommand(bridge, event) {
 // Handle the !backfill admin command. Runs in the room it is sent in, which is
 // the room being caught up -- unlike the other admin commands, this one is
 // ABOUT a room, so requiring a DM would mean naming the room by id.
+//
+//   !backfill           resume this room's walk where the last run stopped; a
+//                       room already walked to its start is walked again from
+//                       the live edge (an explicit ask overrides "done")
+//   !backfill restart   walk again from the live edge whatever was done --
+//                       how tag state blocked on an earlier run gets written
 async function handleBackfillCommand(bridge, event) {
   const body = event.content && event.content.body;
-  if (!body || body.trim().split(/\s+/)[0] !== "!backfill") return false;
+  const words = body ? body.trim().split(/\s+/) : [];
+  if (words[0] !== "!backfill") return false;
 
   const sender = event.sender;
   if (!botAdmins().includes(sender)) {
@@ -782,16 +933,22 @@ async function handleBackfillCommand(bridge, event) {
 
   const intent = bridge.getIntent();
   const botUserId = `@${_reg.sender_localpart}:${config.homeserver.domain}`;
-  backfilledRooms.delete(event.room_id); // an explicit ask overrides "already done"
-  await intent.sendText(event.room_id, "Walking this room's history for images...");
-  const result = await backfillRoomNow(bridge, event.room_id, botUserId);
-  invites.audit({ kind: "backfill", admin: sender, room: event.room_id, result: result ? `${result.done}/${result.seen}` : "failed" });
-  let reply = result ? backfill.summarise(result) : "Backfill failed; see the bridge log.";
-  if (result && result.tagsBlocked) {
+  const restart = words[1] === "restart";
+  await intent.sendText(event.room_id, restart
+    ? "Walking this room's history for images again, from the newest..."
+    : "Walking this room's history for images...");
+  const result = await backfillRoomNow(bridge, event.room_id, botUserId, { trigger: "command", restart });
+  const outcome = result.error ? "failed" : result.skipped ? `skipped: ${result.skipped}` : `${result.done}/${result.seen}`;
+  invites.audit({ kind: "backfill", admin: sender, room: event.room_id, restart, result: outcome });
+  let reply;
+  if (result.error) reply = `Backfill failed: ${result.error}. The next sweep tries again; see the bridge log.`;
+  else if (result.skipped) reply = `Backfill not run: ${result.skipped}.`;
+  else reply = backfill.summarise(result);
+  if (result.tagsBlocked) {
     reply +=
       "\n\nTags were NOT written back to this room: I do not have permission to " +
       "send " + TAG_STATE_TYPE + " here. Run tools/grant-tag-write.sh, then send " +
-      "!backfill again.";
+      "!backfill restart.";
   }
   await intent.sendText(event.room_id, reply);
   return true;
@@ -998,8 +1155,15 @@ new Cli({
               event.content.membership === "join" &&
               event.state_key === botUserId
             ) {
-              console.log(`[backfill] entered ${event.room_id}, walking its history`);
-              void backfillRoomNow(bridge, event.room_id, botUserId);
+              // A membership event whose PREVIOUS membership was also join is
+              // a profile change (the display name is set at every startup),
+              // not an entry. Both reach backfillRoomNow, which skips a room
+              // already walked to its start; a real re-entry walks the gap
+              // the bot was away for.
+              const prev = event.unsigned && event.unsigned.prev_content && event.unsigned.prev_content.membership;
+              const trigger = prev && prev !== "join" ? "rejoin" : "join";
+              console.log(`[backfill] ${trigger === "rejoin" ? "re-entered" : "membership event in"} ${event.room_id}; checking its history walk`);
+              void backfillRoomNow(bridge, event.room_id, botUserId, { trigger });
               // Deliberately no return: a join is not consumed by this.
             }
 
@@ -1063,6 +1227,8 @@ new Cli({
     getCanon();
     startCanonService((config.canon && config.canon.port) || 8011);
     startThumbnailRetirement();
+    // Resume every room whose history is not yet walked to its start.
+    startBackfillSweep(bridge, `@${_reg.sender_localpart}:${config.homeserver.domain}`);
 
     bridge.run(port).then(async () => {
       try {
@@ -1082,4 +1248,4 @@ new Cli({
 // writer. handleImageEvent takes anything with getIntent().sendStateEvent --
 // the real Bridge in the service, a thin stand-in in a tool -- because that is
 // the only thing it asks of it.
-module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, startCanonService };
+module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, startCanonService, backfillRoomNow, backfillSweep };
