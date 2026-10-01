@@ -32,6 +32,8 @@
 //   4. Synapse's original is MOVED to superseded/<its key>, for the operator
 //      to review and delete. Nothing here deletes anything: a move is a copy,
 //      a check that the copy is whole, and only then removal of the source key.
+//   5. The booru holds it: an upload record with no post, so the booru renders
+//      the variants that are every surface's thumbnails (ensureBooruRecord).
 //
 // Not images (encrypted attachments, video, HTML): nothing to strip, so the
 // index names the file where it already is and nothing moves.
@@ -56,6 +58,7 @@ const {
   DeleteObjectCommand,
 } = require("@aws-sdk/client-s3");
 const { stripGeneration } = require("./strip-generation");
+const { findPostForBytes } = require("./image-plan");
 
 // Media types the stripper handles, and the extension the booru gives them.
 // Danbooru names a JPEG ".jpg", and the canonical key must match the key the
@@ -74,6 +77,19 @@ function shard(mediaId) {
 // See retireSynapseThumbnails: longer than the gate's 10-minute memory of "no
 // variants" (fourier-auth mediar2.js NO_VARIANTS_TTL).
 const RETIRE_THUMBNAILS_AFTER_MS = 30 * 60 * 1000;
+// How long canon waits for the booru to render an upload (see ensureBooruRecord).
+// Under the media gate's 30-second wait for canon (fourier-auth mediar2.js
+// canonClient), with room for the strip and the bucket writes before it.
+const BOORU_WAIT_MS = 15 * 1000;
+// A booru record that is settled: nothing more to do for this image.
+//   completed  canon uploaded it; the booru rendered its variants
+//   held       the booru already had it (a post, or variants) before canon asked
+//   refused    the booru looked at the file and said no (a type it does not
+//              take, too large, corrupt): its verdict, not retried
+const BOORU_SETTLED = new Set(["completed", "held", "refused"]);
+// What the booru says about a FILE, as opposed to about itself at the moment.
+// Danbooru's MediaAsset.validate_media_file! and MediaFile's own checks.
+const BOORU_VERDICT = /not an image|not supported|too large|is corrupt|resolution is too large|too long/i;
 
 const keys = {
   source: (mediaId) => `local_content/${shard(mediaId)}`,
@@ -209,10 +225,14 @@ class CanonError extends Error {
  * deps:
  *   store       r2Store(...) or a fake with head/get/put/copy/remove
  *   mediaInfo   async (mediaId) -> { media_type, user_id, quarantined_by } | null
- *   booru       { recordGenerationMetadata(md5, {rawMd5, source, poster, fields}) }
+ *   booru       DanbooruClient, or a fake with the same methods:
+ *                 recordGenerationMetadata(md5, {rawMd5, source, poster, fields})
+ *                 findPostByMd5(md5), findGenerationByRawMd5(rawMd5)
+ *                 createUploadFromBytes(buffer, filename, type), waitForUpload(id, opts)
  *   log         (line) => void
+ *   booruWaitMs how long to wait for the booru to render an upload
  */
-function createCanon({ store, mediaInfo, booru, log = () => {} }) {
+function createCanon({ store, mediaInfo, booru, log = () => {}, booruWaitMs = BOORU_WAIT_MS }) {
   async function readIndex(mediaId) {
     const raw = await store.get(keys.index(mediaId));
     if (!raw) return null;
@@ -350,6 +370,137 @@ function createCanon({ store, mediaInfo, booru, log = () => {} }) {
     }
   }
 
+  // THE BOORU HOLDS EVERY IMAGE. Operator decision, 2026-10-01: every Matrix
+  // image gets a booru record -- an upload, its media asset, NO post -- so the
+  // booru renders its variants (variants/<md5>/180x180.jpg ... sample.jpg), and
+  // those are the image's one set of renditions on every surface: the media
+  // gate serves a Matrix thumbnail from them (fourier-auth mediar2.js), and
+  // retireSynapseThumbnails moves Synapse's own set aside. Before this only
+  // POSTED images had variants, so a DM image, an avatar, or an image in a room
+  // the tunnel does not watch kept Synapse's renditions -- a second rendition
+  // system -- and with dynamic_thumbnails on, Synapse renders nothing at all.
+  //
+  // Not a second copy of the original. The one file is already at
+  // media/<md5>.<ext> when this runs, and the booru's storage maps its
+  // original to exactly that key and refuses to overwrite it (rclone copyto
+  // --ignore-existing; fourier-basis ops/hetzner/danbooru danbooru_local_config.rb,
+  // storage_manager). Uploading these bytes adds the asset row and the
+  // variants, nothing else in the bucket.
+  //
+  // Who may SEE it is unchanged: an unposted asset is visible on the booru to
+  // an admin and its uploader only (chanbooru 7d3efd370), the booru's media
+  // door refuses any md5 canon has indexed (fourier-auth isMatrixImage), and a
+  // Matrix reader reaches the variants only through the gate's room check.
+  // The upload is named <md5>.<ext>, never the sender's file name: the booru
+  // keeps the name on the upload row, which its moderators can list.
+  //
+  // Never fatal. The index, the one file and the gate's answer do not depend
+  // on the booru; a booru that is down or busy leaves {status: "pending"} and
+  // the next touch -- or the tunnel's sweep (booruSweep) -- tries again.
+  function booruFilename(idx) {
+    const ext = String(idx.key || "").split(".").pop();
+    return `${idx.md5}.${ext}`;
+  }
+
+  // Is the image already the booru's? A post for these bytes (the same three
+  // ways the tunnel's own duplicate check asks: stripped md5, the booru's
+  // record of the raw md5, the raw md5), or variants under one of its md5s
+  // with no post (an earlier upload). Read-only.
+  async function booruHolding(idx) {
+    const found = await findPostForBytes(
+      { rawMd5: idx.raw_md5 || idx.md5, strippedMd5: idx.md5 },
+      (md5) => booru.findPostByMd5(md5),
+      (rawMd5) => booru.findGenerationByRawMd5(rawMd5),
+    );
+    if (found) {
+      const asset = found.post && found.post.media_asset;
+      return { md5: found.md5, post_id: found.post.id, media_asset_id: (asset && asset.id) || null, via: `post (${found.via})` };
+    }
+    const held = typeof store.list === "function" ? await booruVariantsOf(idx) : null;
+    if (held) return { md5: held.md5, post_id: null, media_asset_id: null, via: "variants" };
+    return null;
+  }
+
+  async function recordBooru(mediaId, idx, booruRecord) {
+    const next = { ...idx, booru: { ...booruRecord, at: new Date().toISOString() } };
+    await writeIndex(mediaId, next);
+    return next;
+  }
+
+  // Wait for an upload the booru accepted, and say what became of it.
+  async function settleUpload(mediaId, idx, uploadId) {
+    let upload;
+    try {
+      upload = await booru.waitForUpload(uploadId, { intervalMs: 1000, timeoutMs: booruWaitMs });
+    } catch (err) {
+      if (err && err.code === "UPLOAD_ERROR") {
+        const why = String(err.uploadError || err.message);
+        if (BOORU_VERDICT.test(why)) {
+          log(`[canon] ${mediaId}: the booru refused ${idx.key} (${why}); it keeps no record, and Synapse's renditions stay its only set`);
+          return recordBooru(mediaId, idx, { status: "refused", upload_id: uploadId, reason: why });
+        }
+        log(`[canon] ${mediaId}: booru upload ${uploadId} failed (${why}); retried on the next touch`);
+        return recordBooru(mediaId, idx, { status: "pending", reason: why });
+      }
+      if (err && err.code === "UPLOAD_TIMEOUT") {
+        // Still rendering. The next touch asks after THIS upload rather than
+        // making another.
+        return recordBooru(mediaId, idx, { status: "processing", upload_id: uploadId });
+      }
+      throw err;
+    }
+    const uma = Array.isArray(upload.upload_media_assets) ? upload.upload_media_assets[0] : null;
+    if (!uma || !uma.id || uma.status === "failed") {
+      const why = (uma && uma.error) || "the upload completed with no media asset";
+      log(`[canon] ${mediaId}: booru upload ${uploadId} made no asset (${why}); retried on the next touch`);
+      return recordBooru(mediaId, idx, { status: "pending", reason: why });
+    }
+    return recordBooru(mediaId, idx, {
+      status: "completed",
+      upload_id: uploadId,
+      upload_media_asset_id: uma.id,
+      media_asset_id: uma.media_asset_id || null,
+    });
+  }
+
+  /**
+   * Make sure the booru holds this canonical image; returns the index entry
+   * with its `booru` record. opts.bytes: the one file, when the caller has it
+   * already. opts.dryRun: read-only lookups, nothing uploaded or written;
+   * `booru.status` is then "held" or "would-upload".
+   */
+  async function ensureBooruRecord(mediaId, idx, opts = {}) {
+    if (!idx || idx.kind !== "canonical") return idx; // nothing the booru can render
+    const prior = idx.booru;
+    if (prior && BOORU_SETTLED.has(prior.status)) return idx;
+    try {
+      if (prior && prior.status === "processing" && prior.upload_id && !opts.dryRun) {
+        return await settleUpload(mediaId, idx, prior.upload_id);
+      }
+      const holding = await booruHolding(idx);
+      if (holding) return opts.dryRun ? { ...idx, booru: { status: "held", ...holding } } : await recordBooru(mediaId, idx, { status: "held", ...holding });
+      if (opts.dryRun) return { ...idx, booru: { status: "would-upload" } };
+      const bytes = opts.bytes || (await store.get(idx.key));
+      if (!bytes) {
+        log(`[canon] ${mediaId}: no booru record -- ${idx.key} is not in the bucket`);
+        return recordBooru(mediaId, idx, { status: "pending", reason: `${idx.key} is not in the bucket` });
+      }
+      const upload = await booru.createUploadFromBytes(bytes, booruFilename(idx), idx.media_type);
+      if (!upload || !upload.id) throw new Error("the booru accepted the upload but returned no upload id");
+      return await settleUpload(mediaId, idx, upload.id);
+    } catch (err) {
+      const status = err && err.response && err.response.status;
+      const why = status ? `the booru answered ${status}` : String((err && err.message) || err);
+      log(`[canon] ${mediaId}: booru record NOT made (${why}); retried on the next touch`);
+      if (opts.dryRun) return { ...idx, booru: { status: "error", reason: why } };
+      try {
+        return await recordBooru(mediaId, idx, { ...(prior && prior.upload_id ? { upload_id: prior.upload_id } : {}), status: prior && prior.status === "processing" ? "processing" : "pending", reason: why });
+      } catch {
+        return idx;
+      }
+    }
+  }
+
   // The raw original (while it exists) and what a strip takes from it now --
   // for creator tags and for a record still owed.
   async function rawAndRemoved(mediaId, mediaType) {
@@ -384,7 +535,14 @@ function createCanon({ store, mediaInfo, booru, log = () => {} }) {
     }
     const settledRecord = record;
     const moved = !dry && existing.kind === "canonical" ? await settleMove(mediaId, { ...existing, record: settledRecord }) : undefined;
-    const idx = moved === undefined ? { ...existing, record: settledRecord } : { ...existing, record: settledRecord, moved };
+    let idx = moved === undefined ? { ...existing, record: settledRecord } : { ...existing, record: settledRecord, moved };
+    // A booru record still owed (an image canonical before every image got
+    // one, or one the booru was too busy for) is settled on this touch too.
+    if (!dry && idx.kind === "canonical" && !(idx.booru && BOORU_SETTLED.has(idx.booru.status))) {
+      const { moved: m, ...stored } = idx;
+      const withBooru = await ensureBooruRecord(mediaId, stored);
+      idx = m === undefined ? withBooru : { ...withBooru, moved: m };
+    }
     if (!opts.withBytes || idx.kind !== "canonical") return idx;
     const bytes = await store.get(idx.key);
     if (!bytes) {
@@ -522,6 +680,13 @@ function createCanon({ store, mediaInfo, booru, log = () => {} }) {
       } catch (err) {
         log(`[canon] ${mediaId}: thumbnails not checked (${err.message})`);
       }
+      // Last: the one file, its index and its md5 map (which the booru's media
+      // door reads to refuse a Matrix image) all exist before the booru is told.
+      const { moved, thumbnails, ...stored } = result;
+      const withBooru = await ensureBooruRecord(mediaId, stored, { bytes });
+      result.booru = withBooru.booru;
+      result.moved = moved;
+      result.thumbnails = thumbnails;
     }
 
     if (opts.withBytes) return { ...result, bytes, removed: fields, raw };
@@ -575,7 +740,9 @@ function createCanon({ store, mediaInfo, booru, log = () => {} }) {
 
   // The newest variant the booru holds for this image, or null when it holds none.
   async function booruVariantsOf(idx) {
-    const md5s = [...new Set([idx.md5, idx.raw_md5, idx.rawMd5].filter((x) => typeof x === "string" && /^[0-9a-f]{32}$/.test(x)))];
+    // idx.booru.md5: the md5 the booru holds the image under when that is
+    // neither of the two canon computed -- a post made under older strip rules.
+    const md5s = [...new Set([idx.md5, idx.raw_md5, idx.rawMd5, idx.booru && idx.booru.md5].filter((x) => typeof x === "string" && /^[0-9a-f]{32}$/.test(x)))];
     for (const md5 of md5s) {
       const found = typeof store.listDated === "function"
         ? await store.listDated(`variants/${md5}/`)
@@ -652,7 +819,65 @@ function createCanon({ store, mediaInfo, booru, log = () => {} }) {
     return { images: ids.size, tally, moved, failed };
   }
 
-  return { canonicalize: canonicalizeOnce, readIndex, moveSource, retireSynapseThumbnails, retireSweep, keys };
+  // The booru record for one media id: read its index and settle what is
+  // owed. For the backfill (tools/canon-backfill.js --booru-records) and the
+  // sweep below. Returns { status, booru }; status "no-index" or "not-image"
+  // when there is nothing for the booru to hold.
+  async function booruRecord(mediaId, { dryRun = false } = {}) {
+    // Never beside a canonicalize of the same image in this process: two
+    // uploads of one file would be two upload rows for one asset.
+    const running = inflight.get(mediaId);
+    if (running) await running.catch(() => {});
+    const idx = await readIndex(mediaId);
+    if (!idx) return { status: "no-index" };
+    if (idx.kind !== "canonical") return { status: `not-image (${idx.kind})` };
+    if (idx.booru && BOORU_SETTLED.has(idx.booru.status)) return { status: "already", booru: idx.booru };
+    const out = await ensureBooruRecord(mediaId, idx, { dryRun });
+    return { status: (out.booru && out.booru.status) || "error", booru: out.booru };
+  }
+
+  // THE TUNNEL'S RETRY of booru records it TRIED and could not finish --
+  // {status: "pending"} or "processing" -- found by listing index/local/.
+  // An index with no booru record at all (canonical before 2026-10-01) is
+  // the backfill's to give one, on the operator's say; the sweep never
+  // uploads it on its own. Each index is read once per process unless it is
+  // still owed. At most maxUploads booru calls per sweep, paced.
+  const booruDone = new Set(); // media ids this sweep need not read again
+  async function booruSweep({ maxUploads = 30, paceMs = 2000, sleep = (ms) => new Promise((r) => { setTimeout(r, ms); }) } = {}) {
+    const tally = {};
+    let tried = 0;
+    for (const key of await store.list("index/local/")) {
+      const m = /^index\/local\/([A-Za-z0-9_-]+)\.json$/.exec(key);
+      if (!m || booruDone.has(m[1])) continue;
+      const id = m[1];
+      let idx;
+      try {
+        idx = await readIndex(id);
+      } catch (err) {
+        log(`[canon] ${id}: index unreadable (${err.message}); the booru sweep passes it by`);
+        booruDone.add(id);
+        continue;
+      }
+      const owed = idx && idx.kind === "canonical" && idx.booru && !BOORU_SETTLED.has(idx.booru.status);
+      if (!owed) {
+        booruDone.add(id);
+        continue;
+      }
+      if (tried >= maxUploads) {
+        tally.deferred = (tally.deferred || 0) + 1;
+        continue;
+      }
+      if (tried > 0) await sleep(paceMs);
+      tried += 1;
+      const out = await ensureBooruRecord(id, idx);
+      const status = (out.booru && out.booru.status) || "error";
+      tally[status] = (tally[status] || 0) + 1;
+      if (BOORU_SETTLED.has(status)) booruDone.add(id);
+    }
+    return { tried, tally };
+  }
+
+  return { canonicalize: canonicalizeOnce, readIndex, moveSource, retireSynapseThumbnails, retireSweep, booruRecord, booruSweep, keys };
 }
 
 // The uploader and type of a local media id, from Synapse's admin API

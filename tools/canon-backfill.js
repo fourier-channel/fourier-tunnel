@@ -11,6 +11,12 @@
 //   ... --booru-duplicates                                                    also the booru's copies
 //   ... --retire-thumbnails     Synapse's renditions of booru-held images, to superseded/
 //                               (the booru's variants are the one set; canon.js retireSynapseThumbnails)
+//   ... --booru-records         give every canonical image the booru does not hold an
+//                               upload record (no post), so the booru renders its
+//                               variants (canon.js ensureBooruRecord). One upload at
+//                               a time, BOORU_PACE_MS apart. Then, once the variants
+//                               are 30 minutes old, --retire-thumbnails (or the
+//                               tunnel's own 15-minute sweep) retires Synapse's set.
 //
 // Without --apply it WRITES NOTHING: every image is read and stripped in memory
 // and the line it would produce is printed. Flags are matched exactly; an
@@ -20,6 +26,8 @@
 //   CANON  <mediaId>  <kind>  <media_type>  stripped=<y|n>  fields=<n>  <key or reason>
 //   DUP    <post_id>  <md5.ext>  <why>        (a booru copy that is not the one file)
 //   KEEP   <post_id>  <md5.ext>  <why>        (a booru copy that IS some image's one file)
+//   BOORU  <mediaId>  <status>  <detail>   (--booru-records: held, would-upload,
+//                                          completed, processing, refused, pending)
 //   ERR    <id>       <message>
 
 const fs = require("fs");
@@ -31,16 +39,23 @@ const { DanbooruClient } = require("../danbooru");
 const canonLib = require("../canon");
 const { resolveHomeserverUrl } = require("../homeserver");
 
-const FLAGS = new Set(["--apply", "--booru-duplicates", "--retire-thumbnails"]);
+const FLAGS = new Set(["--apply", "--booru-duplicates", "--retire-thumbnails", "--booru-records"]);
 const args = process.argv.slice(2);
 const unknown = args.filter((a) => !FLAGS.has(a));
 if (unknown.length) {
-  console.error(`FAIL: unknown option(s) ${unknown.join(" ")}. fix: the options are --apply, --booru-duplicates and --retire-thumbnails, spelled out in full.`);
+  console.error(`FAIL: unknown option(s) ${unknown.join(" ")}. fix: the options are --apply, --booru-duplicates, --retire-thumbnails and --booru-records, spelled out in full.`);
   process.exit(2);
 }
 const APPLY = args.includes("--apply");
 const BOORU = args.includes("--booru-duplicates");
 const THUMBS = args.includes("--retire-thumbnails");
+const RECORDS = args.includes("--booru-records");
+// Gently: the tunnel's booru account may create 48 uploads a minute and live
+// posting shares that budget. One every 3 s is 20 a minute, under half of it;
+// a dry run only reads, at one image every 500 ms.
+const BOORU_PACE_MS = 3000;
+const LOOKUP_PACE_MS = 500;
+const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
 const config = yaml.load(fs.readFileSync(process.env.FOURIER_TUNNEL_CONFIG || path.join(__dirname, "..", "config.yaml"), "utf8"));
 config.homeserver.url = resolveHomeserverUrl(process.env, config.homeserver.url);
@@ -165,7 +180,61 @@ async function booruDuplicates(summary) {
   }
 }
 
+// Every media id the booru might owe a record: each one canon has indexed,
+// plus each one Synapse still has renditions for (an avatar never fetched as
+// an original has renditions and no index yet).
+async function recordIds() {
+  const ids = new Set();
+  for (const key of await store.list("index/local/")) {
+    const m = /^index\/local\/([A-Za-z0-9_-]+)\.json$/.exec(key);
+    if (m) ids.add(m[1]);
+  }
+  for (const key of await store.list("local_thumbnails/")) {
+    const m = /^local_thumbnails\/([^/]{2})\/([^/]{2})\/([^/]+)\//.exec(key);
+    if (m) ids.add(`${m[1]}${m[2]}${m[3]}`);
+  }
+  return [...ids].sort();
+}
+
+async function booruRecords() {
+  const ids = await recordIds();
+  console.log(`# ${ids.length} media id(s) indexed or with Synapse renditions; ${APPLY ? "APPLYING" : "DRY RUN -- nothing is uploaded or written"}`);
+  const tally = {};
+  let errors = 0;
+  for (const id of ids) {
+    let r;
+    try {
+      // No index yet: make the image canonical first (the same step every
+      // other path takes before anything else touches it).
+      // canonicalize settles the booru record itself when it applies.
+      if (!(await canon.readIndex(id))) {
+        const c = await canon.canonicalize(id, { dryRun: !APPLY });
+        if (c.kind !== "canonical") r = { status: `not-image (${c.kind})` };
+        else if (!APPLY) r = { status: "would-canonicalize-and-check" };
+        else r = { status: (c.booru && c.booru.status) || "error", booru: c.booru };
+      }
+      if (!r) r = await canon.booruRecord(id, { dryRun: !APPLY });
+    } catch (err) {
+      errors += 1;
+      console.log(["ERR", id, String(err.message).replace(/\s+/g, " ")].join("\t"));
+      continue;
+    }
+    tally[r.status] = (tally[r.status] || 0) + 1;
+    const b = r.booru || {};
+    const detail = [b.md5 && `md5=${b.md5}`, b.post_id && `post=${b.post_id}`, b.media_asset_id && `asset=${b.media_asset_id}`, b.upload_id && `upload=${b.upload_id}`, b.via, b.reason].filter(Boolean).join(" ");
+    console.log(["BOORU", id, r.status, detail].join("\t"));
+    const uploaded = APPLY && ["completed", "processing", "refused", "pending"].includes(r.status);
+    await sleep(uploaded ? BOORU_PACE_MS : LOOKUP_PACE_MS);
+  }
+  console.log(`# booru records ${APPLY ? "APPLIED" : "DRY RUN"}: ${JSON.stringify(tally)}; errors=${errors}`);
+  return errors;
+}
+
 (async () => {
+  if (RECORDS) {
+    const errors = await booruRecords();
+    process.exit(errors ? 1 : 0);
+  }
   const summary = { canonical: 0, source: 0, refused: 0, stripped: 0, withFields: 0, recordPending: 0, errors: 0, dups: 0, moved: 0, keep: 0, isOne: 0, absent: 0 };
   if (THUMBS) {
     // On its own: the originals were made canonical by the first backfill, and

@@ -68,14 +68,20 @@ class DanbooruClient {
       });
       const upload = resp.data;
       if (upload.status === "error") {
-        throw new Error(`Upload ${uploadId} failed: ${upload.error || "unknown error"}`);
+        // The booru looked at the file and said no. Tagged, so a caller can
+        // tell this from a wait that ran out (canon.js records the first as
+        // the booru's verdict and retries only the second).
+        throw Object.assign(new Error(`Upload ${uploadId} failed: ${upload.error || "unknown error"}`), {
+          code: "UPLOAD_ERROR",
+          uploadError: upload.error || "unknown error",
+        });
       }
       if (upload.status === "completed") {
         return upload;
       }
       await sleep(intervalMs);
     }
-    throw new Error(`Upload ${uploadId} timed out after ${timeoutMs}ms`);
+    throw Object.assign(new Error(`Upload ${uploadId} timed out after ${timeoutMs}ms`), { code: "UPLOAD_TIMEOUT" });
   }
 
   async createPost(uploadMediaAssetId, { rating, tagString = "", source = "" }) {

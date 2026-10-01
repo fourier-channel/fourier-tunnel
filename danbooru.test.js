@@ -97,3 +97,15 @@ test("the raw lookup: GET /fourier/generation_metadata/raw/:raw_md5.json -> the 
   await assert.rejects(client({ status: 503, data: {} }).c.findGenerationByRawMd5(RAW), /generation_metadata\/raw -> 503/);
   await assert.rejects(client({ status: 200, data: { md5: "not-an-md5" } }).c.findGenerationByRawMd5(RAW), /-> 200/);
 });
+
+test("waitForUpload says WHICH way it failed: the booru's verdict (UPLOAD_ERROR) or a wait that ran out (UPLOAD_TIMEOUT)", async () => {
+  // canon.js records the first as final and asks after the second, so the two
+  // must never look alike.
+  const refused = client({ status: 200, data: { id: 5, status: "error", error: "File type is not supported" } });
+  await assert.rejects(() => refused.c.waitForUpload(5, { intervalMs: 1, timeoutMs: 50 }),
+    (err) => err.code === "UPLOAD_ERROR" && err.uploadError === "File type is not supported" && !/SECRETKEY/.test(err.message));
+  const slow = client({ status: 200, data: { id: 6, status: "processing" } });
+  await assert.rejects(() => slow.c.waitForUpload(6, { intervalMs: 1, timeoutMs: 20 }), (err) => err.code === "UPLOAD_TIMEOUT");
+  const done = client({ status: 200, data: { id: 7, status: "completed", upload_media_assets: [{ id: 70 }] } });
+  assert.equal((await done.c.waitForUpload(7, { intervalMs: 1, timeoutMs: 50 })).upload_media_assets[0].id, 70);
+});

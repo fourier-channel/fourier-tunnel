@@ -70,15 +70,50 @@ function fakeStore(initial = {}) {
   return store;
 }
 
+// The booru, in memory: what it holds, what it was sent, how it answers.
+//   posts        md5 -> post, what findPostByMd5 finds
+//   rawRecords   raw md5 -> booru md5, its generation records
+//   uploadError  the booru's verdict on every upload ("File type is not supported")
+//   busy         every createUploadFromBytes answers 429 while true
+//   rendering    every waitForUpload runs out of time while true
+function fakeBooru({ posts = {}, rawRecords = {}, uploadError = null } = {}) {
+  const b = {
+    posts,
+    rawRecords,
+    uploadError,
+    busy: false,
+    rendering: false,
+    filed: [],
+    uploads: [],
+    waited: [],
+    async recordGenerationMetadata(md5, rec) { b.filed.push({ md5, ...rec }); return { md5 }; },
+    async findPostByMd5(md5) { return b.posts[md5] || null; },
+    async findGenerationByRawMd5(rawMd5) { return b.rawRecords[rawMd5] || null; },
+    async createUploadFromBytes(buffer, filename, type) {
+      if (b.busy) throw Object.assign(new Error("Request failed with status code 429"), { response: { status: 429 } });
+      b.uploads.push({ buffer: Buffer.from(buffer), filename, type });
+      return { id: 100 + b.uploads.length, status: "pending" };
+    },
+    async waitForUpload(id) {
+      b.waited.push(id);
+      if (b.uploadError) throw Object.assign(new Error(`Upload ${id} failed: ${b.uploadError}`), { code: "UPLOAD_ERROR", uploadError: b.uploadError });
+      if (b.rendering) throw Object.assign(new Error(`Upload ${id} timed out`), { code: "UPLOAD_TIMEOUT" });
+      return { id, status: "completed", upload_media_assets: [{ id: id * 10, media_asset_id: id * 100, status: "active" }] };
+    },
+    async createPost() { throw new Error("canon must never make a post"); },
+  };
+  return b;
+}
+
 function rig({ body = png(PROMPT), type = "image/png", info, booru, storeInit } = {}) {
   const store = fakeStore(storeInit || { [keys.source(ID)]: { body, type } });
-  const filed = [];
+  const theBooru = booru || fakeBooru();
   const canon = createCanon({
     store,
     mediaInfo: async (id) => (id === ID ? (info === undefined ? { media_type: type, user_id: "@alice:41chan.net" } : info) : null),
-    booru: booru || { recordGenerationMetadata: async (md5, rec) => { filed.push({ md5, ...rec }); return { md5 }; } },
+    booru: theBooru,
   });
-  return { store, canon, filed };
+  return { store, canon, filed: theBooru.filed || [], booru: theBooru };
 }
 
 test("a PNG with a prompt becomes ONE stripped file, indexed, its prompt filed privately, its original MOVED", async () => {
@@ -184,7 +219,7 @@ test("idempotent: a second run writes nothing new; an interrupted move is finish
 
 test("if the private store fails, the original stays where it is (the text must exist somewhere)", async () => {
   let fail = true;
-  const booru = {
+  const booru = { ...fakeBooru(),
     recordGenerationMetadata: async (md5) => {
       if (fail) throw Object.assign(new Error("booru down"), { status: 502 });
       return { md5 };
@@ -199,7 +234,7 @@ test("if the private store fails, the original stays where it is (the text must 
 
 test("EVERY 409 leaves the original in place: this upload's text is not on record, and the original is the only place it is", async () => {
   for (const reason of ["poster_mismatch", "raw_md5_conflict", "raw_md5_mismatch"]) {
-    const booru = { recordGenerationMetadata: async () => { throw Object.assign(new Error("409"), { status: 409, reason }); } };
+    const booru = { ...fakeBooru(), recordGenerationMetadata: async () => { throw Object.assign(new Error("409"), { status: 409, reason }); } };
     const { store, canon } = rig({ booru });
     const r = await canon.canonicalize(ID);
     assert.equal(r.record, `conflict (${reason})`);
@@ -239,7 +274,7 @@ test("the same raw bytes under a second media id are the SAME one file, never a 
   const a = await canon.canonicalize(ID);
   const putsBefore = store.writes.filter((w) => w[0] === "put" && w[1].startsWith("media/")).length;
   // canon's mediaInfo in rig() answers only ID; answer OTHER the same way.
-  const other = createCanon({ store, mediaInfo: async () => ({ media_type: "image/png", user_id: "@bob:41chan.net" }), booru: { recordGenerationMetadata: async (md5) => ({ md5 }) } });
+  const other = createCanon({ store, mediaInfo: async () => ({ media_type: "image/png", user_id: "@bob:41chan.net" }), booru: fakeBooru() });
   const b = await other.canonicalize(OTHER);
   assert.equal(b.key, a.key);
   assert.equal(store.writes.filter((w) => w[0] === "put" && w[1].startsWith("media/")).length, putsBefore, "no second media/ object");
@@ -248,7 +283,7 @@ test("the same raw bytes under a second media id are the SAME one file, never a 
 test("a pending record is retried on the next touch, and only then does the original move", async () => {
   let up = false;
   const filed = [];
-  const booru = { recordGenerationMetadata: async (md5, rec) => { if (!up) throw Object.assign(new Error("booru down"), { status: 502 }); filed.push(rec); return { md5 }; } };
+  const booru = { ...fakeBooru(), recordGenerationMetadata: async (md5, rec) => { if (!up) throw Object.assign(new Error("booru down"), { status: 502 }); filed.push(rec); return { md5 }; } };
   const { store, canon } = rig({ booru });
   const r = await canon.canonicalize(ID);
   assert.equal(r.record, "pending");
@@ -461,4 +496,153 @@ test("the sweep finds every media id with renditions and retires only booru-held
   assert.equal(r.moved, 2);
   assert.deepEqual(r.tally, { retired: 1, "no-index": 1 });
   assert.ok(store.objects.has(otherThumb), "an avatar's only renditions stay");
+});
+
+// THE BOORU HOLDS EVERY IMAGE (operator decision 2026-10-01): an upload record
+// with no post, so the booru renders the variants every surface reads -- for a
+// DM image or an avatar exactly as for a posted one.
+const indexOf = (store) => JSON.parse(store.objects.get(keys.index(ID)).body.toString());
+
+test("every canonical image gets a booru upload and NO post: the one file, named by its md5, recorded in the index", async () => {
+  const { store, canon, booru } = rig();
+  const r = await canon.canonicalize(ID);
+  assert.equal(booru.uploads.length, 1, "uploaded once");
+  const sent = booru.uploads[0];
+  assert.deepEqual(sent.buffer, store.objects.get(r.key).body, "the bytes the booru got ARE the one file");
+  assert.equal(md5hex(sent.buffer), r.md5, "so the booru keys its original at the one file's own key");
+  assert.equal(sent.filename, `${r.md5}.png`, "named by its md5, never by what the sender called it");
+  assert.equal(sent.type, "image/png");
+  assert.equal(r.booru.status, "completed");
+  const idx = indexOf(store);
+  assert.deepEqual(
+    { status: idx.booru.status, upload: idx.booru.upload_id, uma: idx.booru.upload_media_asset_id, asset: idx.booru.media_asset_id },
+    { status: "completed", upload: 101, uma: 1010, asset: 10100 },
+  );
+  assert.ok(store.objects.has(keys.byMd5(r.md5)), "the md5 map (what the booru's media door refuses by) exists before the booru is told");
+});
+
+test("the booru is told LAST: after the one file, its md5 map and its index are written", async () => {
+  const { store, canon, booru } = rig();
+  let seen = null;
+  const upload = booru.createUploadFromBytes;
+  booru.createUploadFromBytes = async (...a) => {
+    seen = [...store.objects.keys()];
+    return upload(...a);
+  };
+  const r = await canon.canonicalize(ID);
+  assert.ok(seen.includes(r.key) && seen.includes(keys.byMd5(r.md5)) && seen.includes(keys.index(ID)), seen.join(", "));
+});
+
+test("an image the booru already holds is not uploaded again: a post found any of three ways, or variants with no post", async () => {
+  const stripped = (await rig().canon.canonicalize(ID, { dryRun: true })).md5;
+  const raw = md5hex(png(PROMPT));
+  for (const [what, b, md5, via] of [
+    ["its stripped md5", fakeBooru({ posts: { [stripped]: { id: 7, md5: stripped, media_asset: { id: 70 } } } }), stripped, "post (stripped)"],
+    ["the booru's raw record", fakeBooru({ rawRecords: { [raw]: "0123456789abcdef0123456789abcdef" }, posts: { "0123456789abcdef0123456789abcdef": { id: 8, md5: "0123456789abcdef0123456789abcdef" } } }), "0123456789abcdef0123456789abcdef", "post (raw-record)"],
+    ["its raw md5", fakeBooru({ posts: { [raw]: { id: 9, md5: raw } } }), raw, "post (raw)"],
+  ]) {
+    const { store, canon, booru } = rig({ booru: b });
+    await canon.canonicalize(ID);
+    assert.equal(booru.uploads.length, 0, `${what}: no upload`);
+    const rec = indexOf(store).booru;
+    assert.equal(rec.status, "held", what);
+    assert.equal(rec.md5, md5, what);
+    assert.equal(rec.via, via, what);
+  }
+  const init = { [keys.source(ID)]: { body: png(PROMPT), type: "image/png" }, [`variants/${stripped}/180x180.jpg`]: { body: Buffer.from("v"), type: "image/jpeg" } };
+  const { store, booru } = await (async () => { const x = rig({ storeInit: init }); await x.canon.canonicalize(ID); return x; })();
+  assert.equal(booru.uploads.length, 0, "variants with no post: an earlier upload, not uploaded again");
+  assert.equal(indexOf(store).booru.via, "variants");
+});
+
+test("not an image: no booru record, nothing uploaded", async () => {
+  const { canon, booru } = rig({ body: Buffer.from("ciphertext of an encrypted attachment, not an image"), type: "application/octet-stream" });
+  const r = await canon.canonicalize(ID);
+  assert.equal(r.kind, "source");
+  assert.equal(booru.uploads.length, 0);
+  assert.equal(r.booru, undefined);
+});
+
+test("the booru's verdict on a file is final; a busy booru is retried on the next touch", async () => {
+  const refused = rig({ booru: fakeBooru({ uploadError: "File type is not supported" }) });
+  await refused.canon.canonicalize(ID);
+  assert.equal(indexOf(refused.store).booru.status, "refused");
+  await refused.canon.canonicalize(ID);
+  assert.equal(refused.booru.uploads.length, 1, "a refusal is not asked again");
+
+  const busy = rig();
+  busy.booru.busy = true;
+  const r = await busy.canon.canonicalize(ID);
+  assert.equal(r.kind, "canonical", "the image is canonical and served whatever the booru says");
+  assert.equal(indexOf(busy.store).booru.status, "pending");
+  busy.booru.busy = false;
+  await busy.canon.canonicalize(ID);
+  assert.equal(indexOf(busy.store).booru.status, "completed");
+  assert.equal(busy.booru.uploads.length, 1);
+});
+
+test("an upload still rendering is asked after on the next touch, never uploaded twice", async () => {
+  const { store, canon, booru } = rig();
+  booru.rendering = true;
+  await canon.canonicalize(ID);
+  const first = indexOf(store).booru;
+  assert.equal(first.status, "processing");
+  assert.equal(first.upload_id, 101);
+  booru.rendering = false;
+  await canon.canonicalize(ID);
+  assert.equal(indexOf(store).booru.status, "completed");
+  assert.equal(booru.uploads.length, 1, "the same upload, asked after");
+  assert.deepEqual(booru.waited, [101, 101]);
+});
+
+test("an index from before every image got a record: the backfill's booruRecord gives it one; its dry run only reads", async () => {
+  const { store, canon, booru } = rig();
+  booru.busy = true; // canonical, but no record yet
+  await canon.canonicalize(ID);
+  const legacy = indexOf(store);
+  delete legacy.booru; // as written before 2026-10-01
+  store.objects.set(keys.index(ID), { body: Buffer.from(JSON.stringify(legacy)), type: "application/json" });
+  booru.busy = false;
+
+  const writes = store.writes.length;
+  const dry = await canon.booruRecord(ID, { dryRun: true });
+  assert.equal(dry.status, "would-upload");
+  assert.equal(store.writes.length, writes, "a dry run writes nothing");
+  assert.equal(booru.uploads.length, 0, "and uploads nothing");
+
+  const done = await canon.booruRecord(ID);
+  assert.equal(done.status, "completed");
+  assert.equal(booru.uploads.length, 1);
+  assert.equal((await canon.booruRecord(ID)).status, "already");
+});
+
+test("the sweep retries only records it tried and could not finish; a legacy index is the backfill's, not the sweep's", async () => {
+  const LEGACY = "LegacyLegacyLegacyLegacy";
+  const { store, canon, booru } = rig();
+  booru.busy = true;
+  await canon.canonicalize(ID); // pending
+  const legacy = { ...indexOf(store) };
+  delete legacy.booru;
+  store.objects.set(keys.index(LEGACY), { body: Buffer.from(JSON.stringify(legacy)), type: "application/json" });
+  booru.busy = false;
+  const r = await canon.booruSweep({ sleep: async () => {} });
+  assert.equal(r.tried, 1);
+  assert.deepEqual(r.tally, { completed: 1 });
+  assert.equal(indexOf(store).booru.status, "completed");
+  assert.equal(JSON.parse(store.objects.get(keys.index(LEGACY)).body.toString()).booru, undefined, "the legacy index is left for the backfill");
+  const again = await canon.booruSweep({ sleep: async () => {} });
+  assert.equal(again.tried, 0, "settled records are not read again");
+});
+
+test("an upload record with NO post retires Synapse's renditions like a post does -- and so does a post under a third md5", async () => {
+  // Unposted: canon uploaded it, the booru rendered variants, there is no post.
+  const { store, canon } = renditionRig({ index: { kind: "canonical", key: `media/${MD5}.jpg`, md5: MD5, raw_md5: RAW, booru: { status: "completed", upload_id: 1, upload_media_asset_id: 2, media_asset_id: 3 } } });
+  assert.equal((await canon.retireSynapseThumbnails(ID, { now: LATER })).status, "retired");
+  for (const k of thumbKeys) assert.ok(!store.objects.has(k));
+  // Held under neither md5 canon computed (a post made under older strip rules).
+  const THIRD = "0123456789abcdef0123456789abcdef";
+  const third = renditionRig({ variantsUnder: THIRD, index: { kind: "canonical", key: `media/${MD5}.jpg`, md5: MD5, raw_md5: RAW, booru: { status: "held", md5: THIRD } } });
+  const r = await third.canon.retireSynapseThumbnails(ID, { now: LATER });
+  assert.equal(r.status, "retired");
+  assert.equal(r.variantsUnder, THIRD);
 });

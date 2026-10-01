@@ -90,6 +90,15 @@ function startThumbnailRetirement(intervalMs = RETIRE_SWEEP_MS) {
   // everyInterval (below) drops a tick that arrives while the last sweep is
   // still running, so two sweeps never list local_thumbnails/ at once.
   return everyInterval(async () => {
+    // Booru records first: one the booru was too busy for is retried here, and
+    // once its variants are old enough the retirement below moves Synapse's
+    // renditions of it.
+    try {
+      const b = await getCanon().booruSweep();
+      if (b.tried) console.log(`[canon] booru records retried: ${b.tried}; ${JSON.stringify(b.tally)}`);
+    } catch (err) {
+      console.error(`[canon] booru record sweep failed: ${err.message}; the next sweep tries again`);
+    }
     try {
       const r = await getCanon().retireSweep();
       if (r.moved || r.failed) {
@@ -599,11 +608,19 @@ async function handleImageEvent(bridge, event) {
 
   // THE STRIPPED BYTES are what the booru gets, and so what R2 and Cloudflare
   // serve. Pixels identical to the raw file; only generation text is gone.
-  const upload = await danbooru.createUploadFromBytes(plan.upload.buffer, filename, contentType);
-  const completed = await danbooru.waitForUpload(upload.id);
-  const uma = completed.upload_media_assets && completed.upload_media_assets[0];
-  const uploadMediaAssetId = uma && uma.id;
-  if (!uploadMediaAssetId) throw new Error(`No upload media asset produced for upload ${upload.id}`);
+  // Canon has normally uploaded them already -- every Matrix image gets a booru
+  // record (canon.js ensureBooruRecord) -- and the post is made from THAT
+  // upload, so one image is one upload row. Only when canon's record is not
+  // complete (the booru was busy) does the post path upload for itself.
+  const fromCanon = canonical.booru && canonical.booru.status === "completed" && canonical.booru.upload_media_asset_id;
+  let uploadMediaAssetId = fromCanon || null;
+  if (!uploadMediaAssetId) {
+    const upload = await danbooru.createUploadFromBytes(plan.upload.buffer, filename, contentType);
+    const completed = await danbooru.waitForUpload(upload.id);
+    const uma = completed.upload_media_assets && completed.upload_media_assets[0];
+    uploadMediaAssetId = uma && uma.id;
+    if (!uploadMediaAssetId) throw new Error(`No upload media asset produced for upload ${upload.id}`);
+  }
 
   // Two tag sources, both fail-soft:
   //   AUTO    -- fourier-spectrum (WD ViT v3), on the bytes the booru holds.

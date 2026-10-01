@@ -95,6 +95,7 @@ function reset() {
     rawRecords: {},      // raw md5 -> booru md5
     requests: [],        // "METHOD /path", in order
     uploads: [],         // the file bytes each POST /uploads.json carried
+    uploadNames: [],     // and the file name each one was sent under
     tagged: [],          // the bytes each spectrum call carried
     created: [],         // POST /posts.json bodies
     creators: [],        // POST /fourier/posts/:id/creator.json bodies
@@ -156,7 +157,13 @@ const ROUTES = [
   ["GET", /^\/fourier\/generation_metadata\/raw\/([0-9a-f]{32})\.json$/, (req, m) => (
     world.rawRecords[m[1]] ? [200, { md5: world.rawRecords[m[1]] }] : [404, { error: "no record", fix: "none" }]
   )],
-  ["POST", /^\/uploads\.json$/, (req, m, body) => { world.uploads.push(multipartFile(req, body)); return [200, { id: 1, status: "pending" }]; }],
+  ["POST", /^\/uploads\.json$/, (req, m, body) => {
+    // replies.upload: answered ONCE instead, then the booru takes uploads again.
+    if (world.replies.upload) { const r = world.replies.upload; delete world.replies.upload; return r; }
+    world.uploads.push(multipartFile(req, body));
+    world.uploadNames.push((/filename="([^"]*)"/.exec(body.toString("latin1")) || [])[1]);
+    return [200, { id: 1, status: "pending" }];
+  }],
   ["GET", /^\/uploads\/1\.json$/, () => [200, { id: 1, status: "completed", upload_media_assets: [{ id: 11 }] }]],
   ["POST", /^\/tag$/, (req, m, body) => { world.tagged.push(body); return [200, { rating: { general: 0.9 }, general: { "1girl": 0.9 }, characters: {} }]; }],
   ["POST", /^\/posts\.json$/, (req, m, body) => {
@@ -268,7 +275,12 @@ test("a new AI image: the STRIPPED bytes are what the booru and spectrum get, an
   const { outcome, lines } = await post("a1111", A1111_PNG, "image/png", ALICE);
   assert.equal(outcome, "posted", lines.join("\n"));
 
+  // ONE upload, and it is canon's (every Matrix image gets a booru record):
+  // the post is made from that upload's media asset, never a second upload.
   assert.equal(world.uploads.length, 1);
+  assert.equal(world.uploadNames[0], `${md5(stripped)}.png`, "named by its md5, never the sender's file name");
+  assert.equal(world.created[0].upload_media_asset_id, 11, "the post is made from canon's upload");
+  assert.equal(JSON.parse(world.bucket.get(keys.index("a1111")).body.toString()).booru.status, "completed");
   assert.ok(world.uploads[0].equals(stripped), "the booru was sent the stripped bytes");
   assert.ok(!world.uploads[0].equals(A1111_PNG));
   assert.equal(world.uploads[0].indexOf("Negative prompt"), -1, "no prompt in what was uploaded");
@@ -300,6 +312,16 @@ test("a new AI image: the STRIPPED bytes are what the booru and spectrum get, an
   assert.ok(tags.includes("ai-generated") && tags.includes("41chan_alice") && tags.includes("1girl"), tags.join(" "));
   assert.ok(!tags.includes("hoodie"), "a creator-only prompt tag never enters the public tag string");
   assert.equal(world.state[0].content.post_id, POST_ID);
+});
+
+test("a booru too busy for canon's upload: the post path uploads for itself, and the picture is posted", async () => {
+  world.replies.upload = [429, { error: "rate limited" }];
+  const { outcome, lines } = await post("busybooru", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.ok(lines.some((l) => /\[canon\] busybooru: booru record NOT made \(the booru answered 429\)/.test(l)), lines.join("\n"));
+  assert.equal(world.uploads.length, 1, "one upload reached the booru: the post path's");
+  assert.equal(world.created[0].upload_media_asset_id, 11);
+  assert.equal(JSON.parse(world.bucket.get(keys.index("busybooru")).body.toString()).booru.status, "pending", "and canon's record is owed, for the sweep");
 });
 
 test("an image the strip refuses uploads NOTHING -- not the file, not a post, not a creator, not a record", async () => {
