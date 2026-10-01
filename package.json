@@ -4,12 +4,16 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:image": "docker run --rm -v \"$PWD\":/app:ro -w /app \"$(sed -n 's/^FROM //p' Dockerfile)\" node --test"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1143.0",
     "axios": "^1.18.1",

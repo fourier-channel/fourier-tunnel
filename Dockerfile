@@ -1,10 +1,17 @@
-FROM node:20-slim
+FROM node:22-slim
 
 WORKDIR /app
 
-# Install dependencies first so this layer caches unless package files change
-COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+# NODE 22, AND NO HIGHER. Node 20 reached upstream end of life 2026-04-30. Node
+# 23 removed util.isDate, which nedb -- matrix-appservice-bridge's user and room
+# stores -- calls on the first write, so 23 and 24 crash the bridge.
+# package.json `engines` names the range, .npmrc makes npm enforce it during the
+# build below, and nedb-compat.test.js holds this line inside it.
+
+# Install dependencies first so this layer caches unless package files change.
+# `npm ci`, not `npm install`: exactly the lockfile, or the build fails.
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci --omit=dev
 
 # Copy ALL application source. Glob (not an explicit allowlist) so a newly added
 # module can never be silently left out of the image -- that omission crash-looped
