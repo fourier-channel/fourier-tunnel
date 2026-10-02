@@ -2,7 +2,7 @@ const fs = require("fs");
 const yaml = require("js-yaml");
 const axios = require("axios");
 const { Cli, AppServiceRegistration, Bridge } = require("matrix-appservice-bridge");
-const { DanbooruClient, BooruDuplicate } = require("./danbooru");
+const { DanbooruClient, BooruDuplicate, BooruRefusal } = require("./danbooru");
 const { autotag } = require("./autotagger");
 const { extractCreatorTags, extractCreatorTagsFromFields } = require("./prompt-tags");
 const { stripGeneration } = require("./strip-generation");
@@ -711,6 +711,17 @@ async function handleImageEvent(bridge, event) {
       source: mxcUrl,
     });
   } catch (err) {
+    // The booru's own word for a hidden duplicate since chanbooru's fix of
+    // 2026-10-02: 422, reason "unpostable", no post named. Final, like the
+    // redirect form above it.
+    if (err instanceof BooruRefusal && !(err instanceof BooruDuplicate) && err.status === 422 && err.reason === "unpostable") {
+      console.log(
+        `[skip] ${mxcUrl}: the booru refuses these bytes (md5 ${plan.upload.md5}) as unpostable -- it holds them under ` +
+        `a post this account cannot see, deleted or jailed. Not reposted and no tag state written; nothing to retry. ` +
+        `If it should be live, release it on the booru, then !backfill restart in ${roomId} writes the room's tags.`,
+      );
+      return imagePlan.HELD_HIDDEN;
+    }
     if (!(err instanceof BooruDuplicate)) throw err;
     return heldByTheBooru(bridge, { roomId, mxcUrl, md5: plan.upload.md5, postId: err.duplicateOf });
   }

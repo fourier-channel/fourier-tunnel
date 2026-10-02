@@ -175,6 +175,12 @@ const ROUTES = [
     // chanbooru PostsController#create on a taken md5: a redirect to the
     // original post, whoever may see it.
     const held = world.held[md5(world.uploads[world.uploads.length - 1])];
+    // Since chanbooru's hidden-duplicate fix (2026-10-02) a post the uploader
+    // may not see is neither redirected to nor named: 422, reason unpostable.
+    if (held && held.unpostable) {
+      const why = "This file cannot be posted.";
+      return [422, { success: false, error: why, message: why, fix: "Do not retry: this file will not be posted. Upload a different file.", reason: "unpostable" }];
+    }
     if (held) return [302, {}, { location: `http://${req.headers.host}/posts/${held.id}` }];
     const post = { id: POST_ID, md5: md5(world.uploads[world.uploads.length - 1]), tag_string: sent.post.tag_string, rating: sent.post.rating, source: sent.post.source };
     world.posts[post.md5] = post;
@@ -574,6 +580,17 @@ test("a picture whose booru post was deleted or jailed: not posted, no state, no
   assert.equal(at("GET /posts/25"), -1, "the 302 was not followed");
   assert.ok(at("GET /posts/25.json") > at("POST /posts.json"), "the post it named was looked up as this account sees it");
   assert.ok(lines.some((l) => /\[skip\] mxc:\/\/41chan\.net\/jailedpic: the booru already holds these bytes .* under post #25, which this account cannot see -- deleted or jailed\..*nothing to retry/.test(l)), lines.join("\n"));
+});
+
+test("the booru's own refusal of a hidden duplicate (422 unpostable, no post named) is held-hidden too, and not retried", async () => {
+  world.held[md5(PLAIN_PNG)] = { id: 25, md5: md5(PLAIN_PNG), visible: false, unpostable: true };
+  const { outcome, lines } = await post("jailedpic2", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "held-hidden", lines.join("\n"));
+  assert.equal(world.created.length, 1, "the booru was asked once, and refused");
+  assert.deepEqual(world.state, [], "no tag state for a picture the booru withholds");
+  assert.deepEqual(world.creators, [], "no creator recorded");
+  assert.equal(at("GET /posts/25.json"), -1, "no post was named, so none is looked up");
+  assert.ok(lines.some((l) => /\[skip\] mxc:\/\/41chan\.net\/jailedpic2: the booru refuses these bytes .*unpostable.*nothing to retry/.test(l)), lines.join("\n"));
 });
 
 test("a post that appeared between the lookup and the post (visible): the room's state points at it, nothing posted twice", async () => {
