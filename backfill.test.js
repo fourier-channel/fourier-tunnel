@@ -6,7 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { backfillRoom, imagesIn, summarise, planWalk, nextState, retryable, MAX_PAGES, MAX_ATTEMPTS } = require("./backfill");
+const { backfillRoom, imagesIn, summarise, planWalk, nextState, retryable, describeFailure, MAX_PAGES, MAX_ATTEMPTS } = require("./backfill");
 
 const img = (url) => ({ type: "m.room.message", content: { msgtype: "m.image", url } });
 const txt = (body) => ({ type: "m.room.message", content: { msgtype: "m.text", body } });
@@ -377,4 +377,73 @@ test("nextState: failures replace the retried list, and one that keeps failing i
   const fixed = nextState(after, { kind: "retry" }, { pages: 0, failures: [] });
   assert.deepEqual(fixed.failed, []);
   assert.deepEqual(fixed.abandoned.map((f) => f.eventId), ["$1"]);
+});
+
+test("a picture the booru holds under a deleted or jailed post is counted apart: not done, not failed, not retried", async () => {
+  const r = await backfillRoom({
+    roomId: "!r:x",
+    fetchPage: async () => ({ chunk: [img("mxc://a/2"), img("mxc://a/1")] }),
+    onImage: async (e) => (e.content.url === "mxc://a/1" ? "held-hidden" : "posted"),
+    log: () => {},
+  });
+  assert.equal(r.hidden, 1);
+  assert.equal(r.done, 1);
+  assert.equal(r.failed, 0);
+  assert.deepEqual(r.failures, [], "nothing owed a retry");
+  assert.match(summarise({ ...r, kind: "initial" }), /1 done, 1 NOT posted: the booru holds them under a deleted or jailed post \(see the \[skip\] lines; not retried\)/);
+  assert.doesNotMatch(summarise({ ...r, hidden: 0, kind: "initial" }), /deleted or jailed/);
+});
+
+// THE ERROR ITSELF, from real axios against a real socket: the shape that
+// reached the log on 2026-10-02 as nothing but "Request failed with status
+// code 404". A POST answered by a redirect to a page that 404s.
+test("describeFailure names an axios failure by method and path -- and the redirect it followed -- never the query, host or key", async () => {
+  const http = require("node:http");
+  const axios = require("axios");
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.method === "POST") { res.writeHead(302, { location: "/posts/25" }); res.end(); return; }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end("{}");
+    });
+  });
+  await new Promise((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const client = axios.create({ baseURL: base, params: { login: "bot", api_key: "SECRETKEY" } });
+  try {
+    const followed = await client.post("/posts.json", { a: 1 }).then(() => null, (e) => e);
+    assert.ok(followed, "precondition: the request failed");
+    assert.equal(followed.message, "Request failed with status code 404", "precondition: the bare message the sweep logged");
+    assert.equal(describeFailure(followed), "POST /posts.json (redirected to GET /posts/25): Request failed with status code 404");
+
+    const plain = await client.get("/uploads/9.json", { params: { only: "id,status" } }).then(() => null, (e) => e);
+    assert.equal(describeFailure(plain), "GET /uploads/9.json: Request failed with status code 404");
+
+    const absolute = await axios.get(`${base}/_matrix/client/v3/rooms/x/messages?access_token=SECRETKEY`).then(() => null, (e) => e);
+    assert.equal(describeFailure(absolute), "GET /_matrix/client/v3/rooms/x/messages: Request failed with status code 404");
+
+    for (const e of [followed, plain, absolute]) assert.doesNotMatch(describeFailure(e), /SECRETKEY|api_key|access_token|127\.0\.0\.1|\?/);
+  } finally {
+    server.close();
+    server.closeAllConnections();
+  }
+  // Not an HTTP error: its own message, untouched.
+  assert.equal(describeFailure(new Error("the index for x names y, which is not in the bucket")), "the index for x names y, which is not in the bucket");
+  assert.equal(describeFailure("a string"), "a string");
+});
+
+test("a failure's log line says what happens next: the next run retries it, or after the last attempt it is set aside", async () => {
+  const lines = [];
+  const boom = Object.assign(new Error("Request failed with status code 503"), { config: { method: "post", url: "/uploads.json", baseURL: "http://booru" }, response: { status: 503 } });
+  const r = await backfillRoom({
+    roomId: "!r:x", fetchPage: async () => ({ chunk: [] }), fetchEvent: async (id) => ({ ...img(`mxc://a/${id}`), event_id: id }),
+    retry: [{ eventId: "e1", url: "mxc://a/e1", attempts: 0 }, { eventId: "e2", url: "mxc://a/e2", attempts: MAX_ATTEMPTS - 1 }],
+    onImage: async () => { throw boom; },
+    log: (l) => lines.push(l), maxPages: 0,
+  });
+  assert.equal(r.failed, 2);
+  assert.match(lines[0], /^\[backfill\] !r:x mxc:\/\/a\/e1: POST \/uploads\.json: Request failed with status code 503; retried on the next run \(attempt 1 of 5\)$/);
+  assert.match(lines[1], /mxc:\/\/a\/e2: POST \/uploads\.json: .*; failed 5 runs in a row, so the sweep stops retrying it \(kept under "abandoned"\); fix the cause, then !backfill restart walks it again$/);
+  assert.equal(r.failures[0].error, "POST /uploads.json: Request failed with status code 503");
 });

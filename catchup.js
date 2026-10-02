@@ -26,6 +26,8 @@
 
 "use strict";
 
+const { describeFailure } = require("./backfill");
+
 /** Images in a page, oldest first, exactly as the live walk orders them. */
 function imagesIn(chunk) {
   return (chunk || [])
@@ -63,7 +65,7 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
 
   const started = Date.now();
   const adminUrls = new Set();
-  let seen = 0, done = 0, blocked = 0, refused = 0, failed = 0, skipped = 0, pages = 0;
+  let seen = 0, done = 0, blocked = 0, refused = 0, hidden = 0, failed = 0, skipped = 0, pages = 0;
   let unfetchable = 0;
   // Which homeservers hold bytes we are never allowed to fetch. Named, because
   // "59 failed" invites a rerun and "59 live on matrix.org, which federation
@@ -83,13 +85,15 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
       if (adminUrls.has(url)) { skipped++; continue; }
       adminUrls.add(url);
       seen++;
-      if (done + blocked + refused + failed >= cap) { truncated = true; break; }
+      if (done + blocked + refused + hidden + failed >= cap) { truncated = true; break; }
       try {
         const outcome = await onImage(ev);
         if (outcome === "tags-blocked") blocked++;
         // Generation data that would not strip: the picture was NOT posted
         // (image-plan.js). Counting it as done would say it was.
         else if (outcome === "strip-refused") refused++;
+        // On the booru under a deleted or jailed post: not posted, not a failure.
+        else if (outcome === "held-hidden") hidden++;
         // A PERMANENT REFUSAL IS NOT A FAILURE. Its bytes are on a homeserver
         // we are not allowed to talk to, so every future run fails identically.
         // Counting it as "failed" says try again, which is false.
@@ -100,7 +104,7 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
         } else done++;
       } catch (err) {
         failed++;
-        log(`[catchup] ${roomId} ${url}: ${err.message}`);
+        log(`[catchup] ${roomId} ${url}: ${describeFailure(err)}`);
       }
     }
     if (truncated) break;
@@ -135,7 +139,7 @@ async function catchUpRoom({ roomId, adminPage, botPage = null, onImage, cap = 2
   }
 
   return {
-    roomId, seen, done, blocked, refused, failed, skipped, pages, truncated,
+    roomId, seen, done, blocked, refused, hidden, failed, skipped, pages, truncated,
     unfetchable, unfetchableFrom: [...unfetchableFrom].sort(),
     botVisible,
     sealed: botVisible === null ? null : seen - botVisible,
@@ -157,6 +161,7 @@ function summarise(r, { dryRun = false } = {}) {
   if (r.blocked) bits.push(`${r.blocked} posted but tag state blocked`);
   if (r.unfetchable) bits.push(`${r.unfetchable} unfetchable`);
   if (r.refused) bits.push(`${r.refused} NOT posted: generation data would not strip (see the [strip] lines)`);
+  if (r.hidden) bits.push(`${r.hidden} NOT posted: the booru holds them under a deleted or jailed post (see the [skip] lines)`);
   if (r.failed) bits.push(`${r.failed} failed`);
   if (r.skipped) bits.push(`${r.skipped} repeat(s) of the same picture`);
   if (r.truncated) bits.push(`STOPPED EARLY -- there is more room than this run walked`);

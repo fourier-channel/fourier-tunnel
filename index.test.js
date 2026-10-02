@@ -108,6 +108,9 @@ function reset() {
     paged: [],           // { room, from, to } for every /messages call, in order
     events: {},          // event id -> event, for /rooms/:room/event/:id
     joined: [],          // what /joined_rooms answers
+    held: {},            // md5 -> { id, visible, ... }: a post the md5 lookup does NOT
+                         // return -- deleted or jailed, as the booru hides them --
+                         // which POST /posts.json answers with a 302 to it
   };
 }
 
@@ -164,11 +167,15 @@ const ROUTES = [
     world.uploadNames.push((/filename="([^"]*)"/.exec(body.toString("latin1")) || [])[1]);
     return [200, { id: 1, status: "pending" }];
   }],
-  ["GET", /^\/uploads\/1\.json$/, () => [200, { id: 1, status: "completed", upload_media_assets: [{ id: 11 }] }]],
+  ["GET", /^\/uploads\/1\.json$/, () => world.replies.uploadStatus || [200, { id: 1, status: "completed", upload_media_assets: [{ id: 11 }] }]],
   ["POST", /^\/tag$/, (req, m, body) => { world.tagged.push(body); return [200, { rating: { general: 0.9 }, general: { "1girl": 0.9 }, characters: {} }]; }],
   ["POST", /^\/posts\.json$/, (req, m, body) => {
     const sent = JSON.parse(body);
     world.created.push(sent);
+    // chanbooru PostsController#create on a taken md5: a redirect to the
+    // original post, whoever may see it.
+    const held = world.held[md5(world.uploads[world.uploads.length - 1])];
+    if (held) return [302, {}, { location: `http://${req.headers.host}/posts/${held.id}` }];
     const post = { id: POST_ID, md5: md5(world.uploads[world.uploads.length - 1]), tag_string: sent.post.tag_string, rating: sent.post.rating, source: sent.post.source };
     world.posts[post.md5] = post;
     return [200, post];
@@ -189,6 +196,12 @@ const ROUTES = [
   }],
   ["GET", /^\/posts\/(\d+)\/tag_sources\.json$/, () => [200, { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }]],
   ["GET", /^\/tags\.json$/, () => [200, []]],
+  // A post's page, as the tunnel's account sees it: a hidden post answers 404,
+  // exactly as a missing one does (chanbooru Post#hidden_as_deleted?).
+  ["GET", /^\/posts\/(\d+)(\.json)?$/, (req, m) => {
+    const held = Object.values(world.held).find((p) => p.id === Number(m[1]));
+    return held && held.visible ? [200, held] : [404, { success: false, message: "That record was not found." }];
+  }],
   ["POST", /^\/artists\.json$/, () => [200, {}]],
 ];
 
@@ -204,7 +217,7 @@ function handle(req, res) {
       if (req.method !== method || !m) continue;
       const out = fn(req, m, body, url);
       if (out.raw) { res.writeHead(200, { "content-type": out.type }); res.end(out.raw); return; }
-      res.writeHead(out[0], { "content-type": "application/json" });
+      res.writeHead(out[0], { "content-type": "application/json", ...(out[2] || {}) });
       res.end(JSON.stringify(out[1]));
       return;
     }
@@ -539,4 +552,68 @@ test("a replayed duplicate whose room already carries its tags writes no new sta
   }) };
   await quietly(() => index.handleImageEvent(unreadable, ev));
   assert.equal(sent.length, 2, "absent state is written");
+});
+
+// --- A PICTURE THE BOORU HOLDS UNDER A POST THIS ACCOUNT CANNOT SEE ---------------
+//
+// 2026-10-02, the resumable sweep: 39 images in one room, 36 done, 3 failed with
+// a bare "Request failed with status code 404" -- every run. Each one's booru
+// post was DELETED (troll jail), so the md5 lookup found nothing (the booru
+// hides a deleted post from every lookup), the handler made a post, the booru
+// answered 302 to the original, axios followed it, and the deleted post's page
+// answered 404.
+
+test("a picture whose booru post was deleted or jailed: not posted, no state, no creator -- \"held-hidden\", and no redirect followed", async () => {
+  world.held[md5(PLAIN_PNG)] = { id: 25, md5: md5(PLAIN_PNG), visible: false };
+  const { outcome, lines } = await post("jailedpic", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "held-hidden", lines.join("\n"));
+  assert.equal(world.created.length, 1, "the booru was asked once, and refused");
+  assert.deepEqual(world.state, [], "no tag state for a picture the booru withholds");
+  assert.deepEqual(world.creators, [], "no creator recorded on somebody else's post");
+  assert.deepEqual(world.tagSources, [], "nothing hung on a post that was not made");
+  assert.equal(at("GET /posts/25"), -1, "the 302 was not followed");
+  assert.ok(at("GET /posts/25.json") > at("POST /posts.json"), "the post it named was looked up as this account sees it");
+  assert.ok(lines.some((l) => /\[skip\] mxc:\/\/41chan\.net\/jailedpic: the booru already holds these bytes .* under post #25, which this account cannot see -- deleted or jailed\..*nothing to retry/.test(l)), lines.join("\n"));
+});
+
+test("a post that appeared between the lookup and the post (visible): the room's state points at it, nothing posted twice", async () => {
+  world.held[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), visible: true, tag_string: "1girl", rating: "q" };
+  const { outcome, lines } = await post("racedpic", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.equal(world.state.length, 1);
+  assert.equal(world.state[0].content.post_id, 7);
+  assert.deepEqual(world.creators, [], "a post somebody else made keeps its own creator");
+  assert.ok(lines.some((l) => /\[skip\] duplicate md5 [0-9a-f]{32} \(the booru's own md5 check at post time\) -> existing post #7/.test(l)), lines.join("\n"));
+});
+
+test("the sweep counts a held-hidden picture apart: not done, not failed, not owed a retry -- and says so", async () => {
+  const room = "!jailroom:41chan.net";
+  for (const [id, bytes] of [["jailwalk", PLAIN_PNG], ["freshwalk", A1111_PNG]]) {
+    world.media[id] = { bytes, type: "image/png", sender: ALICE };
+    world.bucket.set(keys.source(id), { body: Buffer.from(bytes), type: "image/png" });
+  }
+  world.held[md5(PLAIN_PNG)] = { id: 25, md5: md5(PLAIN_PNG), visible: false };
+  const ev = (id) => ({ event_id: `$${id}`, type: "m.room.message", sender: ALICE, content: { msgtype: "m.image", url: `mxc://41chan.net/${id}`, body: `${id}.png` } });
+  world.history[room] = { edge: { chunk: [ev("freshwalk"), ev("jailwalk")], start: "hj" } };
+  const { value: r, lines } = await quietly(() => index.backfillRoomNow(bridge, room, BOT, { trigger: "join" }));
+  assert.equal(r.hidden, 1, lines.join("\n"));
+  assert.equal(r.done, 1);
+  assert.equal(r.failed, 0, "a deleted post is not a failure");
+  assert.deepEqual(backfillState()[room].failed, [], "and is not retried every ten minutes");
+  assert.ok(lines.some((l) => /1 NOT posted: the booru holds them under a deleted or jailed post/.test(l)), lines.join("\n"));
+});
+
+test("a backfill failure names the request that failed -- method and path, never the api_key -- and what happens next", async () => {
+  const room = "!failroom:41chan.net";
+  world.media.failwalk = { bytes: PLAIN_PNG, type: "image/png", sender: ALICE };
+  world.bucket.set(keys.source("failwalk"), { body: Buffer.from(PLAIN_PNG), type: "image/png" });
+  world.history[room] = { edge: { chunk: [{ event_id: "$failwalk", type: "m.room.message", sender: ALICE, content: { msgtype: "m.image", url: "mxc://41chan.net/failwalk", body: "f.png" } }], start: "hf" } };
+  world.replies.uploadStatus = [404, { success: false, message: "That record was not found." }];
+  const { value: r, lines } = await quietly(() => index.backfillRoomNow(bridge, room, BOT, { trigger: "join" }));
+  assert.equal(r.failed, 1, lines.join("\n"));
+  const line = lines.find((l) => l.includes("[backfill] !failroom:41chan.net mxc://41chan.net/failwalk:"));
+  assert.ok(line, lines.join("\n"));
+  assert.match(line, /: GET \/uploads\/1\.json: Request failed with status code 404; retried on the next run \(attempt 1 of 5\)$/);
+  assert.doesNotMatch(line, /TESTKEY|api_key|127\.0\.0\.1|only=/);
+  assert.match(backfillState()[room].failed[0].error, /^GET \/uploads\/1\.json: /, "and the saved failure says the same");
 });

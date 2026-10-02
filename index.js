@@ -2,7 +2,7 @@ const fs = require("fs");
 const yaml = require("js-yaml");
 const axios = require("axios");
 const { Cli, AppServiceRegistration, Bridge } = require("matrix-appservice-bridge");
-const { DanbooruClient } = require("./danbooru");
+const { DanbooruClient, BooruDuplicate } = require("./danbooru");
 const { autotag } = require("./autotagger");
 const { extractCreatorTags, extractCreatorTagsFromFields } = require("./prompt-tags");
 const { stripGeneration } = require("./strip-generation");
@@ -488,6 +488,88 @@ async function tagStateIsCurrent(bridge, roomId, key, post, projection) {
     same(current.sources, projection.sources);
 }
 
+// THE BOORU ALREADY HAS A POST FOR THESE BYTES: point this room's tag state
+// for this picture at it, and upload nothing. `via` says how it was found, for
+// the log line. Resolves "posted", or "tags-blocked" when the room refused
+// the state write.
+async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via }) {
+  // Before the state write, which can return early: the private record does
+  // not depend on this room's power levels. The poster is THIS sender, and no
+  // creator is recorded from here: the booru keeps an existing record from
+  // anyone else (a 409 poster_mismatch, logged as "keeps", not as a failure;
+  // its other 409s are failures in words of their own), and a post's
+  // creator is written once, by the event that created it.
+  // The generation record is canon.js's to file, once per image, with the
+  // uploader as poster -- not this handler's, so there is one writer of it.
+  // Provenance was already recorded when this post was first created. Pull the
+  // PUBLIC-SAFE projection so the new room's state matches and never carries
+  // private creator tags. Fall back to tag_string for legacy posts with no
+  // recorded provenance.
+  let projection = null;
+  try {
+    projection = await danbooru.getTagProjection(existing.id);
+  } catch (err) {
+    console.warn(`[tag-hub] getTagProjection failed for post #${existing.id}: ${err.message}`);
+  }
+  if (!projection || projection.tags.length === 0) {
+    const tagString = existing.tag_string || "";
+    projection = {
+      tags: tagString.split(/\s+/).filter(Boolean),
+      sources: { creator: [], auto: [], both: [], meta: [] },
+    };
+  }
+  // A REPLAY (backfill, the sweep, !backfill restart) meets every picture it
+  // already handled, and each write is a new state event in the room even
+  // when nothing changed -- updated_at alone makes it differ. The state is
+  // keyed by this picture's mxc, so if it already names this post with these
+  // tags there is nothing to say. A read that fails writes, as before.
+  if (await tagStateIsCurrent(bridge, roomId, mxcUrl, existing, projection)) {
+    console.log(`[skip] duplicate md5 ${md5} -> existing post #${existing.id}; the room already carries its tags`);
+    return "posted";
+  }
+  try {
+    await bridge.getIntent().sendStateEvent(roomId, TAG_STATE_TYPE, mxcUrl, {
+      post_id: existing.id,
+      tags: projection.tags,
+      rating: existing.rating || config.bridge.default_rating,
+      sources: projection.sources,
+      updated_by: "tunnel",
+      updated_at: Date.now(),
+    });
+  } catch (err) {
+    // The picture IS on the booru. Only the room's copy of its tags is
+    // missing, and a re-run writes it once the power level allows.
+    console.warn(`[tag-state] post #${existing.id} is on the booru but its state was refused in ${roomId}: ${err.message}`);
+    return "tags-blocked";
+  }
+  console.log(`[skip] duplicate md5 ${md5} (${via}) -> existing post #${existing.id}`);
+  return "posted";
+}
+
+// THE BOORU REFUSED TO MAKE A POST because one already holds these bytes
+// (danbooru.js BooruDuplicate). The md5 lookups found nothing, so either that
+// post appeared in the moment between (then it is visible, and this is an
+// ordinary duplicate) or it is a post this account may not see: deleted or
+// jailed, which the booru withholds from every lookup on purpose (chanbooru
+// Post#hidden_as_deleted?). The second is not a failure and never succeeds on
+// a retry -- the picture was removed from the booru by someone entitled to --
+// so it resolves "held-hidden": nothing posted, no tag state written, counted
+// apart by the backfill and not retried. Until 2026-10-02 the redirect that
+// says this was followed, the post's page answered 404, and three such
+// pictures failed every sweep as "Request failed with status code 404".
+async function heldByTheBooru(bridge, { roomId, mxcUrl, md5, postId }) {
+  const visible = await danbooru.findVisiblePost(postId);
+  if (visible) {
+    return pointRoomAtPost(bridge, { roomId, mxcUrl, existing: visible, md5, via: "the booru's own md5 check at post time" });
+  }
+  console.log(
+    `[skip] ${mxcUrl}: the booru already holds these bytes (md5 ${md5}) under post #${postId}, which this account ` +
+    `cannot see -- deleted or jailed. Not reposted and no tag state written; nothing to retry. If it should be ` +
+    `live, release it on the booru, then !backfill restart in ${roomId} writes the room's tags.`,
+  );
+  return imagePlan.HELD_HIDDEN;
+}
+
 async function handleImageEvent(bridge, event) {
   const roomId = event.room_id;
   const mxcUrl = event.content && event.content.url;
@@ -548,62 +630,13 @@ async function handleImageEvent(bridge, event) {
   }
 
   // Duplicate check: if Danbooru already has a post for these bytes, skip the
-  // (re-)upload -- which on this fork fails with a 500 on duplicate md5 -- and
-  // just point the room's tag state at the existing post. This makes a re-posted
-  // image an intended [skip], and still tags the new room correctly.
+  // (re-)upload and just point the room's tag state at the existing post. This
+  // makes a re-posted image an intended [skip], and still tags the new room
+  // correctly. A post this account cannot see (deleted, jailed) is NOT found
+  // here -- the booru withholds it from every lookup -- and is caught at
+  // createPost instead (heldByTheBooru).
   if (plan.action === "duplicate") {
-    const existing = plan.post;
-    // Before the state write, which can return early: the private record does
-    // not depend on this room's power levels. The poster is THIS sender, and no
-    // creator is recorded from here: the booru keeps an existing record from
-    // anyone else (a 409 poster_mismatch, logged as "keeps", not as a failure;
-    // its other 409s are failures in words of their own), and a post's
-    // creator is written once, by the event that created it.
-    // The generation record is canon.js's to file, once per image, with the
-    // uploader as poster -- not this handler's, so there is one writer of it.
-    // Provenance was already recorded when this post was first created. Pull the
-    // PUBLIC-SAFE projection so the new room's state matches and never carries
-    // private creator tags. Fall back to tag_string for legacy posts with no
-    // recorded provenance.
-    let projection = null;
-    try {
-      projection = await danbooru.getTagProjection(existing.id);
-    } catch (err) {
-      console.warn(`[tag-hub] getTagProjection failed for post #${existing.id}: ${err.message}`);
-    }
-    if (!projection || projection.tags.length === 0) {
-      const tagString = existing.tag_string || "";
-      projection = {
-        tags: tagString.split(/\s+/).filter(Boolean),
-        sources: { creator: [], auto: [], both: [], meta: [] },
-      };
-    }
-    // A REPLAY (backfill, the sweep, !backfill restart) meets every picture it
-    // already handled, and each write is a new state event in the room even
-    // when nothing changed -- updated_at alone makes it differ. The state is
-    // keyed by this picture's mxc, so if it already names this post with these
-    // tags there is nothing to say. A read that fails writes, as before.
-    if (await tagStateIsCurrent(bridge, roomId, mxcUrl, existing, projection)) {
-      console.log(`[skip] duplicate md5 ${plan.md5} -> existing post #${existing.id}; the room already carries its tags`);
-      return "posted";
-    }
-    try {
-      await bridge.getIntent().sendStateEvent(roomId, TAG_STATE_TYPE, mxcUrl, {
-        post_id: existing.id,
-        tags: projection.tags,
-        rating: existing.rating || config.bridge.default_rating,
-        sources: projection.sources,
-        updated_by: "tunnel",
-        updated_at: Date.now(),
-      });
-    } catch (err) {
-      // The picture IS on the booru. Only the room's copy of its tags is
-      // missing, and a re-run writes it once the power level allows.
-      console.warn(`[tag-state] post #${existing.id} is on the booru but its state was refused in ${roomId}: ${err.message}`);
-      return "tags-blocked";
-    }
-    console.log(`[skip] duplicate md5 ${plan.md5} (${plan.via} bytes) -> existing post #${existing.id}`);
-    return "posted";
+    return pointRoomAtPost(bridge, { roomId, mxcUrl, existing: plan.post, md5: plan.md5, via: `${plan.via} bytes` });
   }
 
   // THE STRIPPED BYTES are what the booru gets, and so what R2 and Cloudflare
@@ -670,11 +703,17 @@ async function handleImageEvent(bridge, event) {
   const publicTags = imagePlan.publicTagsFor({ autoTags, metaTags, ocTags, posterTag, aiGenerated: plan.aiGenerated });
   const rating = (derived && derived.rating) || config.bridge.default_rating;
 
-  const post = await danbooru.createPost(uploadMediaAssetId, {
-    rating,
-    tagString: publicTags.join(" "),
-    source: mxcUrl,
-  });
+  let post;
+  try {
+    post = await danbooru.createPost(uploadMediaAssetId, {
+      rating,
+      tagString: publicTags.join(" "),
+      source: mxcUrl,
+    });
+  } catch (err) {
+    if (!(err instanceof BooruDuplicate)) throw err;
+    return heldByTheBooru(bridge, { roomId, mxcUrl, md5: plan.upload.md5, postId: err.duplicateOf });
+  }
 
   // WHO MADE IT, recorded once, now, from the event this homeserver
   // authenticated (operator ruling 2026-09-29: the creator decides who sees a
@@ -1215,7 +1254,8 @@ new Cli({
               }
             }
           } catch (err) {
-            console.error(`[error] onEvent:`, err.message);
+            // Named by its request (backfill.describeFailure), like the backfill's.
+            console.error(`[error] onEvent: ${backfill.describeFailure(err)}`);
           }
         },
       },

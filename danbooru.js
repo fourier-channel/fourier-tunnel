@@ -84,6 +84,18 @@ class DanbooruClient {
     throw Object.assign(new Error(`Upload ${uploadId} timed out after ${timeoutMs}ms`), { code: "UPLOAD_TIMEOUT" });
   }
 
+  // Make a post from an upload's media asset. Returns the new post.
+  //
+  // A DUPLICATE IS NOT FOLLOWED. When a post already holds these bytes the
+  // booru (PostsController#create, md5 taken) answers 302 to that post's page
+  // instead of making one. Followed, that redirect is a GET of /posts/<id> with
+  // no credentials, and a post this account may not see -- deleted, jailed --
+  // answers it 404: three pictures failed the 2026-10-02 sweep as a bare
+  // "Request failed with status code 404" that way, every run, because the
+  // md5 lookup before it is withheld for such a post by design (chanbooru
+  // "a deleted post does not exist"). So the redirect is read, not followed,
+  // and thrown as a BooruDuplicate carrying the post id it names; any other
+  // answer that is not a post throws a BooruRefusal naming POST /posts.json.
   async createPost(uploadMediaAssetId, { rating, tagString = "", source = "" }) {
     const resp = await this._client().post("/posts.json", {
       upload_media_asset_id: uploadMediaAssetId,
@@ -92,13 +104,31 @@ class DanbooruClient {
         tag_string: tagString,
         source,
       },
-    });
-    return resp.data;
+    }, { maxRedirects: 0, validateStatus: () => true });
+    if ((resp.status === 200 || resp.status === 201) && resp.data && typeof resp.data === "object" && resp.data.id != null) return resp.data;
+    const original = resp.status >= 300 && resp.status < 400 ? postIdFromLocation(resp.headers) : null;
+    if (original != null) {
+      throw new BooruDuplicate(
+        `POST /posts.json -> ${resp.status}: the booru already holds these bytes as post #${original}, so no post was made`,
+        resp.status, original,
+      );
+    }
+    throw refusal("POST /posts.json", resp);
   }
 
   async getPost(postId) {
     const resp = await this._client().get(`/posts/${postId}.json`);
     return resp.data;
+  }
+
+  // A post as THIS account sees it: the post, or null when the booru answers
+  // 404 -- no such post, or one hidden from this account (deleted, jailed),
+  // which the booru answers identically on purpose. Anything else throws.
+  async findVisiblePost(postId) {
+    const resp = await this._client().get(`/posts/${postId}.json`, { validateStatus: () => true });
+    if (resp.status === 404) return null;
+    if (resp.status === 200 && resp.data && typeof resp.data === "object" && resp.data.id != null) return resp.data;
+    throw refusal(`GET /posts/${postId}.json`, resp);
   }
 
   // Record the per-tag provenance partition on the booru (the single write path
@@ -234,6 +264,32 @@ class BooruRefusal extends Error {
     this.reason = body && typeof body.reason === "string" ? body.reason : undefined;
   }
 }
+// The booru declined to make a post because one already holds these bytes.
+// `duplicateOf` is the post its redirect named -- which may be one this
+// account cannot see.
+class BooruDuplicate extends BooruRefusal {
+  constructor(message, status, postId) {
+    super(message, status, { reason: "duplicate" });
+    this.name = "BooruDuplicate";
+    this.duplicateOf = postId;
+  }
+}
+
+// The post id in a redirect's Location (/posts/<id>, absolute or not, with or
+// without .json), or null. Only the path is read, and none of it is logged.
+function postIdFromLocation(headers) {
+  const loc = headers && (typeof headers.get === "function" ? headers.get("location") : headers.location);
+  if (typeof loc !== "string") return null;
+  let pathname;
+  try {
+    pathname = new URL(loc, "http://booru.invalid").pathname;
+  } catch {
+    return null;
+  }
+  const m = /^\/posts\/(\d+)(?:\.json)?$/.exec(pathname);
+  return m ? Number(m[1]) : null;
+}
+
 function refusal(what, resp) {
   const body = resp.data && typeof resp.data === "object" ? resp.data : {};
   const why = [body.error, body.fix && `fix: ${body.fix}`].filter(Boolean).join(" -- ");
@@ -241,4 +297,4 @@ function refusal(what, resp) {
   return new BooruRefusal(`${what} -> ${resp.status}${reason}${why ? `: ${why}` : ": the booru gave no reason"}`, resp.status, body);
 }
 
-module.exports = { DanbooruClient, BooruRefusal, sleep };
+module.exports = { DanbooruClient, BooruRefusal, BooruDuplicate, sleep };

@@ -43,6 +43,50 @@ const MAX_PAGES = 40;
 // again on purpose.
 const MAX_ATTEMPTS = 5;
 
+/**
+ * What failed, in words that name the request. An HTTP error from axios says
+ * only "Request failed with status code 404", which names neither the service
+ * nor the call; three pictures failed the 2026-10-02 sweep with exactly that
+ * line and nothing else, and finding which request it was took the booru's
+ * database. So an error that carries an axios request config is prefixed with
+ * its METHOD and PATH -- and, when a redirect was followed, the method and
+ * path of the request that actually answered. Never the query string and
+ * never the host: the booru's api_key rides in the query, and a URL is an
+ * address. Anything else is its own message.
+ */
+function describeFailure(err) {
+  const msg = (err && err.message) || String(err);
+  const cfg = err && err.config;
+  if (!cfg || typeof cfg.method !== "string") return msg;
+  const method = cfg.method.toUpperCase();
+  const asked = pathOf(cfg.url, cfg.baseURL);
+  if (!asked) return msg;
+  let where = `${method} ${asked}`;
+  const req = err.request;
+  const answered = req && typeof req.path === "string" ? pathOf(req.path) : null;
+  if (answered && answered !== asked) {
+    where += ` (redirected to ${typeof req.method === "string" ? req.method.toUpperCase() : "?"} ${answered})`;
+  }
+  const status = err.response && err.response.status;
+  if (status && !msg.includes(String(status))) where += ` -> ${status}`;
+  return `${where}: ${msg}`;
+}
+
+// The path of a URL or path, with no query, fragment, host or credentials.
+// A relative url is joined to the base the way axios joins them.
+function pathOf(url, base) {
+  if (typeof url !== "string" || !url) return null;
+  const absolute = /^[a-z][a-z0-9+.-]*:\/\//i.test(url);
+  const full = absolute || typeof base !== "string" || !base
+    ? url
+    : `${base.replace(/\/+$/, "")}/${url.replace(/^\/+/, "")}`;
+  try {
+    return new URL(full, "http://path.invalid").pathname;
+  } catch {
+    return null;
+  }
+}
+
 /** The image events in one /messages chunk, oldest first. */
 function imagesIn(chunk) {
   return (chunk || [])
@@ -92,11 +136,18 @@ function imagesIn(chunk) {
  * walked are progress worth keeping, so the error is returned in `error` with
  * the cursor of the page that failed.
  *
- * THREE OUTCOMES, NOT TWO. `onImage` may resolve with "tags-blocked" to say the
+ * MORE OUTCOMES THAN TWO. `onImage` may resolve with "tags-blocked" to say the
  * picture reached the booru but the room's tag state could not be written --
  * recoverable by re-running once the power level is granted, and not the same
  * fact as a failure. Counting it as failed is what made a working run of 266
- * images report "0 done, 266 failed" on 2026-09-13.
+ * images report "0 done, 266 failed" on 2026-09-13. "strip-refused" is a
+ * picture withheld because its generation data would not strip, and
+ * "held-hidden" one the booru already holds under a deleted or jailed post:
+ * neither was posted, and a retry would change neither, so both are counted
+ * apart and neither is retried.
+ *
+ * A failure's log line and its saved `error` name the request that failed
+ * (describeFailure) and say what happens next.
  *
  * `log` IS REQUIRED. It defaulted to a no-op and the only caller never passed
  * one, so every per-image error was counted and then discarded -- 266 failures
@@ -115,12 +166,12 @@ async function backfillRoom({
     throw new TypeError("backfillRoom was handed failures to retry but no fetchEvent() to re-read them with");
   }
   let from = start || undefined;
-  let seen = 0, done = 0, blocked = 0, refused = 0, failed = 0, pages = 0, retried = 0;
+  let seen = 0, done = 0, blocked = 0, refused = 0, hidden = 0, failed = 0, pages = 0, retried = 0;
   let reachedStart = false, stalled = false, head, error;
   const failures = [];
   const dropped = [];
   const started = Date.now();
-  const handled = () => done + blocked + refused + failed;
+  const handled = () => done + blocked + refused + hidden + failed;
   const full = () => handled() >= cap;
 
   const replay = async (ev, attempts) => {
@@ -130,11 +181,19 @@ async function backfillRoom({
       // Generation data that would not strip: the picture was NOT posted
       // (image-plan.js). Counting it as done would say it was.
       else if (outcome === "strip-refused") refused++;
+      // On the booru under a post this account may not see (deleted, jailed):
+      // not posted, and no retry will post it. Neither done nor failed.
+      else if (outcome === "held-hidden") hidden++;
       else done++;
     } catch (err) {
       failed++;
-      failures.push({ eventId: ev.event_id, url: ev.content.url, attempts: attempts + 1, error: err.message });
-      log(`[backfill] ${roomId} ${ev.content.url}: ${err.message}`);
+      const why = describeFailure(err);
+      const n = attempts + 1;
+      failures.push({ eventId: ev.event_id, url: ev.content.url, attempts: n, error: why });
+      const next = n >= MAX_ATTEMPTS
+        ? `failed ${n} runs in a row, so the sweep stops retrying it (kept under "abandoned"); fix the cause, then !backfill restart walks it again`
+        : `retried on the next run (attempt ${n} of ${MAX_ATTEMPTS})`;
+      log(`[backfill] ${roomId} ${ev.content.url}: ${why}; ${next}`);
     }
   };
 
@@ -145,8 +204,9 @@ async function backfillRoom({
     try {
       ev = await fetchEvent(f.eventId);
     } catch (err) {
-      failures.push({ ...f, error: `could not re-read the event: ${err.message}` });
-      log(`[backfill] ${roomId} ${f.url}: could not re-read ${f.eventId} to retry it: ${err.message}`);
+      const why = describeFailure(err);
+      failures.push({ ...f, error: `could not re-read the event: ${why}` });
+      log(`[backfill] ${roomId} ${f.url}: could not re-read ${f.eventId} to retry it: ${why}; kept, and retried on the next run`);
       continue;
     }
     const [image] = imagesIn(ev ? [ev] : []);
@@ -196,7 +256,7 @@ async function backfillRoom({
   }
 
   return {
-    roomId, seen, done, blocked, refused, failed, retried, pages,
+    roomId, seen, done, blocked, refused, hidden, failed, retried, pages,
     capped: full(),
     cursor: from, reachedStart, stalled, head, error,
     failedMediaIds: failures.map((f) => f.url),
@@ -302,6 +362,7 @@ function summarise(r) {
   if (r.retried) bits.push(`${r.retried} earlier failure(s) retried`);
   if (r.blocked) bits.push(`${r.blocked} posted but tag state blocked`);
   if (r.refused) bits.push(`${r.refused} NOT posted: generation data would not strip (see the [strip] lines)`);
+  if (r.hidden) bits.push(`${r.hidden} NOT posted: the booru holds them under a deleted or jailed post (see the [skip] lines; not retried)`);
   if (r.failed) bits.push(`${r.failed} failed (retried on the next run)`);
   if (r.capped) bits.push(`stopped at the cap`);
   let tail = "";
@@ -324,6 +385,6 @@ function summarise(r) {
 }
 
 module.exports = {
-  backfillRoom, imagesIn, summarise, planWalk, nextState, retryable,
+  backfillRoom, imagesIn, summarise, planWalk, nextState, retryable, describeFailure,
   DEFAULT_CAP, MAX_PAGES, MAX_ATTEMPTS,
 };

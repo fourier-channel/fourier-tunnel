@@ -35,6 +35,10 @@ const crypto = require("crypto");
 // The distinct outcome of a refused strip. backfill.js and catchup.js count it
 // apart from "done": a picture that was never posted is not a success.
 const STRIP_REFUSED = "strip-refused";
+// The booru already holds these bytes under a post this account may not see
+// (deleted or jailed): nothing was posted, and nothing will be on a retry.
+// Counted apart from "done" and from "failed" (index.js heldByTheBooru).
+const HELD_HIDDEN = "held-hidden";
 const AI_GENERATED_TAG = "ai-generated";
 const NO_SCRAPE = Object.freeze({ tags: [], meta: [], characters: [] });
 
@@ -255,5 +259,6 @@ module.exports = {
   recordCreator,
   md5hex,
   STRIP_REFUSED,
+  HELD_HIDDEN,
   AI_GENERATED_TAG,
 };

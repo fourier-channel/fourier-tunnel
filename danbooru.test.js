@@ -109,3 +109,79 @@ test("waitForUpload says WHICH way it failed: the booru's verdict (UPLOAD_ERROR)
   const done = client({ status: 200, data: { id: 7, status: "completed", upload_media_assets: [{ id: 70 }] } });
   assert.equal((await done.c.waitForUpload(7, { intervalMs: 1, timeoutMs: 50 })).upload_media_assets[0].id, 70);
 });
+
+// --- createPost against a booru that speaks HTTP ---------------------------------
+//
+// The stand-in client above cannot reproduce what axios does with a redirect,
+// and that is the bug: 2026-10-02, three pictures whose booru posts were
+// deleted failed every backfill sweep as a bare "Request failed with status
+// code 404". The booru answers a duplicate md5 at POST /posts.json with a 302
+// to the original post (chanbooru PostsController#create); axios followed it,
+// and a deleted post's page answers 404 to everyone it is hidden from.
+
+const http = require("node:http");
+const { BooruDuplicate } = require("./danbooru");
+
+async function booru(routes) {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://stand-in");
+    seen.push({ method: req.method, path: url.pathname, query: url.search });
+    req.resume();
+    req.on("end", () => {
+      const out = (routes[`${req.method} ${url.pathname}`] || (() => [599, {}]))(server);
+      res.writeHead(out[0], { "content-type": "application/json", ...(out[2] || {}) });
+      res.end(JSON.stringify(out[1]));
+    });
+  });
+  await new Promise((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const c = new DanbooruClient({ url: base, username: "bot", api_key: "SECRETKEY" });
+  return { c, seen, base, close: () => { server.close(); server.closeAllConnections(); } };
+}
+
+test("createPost: a duplicate's redirect is READ, not followed -- a BooruDuplicate naming the post, even one this account cannot see", async () => {
+  const b = await booru({
+    "POST /posts.json": (s) => [302, {}, { location: `http://127.0.0.1:${s.address().port}/posts/25` }],
+    // A deleted post: hidden from this account, and answered exactly like a missing one.
+    "GET /posts/25": () => [404, { success: false, message: "That record was not found." }],
+    "GET /posts/25.json": () => [404, { success: false, message: "That record was not found." }],
+  });
+  try {
+    await assert.rejects(b.c.createPost(11, { rating: "q", tagString: "1girl", source: "mxc://41chan.net/x" }), (err) => {
+      assert.ok(err instanceof BooruDuplicate, `a BooruDuplicate, not ${err && err.name}: ${err && err.message}`);
+      assert.equal(err.duplicateOf, 25);
+      assert.equal(err.status, 302);
+      assert.match(err.message, /^POST \/posts\.json -> 302: the booru already holds these bytes as post #25/);
+      assert.doesNotMatch(err.message, /SECRETKEY|127\.0\.0\.1|api_key/);
+      return true;
+    });
+    assert.deepEqual(b.seen.map((r) => `${r.method} ${r.path}`), ["POST /posts.json"], "the redirect was not followed");
+    // And the post it names is looked up as THIS account sees it: hidden is null, not a throw.
+    assert.equal(await b.c.findVisiblePost(25), null);
+  } finally {
+    b.close();
+  }
+});
+
+test("createPost: a made post comes back; any other answer is a BooruRefusal naming POST /posts.json and the booru's reason", async () => {
+  const b = await booru({
+    "POST /posts.json": () => [201, { id: 42, md5: MD5 }],
+    "GET /posts/42.json": () => [200, { id: 42, md5: MD5 }],
+  });
+  try {
+    assert.equal((await b.c.createPost(11, { rating: "q" })).id, 42);
+    assert.equal((await b.c.findVisiblePost(42)).id, 42);
+    await assert.rejects(b.c.findVisiblePost(43), (err) => err instanceof BooruRefusal && /^GET \/posts\/43\.json -> 599/.test(err.message));
+  } finally {
+    b.close();
+  }
+  const refused = await booru({ "POST /posts.json": () => [422, { error: "Rating is not included in the list", fix: "send s, q or e" }] });
+  try {
+    await assert.rejects(refused.c.createPost(11, { rating: "x" }), (err) =>
+      err instanceof BooruRefusal && !(err instanceof BooruDuplicate) && err.status === 422 &&
+      err.message === "POST /posts.json -> 422: Rating is not included in the list -- fix: send s, q or e");
+  } finally {
+    refused.close();
+  }
+});
