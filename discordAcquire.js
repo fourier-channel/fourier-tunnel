@@ -11,9 +11,11 @@ const { stripGeneration } = require("./strip-generation.js");
 // Operator, 2026-09-21: "This is tunnel. tonneru-chan. Her job is to get the
 // data back and forth between disparate systems." Matrix was the first system
 // she was pointed at; this is the second. She reads an allowlisted channel over
-// REST and delivers each attachment to fourier-sampling's drop directory
-// (drop.js). What lies past the drop -- the manifest, R2, tagging, the jail,
-// the booru -- is the archive's, and nothing here writes it.
+// REST and hands each attachment to a DELIVERER. By operator ruling 2026-10-04
+// that is the booru, posted exactly the way the Matrix path posts
+// (discordPost.js), with the guild's creator-tag prefix keeping Discord posts
+// apart from Matrix ones. The other deliverer, dropDeliverer below, publishes
+// into fourier-sampling's drop directory for its archive instead.
 //
 // Design: fourier-basis/docs/design/DISCORD_INGEST.md, milestone M4. Every
 // platform behaviour this file depends on was measured against a live token on
@@ -254,59 +256,83 @@ function md5(buf) {
 }
 
 /**
- * Fetch, strip and deliver one attachment.
- * Returns {delivered|alreadyQueued} or {refused: reason}. Throws Transient when
- * the message must be retried next cycle, DeliveryUnavailable when nothing can be.
+ * The DROP deliverer: strip the bytes and publish them, with a sidecar, into
+ * fourier-sampling's drop directory for its drain.
+ *
+ * A deliverer is { name, prepare(), accepts(att) -> refusal|null,
+ * deliver({channel, msg, att, bytes}) }. deliver returns {delivered} |
+ * {alreadyQueued} | {refused: reason}, throws Transient when the message must
+ * be retried next cycle, and DeliveryUnavailable when nothing can be. The other
+ * deliverer is discordPost.js, which posts to the booru the way the Matrix path
+ * does (operator ruling 2026-10-04).
  */
+function dropDeliverer({ dropRoot, stateDir, namespace, now }) {
+  const clock = now || (() => Date.now());
+  return {
+    name: "drop",
+    async prepare() {
+      const mount = await drop.mountLooksReal(dropRoot);
+      if (!mount.ok) throw new DeliveryUnavailable(mount.reason);
+    },
+    accepts(att) {
+      if (drop.extFor(att.filename) !== null) return null;
+      return `${JSON.stringify(att.filename)} (${att.content_type || "no declared type"}) is not a type this archive carries. Allowed: ${[...drop.ALLOWED_EXT].join(" ")}`;
+    },
+    async deliver({ channel, msg, att, bytes }) {
+      const ext = drop.extFor(att.filename);
+      let generation = null;
+      if (STRIPPABLE.has(ext)) {
+        try {
+          const s = stripGeneration(bytes, att.content_type);
+          if (s.changed) {
+            generation = { raw_md5: md5(bytes), removed: s.removed, confident: s.confident };
+            bytes = s.buffer;
+          }
+        } catch (err) {
+          return { refused: `${JSON.stringify(att.filename)} could not be cleared of generation data, so it was not delivered: ${err.message}` };
+        }
+      }
+      const built = drop.buildSidecar({
+        source: SOURCE,
+        namespace,
+        containerRef: channel.id,
+        messageRef: msg.id,
+        attachmentRef: att.id,
+        filename: att.filename,
+        author: msg.author ? (msg.author.global_name || msg.author.username) : undefined,
+        authorRef: msg.author ? msg.author.id : undefined,
+        postedAt: msg.timestamp,
+        permalink: channel.guild_id ? `https://discord.com/channels/${channel.guild_id}/${channel.id}/${msg.id}` : undefined,
+      });
+      if (!built.ok) return { refused: built.reason };
+      const r = await drop.publish(dropRoot, built.sidecar, bytes);
+      if (!r.ok) {
+        if (/no drop queue/.test(r.reason)) throw new DeliveryUnavailable(r.reason);
+        throw new Transient(`delivering ${JSON.stringify(att.filename)} failed: ${r.reason}`);
+      }
+      if (generation && !r.alreadyQueued) {
+        // Generation data never travels with the bytes (operator ruling
+        // 2026-09-28): what the drop holds ends up served. The text is kept in
+        // this bot's private state, keyed by the stripped md5 the archive files
+        // the object under. Written after the delivery, so a retried
+        // attachment is recorded once.
+        const row = { md5: md5(bytes), ...generation, message_ref: msg.id, attachment_ref: att.id, container_ref: channel.id, at: new Date(clock()).toISOString() };
+        await fs.appendFile(path.join(stateDir, "discord-generation.jsonl"), JSON.stringify(row) + "\n");
+      }
+      return { delivered: !r.alreadyQueued, alreadyQueued: r.alreadyQueued, stripped: Boolean(generation) };
+    },
+  };
+}
+
+/** Check, fetch and hand one attachment to the deliverer. */
 async function deliverAttachment(ctx, channel, msg, att) {
-  const ext = drop.extFor(att.filename);
-  if (ext === null) {
-    return { refused: `${JSON.stringify(att.filename)} (${att.content_type || "no declared type"}) is not a type this archive carries. Allowed: ${[...drop.ALLOWED_EXT].join(" ")}` };
-  }
+  const refusal = ctx.deliver.accepts(att);
+  if (refusal) return { refused: refusal };
   if (Number(att.size) > ctx.maxBytes) {
     return { refused: `${JSON.stringify(att.filename)} is ${att.size} bytes, over the ${ctx.maxBytes}-byte cap` };
   }
-  let bytes = await ctx.http.download(att.url, Number(att.size), ctx.maxBytes);
-  let generation = null;
-  if (STRIPPABLE.has(ext)) {
-    try {
-      const s = stripGeneration(bytes, att.content_type);
-      if (s.changed) {
-        generation = { raw_md5: md5(bytes), removed: s.removed, confident: s.confident };
-        bytes = s.buffer;
-      }
-    } catch (err) {
-      return { refused: `${JSON.stringify(att.filename)} could not be cleared of generation data, so it was not delivered: ${err.message}` };
-    }
-  }
-  const built = drop.buildSidecar({
-    source: SOURCE,
-    namespace: ctx.namespace,
-    containerRef: channel.id,
-    messageRef: msg.id,
-    attachmentRef: att.id,
-    filename: att.filename,
-    author: msg.author ? (msg.author.global_name || msg.author.username) : undefined,
-    authorRef: msg.author ? msg.author.id : undefined,
-    postedAt: msg.timestamp,
-    permalink: channel.guild_id ? `https://discord.com/channels/${channel.guild_id}/${channel.id}/${msg.id}` : undefined,
-  });
-  if (!built.ok) return { refused: built.reason };
-  const r = await drop.publish(ctx.dropRoot, built.sidecar, bytes);
-  if (!r.ok) {
-    if (/no drop queue/.test(r.reason)) throw new DeliveryUnavailable(r.reason);
-    throw new Transient(`delivering ${JSON.stringify(att.filename)} failed: ${r.reason}`);
-  }
-  if (generation && !r.alreadyQueued) {
-    // Generation data never travels with the bytes (operator ruling
-    // 2026-09-28): what the drop holds ends up served. The text is kept in
-    // this bot's private state, keyed by the stripped md5 the archive files
-    // the object under, until the booru's private store can take it. Written
-    // after the delivery, so a retried attachment is recorded once.
-    const row = { md5: md5(bytes), ...generation, message_ref: msg.id, attachment_ref: att.id, container_ref: channel.id, at: new Date(ctx.now()).toISOString() };
-    await fs.appendFile(path.join(ctx.stateDir, "discord-generation.jsonl"), JSON.stringify(row) + "\n");
-  }
-  return { delivered: !r.alreadyQueued, alreadyQueued: r.alreadyQueued, stripped: Boolean(generation) };
+  const bytes = await ctx.http.download(att.url, Number(att.size), ctx.maxBytes);
+  return ctx.deliver.deliver({ channel, msg, att, bytes });
 }
 
 // ---- one channel -----------------------------------------------------------
@@ -416,8 +442,6 @@ async function acquireChannel(ctx, channelId) {
 async function acquireOnce(opts) {
   const ctx = {
     http: opts.http,
-    namespace: opts.namespace || SOURCE,
-    dropRoot: opts.dropRoot,
     stateDir: opts.stateDir,
     startFrom: opts.startFrom === "beginning" ? "beginning" : "now",
     pageSize: opts.pageSize || DEFAULT_PAGE,
@@ -432,8 +456,8 @@ async function acquireOnce(opts) {
   for (const c of opts.channels) {
     if (!isSnowflake(c)) throw new Error(`allowlisted channel ${JSON.stringify(c)} is not a Discord id (17-20 digits)`);
   }
-  const mount = await drop.mountLooksReal(ctx.dropRoot);
-  if (!mount.ok) throw new DeliveryUnavailable(mount.reason);
+  ctx.deliver = opts.deliver || dropDeliverer({ dropRoot: opts.dropRoot, stateDir: opts.stateDir, namespace: opts.namespace || SOURCE, now: ctx.now });
+  await ctx.deliver.prepare();
 
   const results = [];
   let fatal = null;
@@ -452,6 +476,7 @@ async function acquireOnce(opts) {
   }
   const status = {
     at: new Date(ctx.now()).toISOString(),
+    deliver: ctx.deliver.name,
     ok: !fatal && results.every((r) => !r.stopped),
     fatal: fatal ? fatal.message : null,
     channels: results.map((r) => ({
@@ -480,4 +505,5 @@ module.exports = {
   readChannelState,
   acquireChannel,
   acquireOnce,
+  dropDeliverer,
 };

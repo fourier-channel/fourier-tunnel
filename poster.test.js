@@ -66,5 +66,28 @@ test("there is no way back from a tag to an MXID: a tag is a label anyone can ed
   // It existed once, and was used to decide who could read a post's private
   // generation record from the post's member-editable tags.
   assert.equal(poster.mxidForPosterTag, undefined);
-  assert.deepEqual(Object.keys(poster).sort(), ["SAFE", "localpartIfLocal", "posterTagFor"]);
+  assert.deepEqual(Object.keys(poster).sort(), ["FOURCHAN_PREFIX", "MATRIX_PREFIX", "SAFE", "discordPosterTagFor", "localpartIfLocal", "posterTagFor"]);
+});
+
+// Operator ruling 2026-10-04: 4chan_ / 41chan_ / aichan_, 41chan_ the master,
+// the others claimable only when identical once the prefix is stripped.
+test("a Discord author's creator tag is <guild prefix>_<username>, and strips back to the same name", () => {
+  assert.equal(poster.discordPosterTagFor("selphdestruct", "aichan"), "aichan_selphdestruct");
+  assert.equal(poster.posterTagFor("@selphdestruct:41chan.net", "41chan.net"), "41chan_selphdestruct");
+  const strip = (t) => t.slice(t.indexOf("_") + 1);
+  assert.equal(strip(poster.discordPosterTagFor("selphdestruct", "aichan")), strip(poster.posterTagFor("@selphdestruct:41chan.net", "41chan.net")));
+});
+
+test("a Discord username is checked, never folded: a.b must not become a_b and land on someone else's claim", () => {
+  assert.equal(poster.discordPosterTagFor("a.b", "aichan"), null);
+  assert.equal(poster.discordPosterTagFor("Alice", "aichan"), null, "Discord usernames are lowercase; anything else is not a username");
+  assert.equal(poster.discordPosterTagFor("", "aichan"), null);
+  assert.equal(poster.discordPosterTagFor(undefined, "aichan"), null);
+});
+
+test("a Discord guild can never mint the master or the 4chan prefix", () => {
+  assert.equal(poster.discordPosterTagFor("selphdestruct", "41chan"), null, "that would forge a Matrix identity");
+  assert.equal(poster.discordPosterTagFor("selphdestruct", "4chan"), null);
+  assert.equal(poster.discordPosterTagFor("selphdestruct", "ai_chan"), null, "a separator in the prefix would make the strip ambiguous");
+  assert.equal(poster.discordPosterTagFor("selphdestruct", ""), null);
 });
