@@ -41,3 +41,18 @@ bridge:
   # service on the bot hub (fourier-basis ops/hetzner/guide) with her own
   # registration: onboarding, the !join on-ramp and !bugreport moved with her,
   # and her keys (onramp_room, onboarding, bugreport, the admin token) with them.
+
+# Tonneru-chan in Discord (operator rulings 2026-10-04). Absent or
+# enabled: false, nothing Discord runs. The token is DISCORD_BOT_TOKEN in .env,
+# never here. state_dir is shared with fourier-sampling's panel (FS_DISCORD_DIR
+# there): mount /var/lib/fourier-tunnel/discord at /discord in compose.
+# discord:
+#   enabled: true
+#   state_dir: /discord
+#   guilds:                       # guild id: creator prefix (never 41chan or 4chan)
+#     "123456789012345678": aichan
+#   index_every_minutes: 60
+#   acquire_every_seconds: 120
+#   speak_every_seconds: 3
+#   start_from: beginning         # a target's whole history; "now" for new posts only
+#   presence: true

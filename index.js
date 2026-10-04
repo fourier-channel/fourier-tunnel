@@ -1297,6 +1297,10 @@ new Cli({
     startThumbnailRetirement();
     // Resume every room whose history is not yet walked to its start.
     startBackfillSweep(bridge, `@${_reg.sender_localpart}:${config.homeserver.domain}`);
+    // Tonneru-chan's second endpoint (operator, 2026-10-04): Discord, when
+    // config.yaml carries a discord: block. Its loops fail on their own and
+    // never take the Matrix bridge down with them (discordService.js).
+    require("./discordService").startDiscord({ config, danbooru, autotag, extractCreatorTagsFromFields, categoriseArtist });
 
     bridge.run(port).then(async () => {
       try {

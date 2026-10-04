@@ -20,6 +20,12 @@ services:
       # which is how a config change that looked applied was not.
       - ./config.yaml:/app/config.yaml:ro
       - ./onboarding-state:/state
+      # Tonneru-chan's Discord state (config.yaml discord.state_dir: /discord),
+      # SHARED with fourier-sampling's panel (FS_DISCORD_DIR in fourier-web).
+      # Created once on the host before this mount is used -- docker would
+      # otherwise make it root-only and the panel could not write its files:
+      #   install -d -m 2775 -o root -g fourier /var/lib/fourier-tunnel/discord
+      - /var/lib/fourier-tunnel/discord:/discord
     restart: unless-stopped
     networks:
       - synapse_default
