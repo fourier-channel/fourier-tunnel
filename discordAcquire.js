@@ -195,6 +195,47 @@ class DiscordHttp {
     }
   }
 
+  /**
+   * POST a JSON body. Retried ONLY on 429, which Discord documents as "not
+   * processed"; a 5xx or a network error may have landed, so it is reported as
+   * Transient with that said, never repeated here -- a repeated send is a
+   * duplicate message in somebody's channel.
+   */
+  async postJson(apiPath, body, scope) {
+    for (let attempt = 0; ; attempt++) {
+      await this.#wait();
+      this.requests++;
+      let res;
+      try {
+        res = await this.fetch(API + apiPath, {
+          method: "POST",
+          headers: { Authorization: `Bot ${this.token}`, "User-Agent": this.ua, "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        throw new Transient(`POST ${apiPath} did not complete and may or may not have landed: ${err && err.message ? err.message : String(err)}`);
+      }
+      this.#noteBucket(res);
+      if (res.status === 200 || res.status === 201) return res.json();
+      if (res.status === 401) throw new AuthFailed(`Discord answered 401 to POST ${apiPath}: the bot token is wrong or has been reset. Nothing was retried. Fix: reset the token in the Discord developer portal and update DISCORD_BOT_TOKEN.`);
+      if (res.status === 403 || res.status === 404) {
+        throw new ChannelRefused(`Discord answered ${res.status} to POST ${apiPath}: the bot cannot post in ${scope || "this channel"}. Fix: give it Send Messages (and View Channel) there.`);
+      }
+      if (res.status === 429 && attempt < MAX_RETRIES) {
+        let retry = Number(res.headers.get("retry-after"));
+        try {
+          const b = await res.json();
+          if (b && Number.isFinite(Number(b.retry_after))) retry = Number(b.retry_after);
+        } catch { /* the header stands */ }
+        await this.sleep(Math.ceil((Number.isFinite(retry) && retry > 0 ? retry : 1) * 1000) + 50);
+        continue;
+      }
+      let detail = "";
+      try { const b = await res.json(); detail = b && b.message ? `: ${b.message}` : ""; } catch { /* none */ }
+      throw new Transient(`POST ${apiPath} answered ${res.status}${detail}${res.status >= 500 ? " (it may have landed; not repeated)" : ""}`);
+    }
+  }
+
   /** Download an attachment from its signed URL. No credential is sent to the CDN. */
   async download(url, expectedSize, maxBytes) {
     await this.#wait();
@@ -414,6 +455,12 @@ async function acquireChannel(ctx, channelId) {
             if (r.alreadyQueued) out.alreadyQueued++;
             if (r.stripped) out.stripped++;
           }
+          await ctx.record({
+            a: att.id, m: msg.id, c: channel.id, g: channel.guild_id || null, u: msg.author ? msg.author.id : null,
+            st: r.refused ? "refused" : r.delivered ? "posted" : "held",
+            ...(r.postId ? { p: r.postId } : {}),
+            ...(r.refused ? { why: r.refused } : {}),
+          });
         }
       }
       state.after = msg.id;
@@ -449,6 +496,14 @@ async function acquireOnce(opts) {
     selfId: opts.selfId || null,
     now: opts.now || (() => Date.now()),
     log: opts.log || ((m) => console.log(m)),
+    // WHAT BECAME OF EACH ATTACHMENT, checked off against the plan
+    // (discordIndex.js). One row per outcome: posted, held (already on the
+    // booru or already queued) or refused with its reason. Append-only; a
+    // reader keys on the attachment id and the latest row wins.
+    record: async (row) => {
+      const at = new Date((opts.now || Date.now)()).toISOString();
+      await fs.appendFile(path.join(opts.stateDir, "acquired.jsonl"), JSON.stringify({ ...row, at }) + "\n");
+    },
   };
   if (!Array.isArray(opts.channels) || opts.channels.length === 0) {
     throw new Error("no channels to read. The allowlist is explicit by design: name each channel id; there is no wildcard.");
