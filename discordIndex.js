@@ -250,4 +250,21 @@ async function indexOnce(opts) {
   return { guilds: doc.guilds, channels: doc.channels, results, unseenTargets: doc.unseenTargets };
 }
 
-module.exports = { indexOnce, refreshGuilds, indexChannel, scopeOf, nameFits, readTargets, readCreators, creatorNameFor, INDEX_DIR };
+/**
+ * "Refresh now", asked for on the panel: index-request.json, written by the
+ * panel, taken (removed) here before the pass it asks for runs. Taken first, so
+ * a request made DURING the pass survives for the next one rather than being
+ * swallowed by a pass that started before it.
+ */
+async function takeIndexRequest(stateDir) {
+  const file = path.join(stateDir, "index-request.json");
+  try {
+    await fs.rm(file);
+    return true;
+  } catch (err) {
+    if (err && err.code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+module.exports = { indexOnce, refreshGuilds, indexChannel, scopeOf, nameFits, readTargets, readCreators, creatorNameFor, takeIndexRequest, INDEX_DIR };

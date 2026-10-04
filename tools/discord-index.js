@@ -5,7 +5,10 @@
 //
 //   node --env-file=<file holding DISCORD_BOT_TOKEN> tools/discord-index.js \
 //     --state-dir <dir> --prefix <guild id>=<prefix> [--prefix ...] \
-//     [--channel <id> ...] [--ua-url <url>]
+//     [--channel <id> ...] [--every <minutes>] [--ua-url <url>]
+//
+// --every keeps it running: a pass every N minutes, and one within seconds of
+// the panel's "refresh now" button.
 //
 // Indexes every channel she can read, target or not, so targets can be chosen
 // from the counts. Lists message pages only; downloads nothing. Re-running continues from where
@@ -32,6 +35,7 @@ async function main() {
     if (a === "--state-dir") o.stateDir = path.resolve(v());
     else if (a === "--channel") o.channels.push(v());
     else if (a === "--ua-url") o.uaUrl = v();
+    else if (a === "--every") o.every = Number(v());
     else if (a === "--prefix") {
       const m = /^(\d{17,20})=([a-z0-9]{1,16})$/.exec(v());
       if (!m) usage("--prefix takes <guild id>=<prefix>");
@@ -46,6 +50,27 @@ async function main() {
     ua: acq.userAgent(o.uaUrl || process.env.DISCORD_UA_URL || "https://github.com/fourier-channel/fourier-tunnel", pkg.version),
   });
   const me = await http.getJson("/users/@me", "the bot's own user");
+  if (o.every > 0) {
+    // A pass every --every minutes, and one within seconds of the panel's
+    // "refresh now" (index-request.json). Runs until stopped.
+    const { takeIndexRequest } = require("../discordIndex.js");
+    let next = 0;
+    for (;;) {
+      const asked = await takeIndexRequest(o.stateDir);
+      if (asked || Date.now() >= next) {
+        try {
+          const r = await indexOnce({ http, stateDir: o.stateDir, prefixes: o.prefixes, channels: o.channels, selfId: me.id });
+          const rows = r.results.reduce((s, x) => s + (x.rows || 0), 0);
+          console.log(`${new Date().toISOString()} ${asked ? "requested" : "scheduled"} pass: ${r.channels.length} channel(s), ${rows} new attachment(s)`);
+        } catch (err) {
+          if (err instanceof acq.AuthFailed) throw err;
+          console.log(`${new Date().toISOString()} pass failed: ${err.message}`);
+        }
+        next = Date.now() + o.every * 60_000;
+      }
+      await new Promise((res) => { setTimeout(res, 3000); });
+    }
+  }
   const r = await indexOnce({ http, stateDir: o.stateDir, prefixes: o.prefixes, channels: o.channels, selfId: me.id });
   let partial = false;
   for (const g of r.guilds) console.log(`server ${g.name} (${g.id}) prefix ${g.prefix}`);

@@ -3,7 +3,7 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const acq = require("./discordAcquire");
-const { indexOnce, readTargets, readCreators, creatorNameFor } = require("./discordIndex");
+const { indexOnce, readTargets, readCreators, creatorNameFor, takeIndexRequest } = require("./discordIndex");
 const speak = require("./discordSpeak");
 const { booruDeliverer } = require("./discordPost");
 const { PresenceClient } = require("./discordPresence");
@@ -16,7 +16,8 @@ const { IdentifyBudget, SessionStore } = require("./discordGateway");
 // carries a `discord:` block. Four loops, each scheduling its next pass only
 // after the last one finished, so a slow pass never overlaps itself:
 //
-//   index     every channel she can read, into the plan       (hourly)
+//   index     every channel she can read, into the plan  (every 5 min, and
+//             within seconds when the panel's "refresh now" asks)
 //   acquire   the scrape targets the panel chose, to the booru (every 2 min)
 //   speak     what the operator queued on the panel            (every 3 s)
 //   presence  her gateway connection, so she shows online      (held open)
@@ -142,10 +143,26 @@ function startDiscord(deps) {
       return;
     }
 
-    loop("index", (dc.index_every_minutes || 60) * MIN, 5_000, async () => {
-      const r = await indexOnce({ http, stateDir, prefixes, channels: [], selfId, log: (m) => say("log", m) });
-      const rows = r.results.reduce((s, x) => s + (x.rows || 0), 0);
-      if (rows) say("log", `index: ${rows} new attachment(s) listed across ${r.results.length} channel(s)`);
+    // ONE index pass at a time, whichever loop asked for it: the timer and the
+    // panel's request share this, so a request during a pass waits for it.
+    let indexing = null;
+    const indexNow = (why) => {
+      if (!indexing) {
+        indexing = (async () => {
+          try {
+            const r = await indexOnce({ http, stateDir, prefixes, channels: [], selfId, log: (m) => say("log", m) });
+            const rows = r.results.reduce((s, x) => s + (x.rows || 0), 0);
+            if (rows || why === "requested") say("log", `index (${why}): ${rows} new attachment(s) listed across ${r.results.length} channel(s)`);
+          } finally {
+            indexing = null;
+          }
+        })();
+      }
+      return indexing;
+    };
+    loop("index", (dc.index_every_minutes || 5) * MIN, 5_000, () => indexNow("scheduled"));
+    loop("index-request", 3_000, 3_000, async () => {
+      if (await takeIndexRequest(stateDir)) await indexNow("requested");
     });
 
     loop("acquire", (dc.acquire_every_seconds || 120) * 1000, 60_000, async () => {

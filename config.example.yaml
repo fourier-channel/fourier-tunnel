@@ -51,7 +51,7 @@ bridge:
 #   state_dir: /discord
 #   guilds:                       # guild id: creator prefix (never 41chan or 4chan)
 #     "123456789012345678": aichan
-#   index_every_minutes: 60
+#   index_every_minutes: 5        # the panel's "refresh now" also runs one within seconds
 #   acquire_every_seconds: 120
 #   speak_every_seconds: 3
 #   start_from: beginning         # a target's whole history; "now" for new posts only

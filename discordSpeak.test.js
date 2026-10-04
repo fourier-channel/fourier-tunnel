@@ -274,3 +274,12 @@ test("a second index pass lists only what is new", async (t) => {
   const rows = (await fs.readFile(path.join(dir, "index", `${CH}.jsonl`), "utf8")).trim().split("\n");
   assert.equal(rows.length, 2);
 });
+
+test("a refresh request is taken once, before the pass it asks for", async (t) => {
+  const { takeIndexRequest } = require("./discordIndex");
+  const dir = await tmp(t);
+  assert.equal(await takeIndexRequest(dir), false);
+  await fs.writeFile(path.join(dir, "index-request.json"), JSON.stringify({ at: "now" }));
+  assert.equal(await takeIndexRequest(dir), true);
+  assert.equal(await takeIndexRequest(dir), false, "taken: the next pass is not asked for twice");
+});
