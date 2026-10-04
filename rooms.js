@@ -29,13 +29,14 @@
 // one, which is the rule invites.js already enforces.
 
 const fs = require("fs");
-const path = require("path");
 
 // The same mounted state directory the strike ledger uses. Beside the code it
 // would live inside the image, and a rebuild would silently invite every
 // denied room back.
-const STATE_DIR = process.env.ONBOARDING_STATE_DIR || __dirname;
-const DENIED_PATH = path.join(STATE_DIR, "rooms-denied.json");
+const { statePath } = require("./state-dir");
+
+// A function, not a constant: it verifies the directory on every use.
+const deniedPath = () => statePath("rooms-denied.json");
 
 /** Methods that must keep working while a room is denied. */
 const ALWAYS_ALLOWED = new Set(["leave", "forget"]);
@@ -45,8 +46,9 @@ function looksLikeRoomId(value) {
 }
 
 function load() {
+  const file = deniedPath(); // throws, naming the install step, when the state dir is not installed
   try {
-    const parsed = JSON.parse(fs.readFileSync(DENIED_PATH, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch (err) {
     // An ABSENT file is the ordinary first run. An unreadable one is every
@@ -54,17 +56,17 @@ function load() {
     // apart from an empty object -- so it is said out loud rather than
     // discovered later by a bot turning up somewhere it was thrown out of.
     if (err.code !== "ENOENT") {
-      console.warn(`[rooms] denied-room list at ${DENIED_PATH} unreadable, continuing with NO denials: ${err.message}`);
+      console.warn(`[rooms] denied-room list at ${file} unreadable, continuing with NO denials: ${err.message}`);
     }
     return {};
   }
 }
 
 function save(state) {
-  const tmp = DENIED_PATH + ".tmp";
-  fs.mkdirSync(path.dirname(DENIED_PATH), { recursive: true });
+  const file = deniedPath();
+  const tmp = file + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, DENIED_PATH);
+  fs.renameSync(tmp, file);
 }
 
 /** Every denied room, newest first, with why and by whom. */
@@ -145,6 +147,6 @@ function guard(intent, deps = {}) {
 }
 
 module.exports = {
-  DENIED_PATH, ALWAYS_ALLOWED, RoomDeniedError,
+  deniedPath, ALWAYS_ALLOWED, RoomDeniedError,
   isDenied, deny, allow, listDenied, guard, looksLikeRoomId,
 };

@@ -80,6 +80,25 @@ const WINDOW_MS = 24 * 60 * 60 * 1000;
 const MIN_IDENTIFY_SPACING_MS = 120_000;
 
 /**
+ * Refuse when the directory that must hold `file` was never installed. These
+ * classes never create it: the install step does (installed-locations audit
+ * 2026-10-04). A file inside a verified directory is another matter and its
+ * writer may create it.
+ */
+async function requireDir(file, what) {
+  const dir = path.resolve(path.dirname(file));
+  let st = null;
+  try { st = await fs.stat(dir); } catch { /* reported below */ }
+  if (!st || !st.isDirectory()) {
+    throw new Error(
+      `the directory ${dir} for the ${what} (${path.resolve(file)}) does not exist, and the bridge does not create it: ` +
+      "a wrong or unmounted path would read as a full identify budget on every restart. " +
+      "Fix: run the install step (`mkdir -p onboarding-state`, mounted at /state, README Setup step 1) " +
+      "or point the path at the installed state directory.");
+  }
+}
+
+/**
  * The on-disk IDENTIFY ledger.
  *
  * Append-only lines of {at}. Append-only because a rewrite has a window where
@@ -101,7 +120,13 @@ class IdentifyBudget {
     try {
       raw = await fs.readFile(this.file, "utf8");
     } catch (err) {
-      if (err && err.code === "ENOENT") return [];
+      if (err && err.code === "ENOENT") {
+        // A missing FILE in a verified directory is a first run. A missing
+        // DIRECTORY is an unmounted or mistyped path, which would hand a full
+        // budget to every restart (installed-locations audit 2026-10-04).
+        await requireDir(this.file, "identify ledger");
+        return [];
+      }
       // A ledger we cannot read is NOT an empty ledger. Treating an unreadable
       // file as "no identifies yet" is precisely the undercount that empties
       // the budget, so this refuses rather than assuming.
@@ -142,7 +167,7 @@ class IdentifyBudget {
    * in-memory version would not.
    */
   async record(now, why) {
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
+    await requireDir(this.file, "identify ledger");
     const fh = await fs.open(this.file, "a");
     try {
       await fh.writeFile(JSON.stringify({ at: now, why: why || "identify" }) + "\n");
@@ -187,14 +212,21 @@ class SessionStore {
         return s;
       }
       return null;
-    } catch {
+    } catch (err) {
+      if (err && err.code === "ENOENT") {
+        await requireDir(this.file, "session file");
+        return null;
+      }
+      // Unreadable is not "no session": it forces an IDENTIFY, which spends
+      // the budget this file exists to protect. Say so.
+      console.warn(`[discord] session file ${this.file} unreadable or corrupt, the next connect will IDENTIFY instead of RESUME: ${err && (err.code || err.message)}`);
       return null;
     }
   }
 
   /** Written atomically: a half-written session file is worse than none. */
   async save(state) {
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
+    await requireDir(this.file, "session file");
     const tmp = `${this.file}.tmp`;
     await fs.writeFile(tmp, JSON.stringify(state) + "\n");
     await fs.rename(tmp, this.file);

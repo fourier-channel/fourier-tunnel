@@ -1,40 +1,41 @@
 const fs = require("fs");
-const path = require("path");
 
 // In the mounted state directory, NOT beside the code. Beside the code they
 // lived inside the image, and every `docker compose up --build` threw the
 // strike ledger away -- the ledger the README calls non-decaying. Same
 // mount and same variable the onboarding watermark moved to after the
-// 2026-09-05 re-greeting incident; without the variable (tests, host dev)
-// they fall back to the old place.
-const STATE_DIR = process.env.ONBOARDING_STATE_DIR || __dirname;
-const STRIKES_PATH = path.join(STATE_DIR, "strikes.json");
-const AUDIT_PATH = path.join(STATE_DIR, "audit.log");
+// 2026-09-05 re-greeting incident. There is NO fallback: state-dir.js refuses
+// an unset or missing directory (installed-locations audit 2026-10-04).
+const { statePath } = require("./state-dir");
+const strikesPath = () => statePath("strikes.json");
+const auditPath = () => statePath("audit.log");
 
 function loadStrikes() {
+  const file = strikesPath();
   try {
-    return JSON.parse(fs.readFileSync(STRIKES_PATH, "utf8"));
+    return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (err) {
     // An ABSENT ledger is the ordinary first run. An unreadable or corrupt one
     // is every strike ever recorded silently becoming zero, and the caller
     // cannot tell those apart from an empty object -- so the difference is said
     // out loud here rather than inferred later from people's behaviour.
     if (err.code !== "ENOENT") {
-      console.warn(`[invites] strike ledger at ${STRIKES_PATH} unreadable, continuing with NO strikes: ${err.message}`);
+      console.warn(`[invites] strike ledger at ${file} unreadable, continuing with NO strikes: ${err.message}`);
     }
     return {};
   }
 }
 
 function saveStrikes(state) {
-  const tmp = STRIKES_PATH + ".tmp";
+  const file = strikesPath();
+  const tmp = file + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, STRIKES_PATH);
+  fs.renameSync(tmp, file);
 }
 
 function audit(record) {
   const line = JSON.stringify({ ts: Date.now(), ...record }) + "\n";
-  fs.appendFileSync(AUDIT_PATH, line);
+  fs.appendFileSync(auditPath(), line);
 }
 
 function fibMinutes(n) {
@@ -192,6 +193,6 @@ module.exports = {
   inviterLevel,
   rejectionMessage,
   handleInvite,
-  STRIKES_PATH,
-  AUDIT_PATH,
+  strikesPath,
+  auditPath,
 };

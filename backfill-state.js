@@ -24,31 +24,34 @@
 // seven times (memory stale-index-check-then-act).
 
 const fs = require("fs");
-const path = require("path");
 
-const STATE_DIR = process.env.ONBOARDING_STATE_DIR || __dirname;
-const STATE_PATH = path.join(STATE_DIR, "backfill-state.json");
+const { statePath } = require("./state-dir");
+
+// A function: it verifies the state directory on every use and refuses a
+// missing one (installed-locations audit 2026-10-04).
+const statePathNow = () => statePath("backfill-state.json");
 
 function load() {
+  const file = statePathNow();
   try {
-    const parsed = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch (err) {
     // ABSENT is the first run. UNREADABLE means every room looks unwalked and
     // is walked again from the live edge: harmless at the booru (a replay is a
     // no-op there) but a download per picture, so it is said out loud.
     if (err.code !== "ENOENT") {
-      console.warn(`[backfill] state at ${STATE_PATH} unreadable, every room will be walked again from the live edge: ${err.message}`);
+      console.warn(`[backfill] state at ${file} unreadable, every room will be walked again from the live edge: ${err.message}`);
     }
     return {};
   }
 }
 
 function save(state) {
-  const tmp = STATE_PATH + ".tmp";
-  fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
+  const file = statePathNow();
+  const tmp = file + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, STATE_PATH);
+  fs.renameSync(tmp, file);
 }
 
 /** One room's record, read from the file now. */
@@ -63,4 +66,4 @@ function put(roomId, record) {
   save(state);
 }
 
-module.exports = { STATE_PATH, load, get, put };
+module.exports = { statePath: statePathNow, load, get, put };
