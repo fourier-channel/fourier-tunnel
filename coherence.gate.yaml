@@ -40,5 +40,5 @@
 # silently resolving to whatever is newest. That makes `npm install` (WITH
 # devDependencies) a precondition for gating a checkout -- the Docker image is
 # unaffected, it builds its own tree with --omit=dev and never copies this one.
-gate: npx --no-install eslint . && node --test
-suite: node --test
+gate: npx --no-install eslint . && node tools/run-suite.mjs
+suite: node tools/run-suite.mjs

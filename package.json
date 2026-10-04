@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test",
-    "test:image": "docker run --rm -v \"$PWD\":/app:ro -w /app \"$(sed -n 's/^FROM //p' Dockerfile)\" node --test"
+    "test": "node tools/run-suite.mjs",
+    "test:image": "docker run --rm -v \"$PWD\":/app:ro -w /app \"$(sed -n 's/^FROM //p' Dockerfile)\" node --import ./tools/tmp-root.mjs --test"
   },
   "keywords": [],
   "author": "",
