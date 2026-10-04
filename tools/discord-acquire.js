@@ -58,7 +58,7 @@ function parse(argv) {
     }
     else usage(`unknown argument ${JSON.stringify(a)}`);
   }
-  if (!o.channels.length) usage("name at least one --channel; there is no wildcard");
+  // No --channel: the scrape targets the panel chose (targets.json), re-read each pass.
   if (!["booru", "drop"].includes(o.deliver)) usage("--deliver must be booru or drop");
   if (o.deliver === "drop" && !o.dropRoot) usage("--deliver drop needs --drop-root (the spool root that holds _drop/)");
   if (o.deliver === "booru" && !o.config) usage("--deliver booru needs --config <tunnel config.yaml> (the booru and tagger it posts through)");
@@ -101,9 +101,11 @@ async function main() {
     const config = yaml.load(fs.readFileSync(o.config, "utf8"));
     const danbooru = new DanbooruClient(config.danbooru);
     const done = new Set();
+    const { readCreators, creatorNameFor } = require("../discordIndex");
     deliver = booruDeliverer({
       danbooru, autotag, extractCreatorTagsFromFields, config,
       prefixFor: (guildId) => o.prefixes[guildId] || null,
+      creatorFor: async (author) => creatorNameFor(await readCreators(o.stateDir), author),
       categoriseArtist: async (tag) => {
         if (!tag || done.has(tag)) return;
         await danbooru.setTagCategory(tag, 1);
@@ -113,8 +115,11 @@ async function main() {
     });
   }
   const run = async () => {
+    const { readTargets } = require("../discordIndex");
+    const channels = o.channels.length ? o.channels : [...(await readTargets(o.stateDir))];
+    if (!channels.length) { console.log("no scrape targets chosen yet (targets.json is empty); nothing to read"); return false; }
     const { results } = await acq.acquireOnce({
-      http, deliver, channels: o.channels, namespace: o.namespace, dropRoot: o.dropRoot, stateDir: o.stateDir,
+      http, deliver, channels, namespace: o.namespace, dropRoot: o.dropRoot, stateDir: o.stateDir,
       startFrom: o.startFrom, pageSize: o.pageSize, maxBytes: o.maxMb * 1024 * 1024, selfId: me.id,
     });
     return report(results);

@@ -179,3 +179,11 @@ test("a tagger outage still posts, with the creator tag", async () => {
   assert.equal(r.delivered, true);
   assert.equal(f.named("createPost")[0].args[1].tagString, "aichan_selphdestruct");
 });
+
+test("a sub-account merged under a master is posted under the master's name", async () => {
+  const f = fakeBooru();
+  const { d } = deliverer(f.booru, { creatorFor: async (a) => (a.id === "5" ? "selphdestruct" : a.username) });
+  const r = await d.deliver({ channel: CHANNEL, msg: msg({ author: { id: "5", username: "a.b" } }), att: att(), bytes: png() });
+  assert.equal(r.delivered, true, "the sub's own name could not be tagged; the master's can");
+  assert.ok(f.named("createPost")[0].args[1].tagString.split(" ").includes("aichan_selphdestruct"));
+});

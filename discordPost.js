@@ -43,7 +43,7 @@ function extOf(filename) {
  * The booru deliverer for discordAcquire.acquireOnce.
  *
  * deps: { danbooru, autotag, extractCreatorTagsFromFields, categoriseArtist,
- *         config, prefixFor(guildId) -> prefix|null, log }
+ *         config, prefixFor(guildId) -> prefix|null, creatorFor(author) -> name, log }
  */
 function booruDeliverer(deps) {
   const log = deps.log || ((m) => console.log(m));
@@ -75,11 +75,14 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
       "every post must have a creator. Fix: give the guild its prefix in the tunnel's Discord config (aichan for the AIchan Discord).",
     );
   }
-  const posterTag = poster.discordPosterTagFor(author.username, prefix);
+  // Posted under the MASTER name when the operator merged this account under
+  // one (creators.json, from the panel), else under its own username.
+  const name = deps.creatorFor ? await deps.creatorFor(author) : author.username;
+  const posterTag = poster.discordPosterTagFor(name, prefix);
   if (!posterTag) {
     return {
       refused:
-        `no creator tag for Discord user ${author.id} (username ${JSON.stringify(author.username)}) under prefix ${JSON.stringify(prefix)}: ` +
+        `no creator tag for Discord user ${author.id} (posting name ${JSON.stringify(name)}) under prefix ${JSON.stringify(prefix)}: ` +
         "the username is outside [a-z0-9_-] or the prefix is not a legal one. Not posted, because a post needs a creator and the tag " +
         "must match the name exactly for a claim to mean anything. Fix: rule on how such usernames are tagged.",
     };

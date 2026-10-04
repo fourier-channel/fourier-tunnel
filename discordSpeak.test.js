@@ -11,7 +11,8 @@ const os = require("node:os");
 const path = require("node:path");
 const acq = require("./discordAcquire");
 const speak = require("./discordSpeak");
-const { indexOnce } = require("./discordIndex");
+const { indexOnce, creatorNameFor } = require("./discordIndex");
+const perms = require("./discordPerms");
 
 const CH = "1551446881308250114";
 const CH2 = "1551446881308250777";
@@ -108,7 +109,7 @@ test("a channel she is not assigned to is refused before anything is sent", asyn
   assert.equal(r.failed.length, 1);
   assert.equal(d.calls.length, 0);
   const f = JSON.parse(await fs.readFile(path.join(dir, "outbox", "failed", "001.json"), "utf8"));
-  assert.match(f.reason, /not one she is assigned to/);
+  assert.match(f.reason, /not one she can speak in/);
 });
 
 test("a 5xx after the send is never repeated: it may have landed", async (t) => {
@@ -169,14 +170,22 @@ test("a revoked token stops the worker", async (t) => {
 
 // ---- the index -------------------------------------------------------------
 
+const ROLE_BOT = "1551446880385245999";
+const VIEW = String(1 << 10);
+const HISTORY = String(1 << 16);
+const SEND = String(1 << 11);
+const EVERYONE_PERMS = String((1 << 10) | (1 << 11) | (1 << 16));
+
 function guildDiscord(messages) {
   const fetchImpl = async (url) => {
     const u = new URL(url);
     const p = u.pathname.replace(/^\/api\/v10/, "");
-    if (p === `/guilds/${GUILD}`) return res(200, { id: GUILD, name: "AIchan" });
+    if (p === `/guilds/${GUILD}`) return res(200, { id: GUILD, name: "AIchan", owner_id: "1", roles: [{ id: GUILD, permissions: EVERYONE_PERMS }, { id: ROLE_BOT, permissions: "0" }] });
+    if (p === `/guilds/${GUILD}/members/${SELF}`) return res(200, { user: { id: SELF }, roles: [ROLE_BOT] });
     if (p === `/guilds/${GUILD}/channels`) return res(200, [
-      { id: CH, type: 0, name: "art", position: 1 },
-      { id: CH2, type: 0, name: "chat", position: 2 },
+      { id: "1551446881308250500", type: 4, name: "Text Channels", position: 0 },
+      { id: CH, type: 0, name: "art", position: 1, parent_id: "1551446881308250500", permission_overwrites: [] },
+      { id: CH2, type: 0, name: "chat", position: 2, parent_id: "1551446881308250500", permission_overwrites: [{ id: GUILD, type: 0, allow: "0", deny: HISTORY }] },
       { id: "1551446881308250999", type: 2, name: "voice" },
     ]);
     if (p === `/channels/${CH}/messages`) {
@@ -204,6 +213,7 @@ test("the index lists every attachment in an assigned channel, each in scope or 
     msg(5, PERSON, []),
   ];
   const r = await indexOnce({ http: http(guildDiscord(messages)), stateDir: dir, prefixes: { [GUILD]: "aichan" }, channels: [CH], selfId: SELF, log: () => {} });
+  assert.equal(r.results.length, 1, "only the channel whose history she can read is walked");
   assert.equal(r.results[0].rows, 5);
   assert.equal(r.results[0].inScope, 1);
   const rows = (await fs.readFile(path.join(dir, "index", `${CH}.jsonl`), "utf8")).trim().split("\n").map(JSON.parse);
@@ -215,7 +225,42 @@ test("the index lists every attachment in an assigned channel, each in scope or 
   assert.match(why["d.png"], /her own message/);
   const g = JSON.parse(await fs.readFile(path.join(dir, "guilds.json"), "utf8"));
   assert.deepEqual(g.guilds, [{ id: GUILD, name: "AIchan", prefix: "aichan" }]);
-  assert.deepEqual(g.channels.map((c) => [c.name, c.assigned]), [["art", true], ["chat", false]], "voice channels are not listed");
+  assert.deepEqual(g.channels.map((c) => [c.name, c.target, c.presence.history, c.parent_id]), [
+    ["art", true, true, "1551446881308250500"],
+    ["chat", false, false, "1551446881308250500"],
+  ], "voice channels are not listed; chat hides its history from @everyone");
+  assert.deepEqual(g.categories.map((c) => c.name), ["Text Channels"]);
+  const nameRow = rows.find((x) => x.f === "b.png");
+  assert.equal(nameRow.xok, true, "only the name ground fails, so a merge can bring it back");
+  assert.equal(nameRow.nameOk, false);
+});
+
+test("targets come from the panel's targets.json", async (t) => {
+  const dir = await tmp(t);
+  await fs.writeFile(path.join(dir, "targets.json"), JSON.stringify({ targets: [CH2] }));
+  await indexOnce({ http: http(guildDiscord([])), stateDir: dir, prefixes: { [GUILD]: "aichan" }, channels: [], selfId: SELF, log: () => {} });
+  const g = JSON.parse(await fs.readFile(path.join(dir, "guilds.json"), "utf8"));
+  assert.deepEqual(g.channels.map((c) => [c.name, c.target]), [["art", false], ["chat", true]]);
+});
+
+test("a merged account is posted under its master's name", () => {
+  const masters = [{ user_id: "111", username: "selphdestruct", subs: [{ user_id: "222", username: "a.b" }] }];
+  assert.equal(creatorNameFor(masters, { id: "222", username: "a.b" }), "selphdestruct");
+  assert.equal(creatorNameFor(masters, { id: "111", username: "selphdestruct" }), "selphdestruct");
+  assert.equal(creatorNameFor(masters, { id: "333", username: "other" }), "other");
+});
+
+test("permissions follow Discord's order: @everyone, then roles, then the member, with ADMINISTRATOR over all", () => {
+  const guild = { id: "g", owner_id: "owner", roles: [{ id: "g", permissions: EVERYONE_PERMS }, { id: "r1", permissions: "0" }, { id: "adm", permissions: String(1 << 3) }] };
+  const me = { user: { id: "me" }, roles: ["r1"] };
+  const deniedForEveryone = { permission_overwrites: [{ id: "g", type: 0, allow: "0", deny: VIEW }] };
+  assert.equal(perms.presenceIn(guild, me, deniedForEveryone).view, false);
+  const roleAllows = { permission_overwrites: [{ id: "g", type: 0, allow: "0", deny: VIEW }, { id: "r1", type: 0, allow: VIEW, deny: "0" }] };
+  assert.equal(perms.presenceIn(guild, me, roleAllows).view, true, "a role allow beats an @everyone deny");
+  const memberDenies = { permission_overwrites: [{ id: "r1", type: 0, allow: SEND, deny: "0" }, { id: "me", type: 1, allow: "0", deny: SEND }] };
+  assert.equal(perms.presenceIn(guild, me, memberDenies).send, false, "the member's own deny comes last");
+  assert.equal(perms.presenceIn(guild, { user: { id: "me" }, roles: ["adm"] }, deniedForEveryone).view, true, "ADMINISTRATOR overrides every overwrite");
+  assert.equal(perms.presenceIn(guild, { user: { id: "owner" }, roles: [] }, deniedForEveryone).history, true, "the owner has everything");
 });
 
 test("a second index pass lists only what is new", async (t) => {

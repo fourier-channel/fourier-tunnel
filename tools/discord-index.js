@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 "use strict";
 
-// Build or extend the plan: every attachment in each assigned channel.
+// Build or extend the plan: every attachment in every channel she can read.
 //
 //   node --env-file=<file holding DISCORD_BOT_TOKEN> tools/discord-index.js \
 //     --state-dir <dir> --prefix <guild id>=<prefix> [--prefix ...] \
-//     --channel <id> [--channel <id> ...] [--ua-url <url>]
+//     [--channel <id> ...] [--ua-url <url>]
 //
-// Lists message pages only; downloads nothing. Re-running continues from where
+// Indexes every channel she can read, target or not, so targets can be chosen
+// from the counts. Lists message pages only; downloads nothing. Re-running continues from where
 // each channel's index stopped. Exit 0 every channel indexed, 3 a channel
 // stopped (named above), 1 a fatal stop, 2 usage.
 
@@ -39,7 +40,7 @@ async function main() {
   }
   if (!o.stateDir) usage("--state-dir is required");
   if (!Object.keys(o.prefixes).length) usage("name each server with --prefix <guild id>=<prefix>");
-  if (!o.channels.length) usage("name each assigned channel with --channel; there is no wildcard");
+  // --channel adds scrape targets; the panel's targets.json is the usual source.
   const http = new acq.DiscordHttp({
     token: (process.env.DISCORD_BOT_TOKEN || "").trim(),
     ua: acq.userAgent(o.uaUrl || process.env.DISCORD_UA_URL || "https://github.com/fourier-channel/fourier-tunnel", pkg.version),
@@ -52,7 +53,8 @@ async function main() {
     if (x.stopped) { partial = true; console.log(`  #${x.name}: STOPPED: ${x.stopped}`); continue; }
     console.log(`  #${x.name} (${x.channel}): ${x.messages} new messages, ${x.rows} attachments listed, ${x.inScope} in scope`);
   }
-  for (const id of r.unseenAssigned) { partial = true; console.log(`  assigned channel ${id} is not in any configured server's channel list`); }
+  for (const c of r.channels.filter((x) => !x.presence.history)) console.log(`  #${c.name} (${c.id}): not indexed -- she can see it but cannot read its history`);
+  for (const id of r.unseenTargets) { partial = true; console.log(`  scrape target ${id} is not in any configured server's channel list (deleted, or she cannot view it)`); }
   process.exit(partial ? 3 : 0);
 }
 

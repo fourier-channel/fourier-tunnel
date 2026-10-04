@@ -5,10 +5,10 @@
 //
 //   node tools/discord-speak.js --state-dir <dir> --init        (once)
 //   node --env-file=<file holding DISCORD_BOT_TOKEN> tools/discord-speak.js \
-//     --state-dir <dir> --channel <id> [--channel <id> ...] [--every <seconds>]
+//     --state-dir <dir> [--channel <id> ...] [--every <seconds>]
 //
-// Without --every it sends what is waiting and exits. --channel is the set she
-// may speak in (her assigned channels). Exit 0 all sent or none waiting, 3 a
+// Without --every it sends what is waiting and exits. Without --channel she may
+// speak wherever her permissions include Send Messages (guilds.json). Exit 0 all sent or none waiting, 3 a
 // message failed or she is paused with messages waiting, 1 a fatal stop, 2 usage.
 
 const path = require("node:path");
@@ -40,14 +40,15 @@ async function main() {
     console.log(`created ${d.root} (staging/ ready/ sent/ failed/)`);
     return;
   }
-  if (!o.channels.length) usage("name each channel she may speak in with --channel");
+  // No --channel: every channel her permissions let her post in, re-read each pass.
   const http = new acq.DiscordHttp({
     token: (process.env.DISCORD_BOT_TOKEN || "").trim(),
     ua: acq.userAgent(process.env.DISCORD_UA_URL || "https://github.com/fourier-channel/fourier-tunnel", pkg.version),
     spacingMs: 250,
   });
   const once = async () => {
-    const r = await speak.processOutbox({ http, stateDir: o.stateDir, channels: o.channels });
+    const channels = o.channels.length ? o.channels : await speak.speakableChannels(o.stateDir);
+    const r = await speak.processOutbox({ http, stateDir: o.stateDir, channels });
     if (r.paused && r.waiting) console.log(`paused, ${r.waiting} waiting`);
     return r.failed.length > 0 || (r.paused && r.waiting > 0);
   };

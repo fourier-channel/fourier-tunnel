@@ -64,6 +64,21 @@ async function readSpeech(stateDir) {
   }
 }
 
+/**
+ * Where she may speak when no list is given: every channel in a configured
+ * server where her permissions include Send Messages (guilds.json, refreshed by
+ * every index pass). Free speech is what she says; where is still bounded by
+ * where she is.
+ */
+async function speakableChannels(stateDir) {
+  try {
+    const g = JSON.parse(await fs.readFile(path.join(stateDir, "guilds.json"), "utf8"));
+    return (g.channels || []).filter((c) => c.presence && c.presence.send).map((c) => c.id);
+  } catch {
+    return [];
+  }
+}
+
 async function writeAtomic(file, value) {
   const tmp = `${file}.${process.pid}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(value, null, 2) + "\n");
@@ -107,7 +122,7 @@ async function processOutbox(opts) {
     }
     const text = typeof entry.text === "string" ? entry.text : "";
     let refusal = null;
-    if (!allowed.has(entry.channel)) refusal = `channel ${JSON.stringify(entry.channel)} is not one she is assigned to`;
+    if (!allowed.has(entry.channel)) refusal = `channel ${JSON.stringify(entry.channel)} is not one she can speak in (no Send Messages there, or not in a configured server)`;
     else if (!text.trim()) refusal = "the message is empty";
     else if (text.length > MAX_LEN) refusal = `the message is ${text.length} characters; Discord allows ${MAX_LEN}`;
     if (refusal) {
@@ -155,4 +170,4 @@ async function fail(d, name, entry, reason, now) {
   await fs.rm(path.join(d.ready, name), { force: true });
 }
 
-module.exports = { processOutbox, initOutbox, readSpeech, dirs, MAX_LEN };
+module.exports = { processOutbox, initOutbox, readSpeech, speakableChannels, dirs, MAX_LEN };
