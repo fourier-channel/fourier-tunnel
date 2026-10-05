@@ -104,7 +104,8 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
   if (plan.action === "refuse") return { refused: `${JSON.stringify(att.filename)} was not posted: ${plan.reason}` };
   if (plan.action === "duplicate") {
     log(`${permalink}: already on the booru as post #${plan.post && plan.post.id} (${plan.via} bytes); not reposted`);
-    return { alreadyQueued: true };
+    // The post it already is, so the panel can link and show it.
+    return { alreadyQueued: true, ...(plan.post && plan.post.id ? { postId: plan.post.id } : {}), ...(plan.post && plan.post.md5 ? { md5: plan.post.md5 } : {}) };
   }
 
   let uploadMediaAssetId;
@@ -146,7 +147,7 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
   } catch (err) {
     if (err instanceof BooruDuplicate) {
       log(`${permalink}: the booru already holds these bytes as post #${err.duplicateOf}; not reposted`);
-      return { alreadyQueued: true };
+      return { alreadyQueued: true, ...(err.duplicateOf ? { postId: Number(err.duplicateOf) } : {}), md5: plan.upload.md5 };
     }
     if (err instanceof BooruRefusal && err.status === 422 && err.reason === "unpostable") {
       return { refused: `the booru holds these bytes (md5 ${plan.upload.md5}) under a post this account cannot see, deleted or jailed; not reposted` };
@@ -184,7 +185,7 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
     log(`[tag-hub] recordTagSources failed for post #${post.id}: ${err.message}`);
   }
   log(`post #${post.id} from ${permalink} as ${posterTag} (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta)`);
-  return { delivered: true, postId: post.id, stripped: Object.keys(fields).length > 0 };
+  return { delivered: true, postId: post.id, md5: plan.upload.md5, stripped: Object.keys(fields).length > 0 };
 }
 
 module.exports = { booruDeliverer, postAttachment, POSTABLE };

@@ -89,7 +89,9 @@ test("a Discord image is posted with the guild's creator tag and its permalink a
   const f = fakeBooru();
   const { d, categorised, logs } = deliverer(f.booru);
   const r = await d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() });
-  assert.deepEqual(r, { delivered: true, postId: 42, stripped: false });
+  const { md5, ...rest } = r;
+  assert.deepEqual(rest, { delivered: true, postId: 42, stripped: false });
+  assert.match(md5, /^[0-9a-f]{32}$/, "the post's md5, for the panel's thumbnail");
   // The service labels each line "[discord] " itself; a label here doubled it.
   assert.ok(logs.some((l) => l.startsWith("post #42 from ")), logs.join("\n"));
   assert.ok(!logs.some((l) => l.startsWith("[discord]")), logs.join("\n"));
@@ -126,9 +128,9 @@ test("generation data is stripped from the upload and filed privately as source 
 });
 
 test("an image already on the booru is not uploaded again", async () => {
-  const f = fakeBooru({ findPostByMd5: async () => ({ id: 9 }) });
+  const f = fakeBooru({ findPostByMd5: async () => ({ id: 9, md5: "a".repeat(32) }) });
   const r = await deliverer(f.booru).d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() });
-  assert.deepEqual(r, { alreadyQueued: true });
+  assert.deepEqual(r, { alreadyQueued: true, postId: 9, md5: "a".repeat(32) }, "the post it already is, so the panel can link it");
   assert.equal(f.named("createUploadFromBytes").length, 0);
 });
 
@@ -172,7 +174,9 @@ test("a hidden duplicate and a named duplicate are both final, never retried", a
   assert.match(r1.refused, /cannot see, deleted or jailed/);
   const named = fakeBooru({ createPost: async () => { throw new BooruDuplicate("dup", 422, 77); } });
   const r2 = await deliverer(named.booru).d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() });
-  assert.deepEqual(r2, { alreadyQueued: true });
+  assert.equal(r2.alreadyQueued, true);
+  assert.equal(r2.postId, 77, "the post the booru named, so the panel can link it");
+  assert.match(r2.md5, /^[0-9a-f]{32}$/);
 });
 
 test("a tagger outage still posts, with the creator tag", async () => {

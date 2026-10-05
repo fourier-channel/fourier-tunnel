@@ -301,7 +301,7 @@ function md5(buf) {
  * fourier-sampling's drop directory for its drain.
  *
  * A deliverer is { name, prepare(), accepts(att) -> refusal|null,
- * deliver({channel, msg, att, bytes}) }. deliver returns {delivered} |
+ * deliver({channel, msg, att, bytes}) }. deliver returns {delivered, postId?, md5?} |
  * {alreadyQueued} | {refused: reason}, throws Transient when the message must
  * be retried next cycle, and DeliveryUnavailable when nothing can be. The other
  * deliverer is discordPost.js, which posts to the booru the way the Matrix path
@@ -459,6 +459,8 @@ async function acquireChannel(ctx, channelId) {
             a: att.id, m: msg.id, c: channel.id, g: channel.guild_id || null, u: msg.author ? msg.author.id : null,
             st: r.refused ? "refused" : r.delivered ? "posted" : "held",
             ...(r.postId ? { p: r.postId } : {}),
+            // The booru post's md5: the panel's thumbnail comes from it.
+            ...(r.md5 ? { h: r.md5 } : {}),
             ...(r.refused ? { why: r.refused } : {}),
           });
         }

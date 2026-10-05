@@ -343,3 +343,15 @@ test("contentWithheld: only a person's genuinely empty message counts", () => {
   assert.equal(acq.contentWithheld({ type: 7, author: { id: "1" }, content: "" }), false, "a join notice is a system message, empty by nature");
   assert.equal(acq.contentWithheld({ type: 0, author: { id: "1" }, content: "", message_snapshots: [{}] }), false, "a forward carries its content in a snapshot");
 });
+
+test("each outcome row records the booru post and its md5, which the panel's thumbnails come from", async (t) => {
+  const img = png();
+  const msgs = [1, 2].map((n) => message(n, { attachments: [attachment(n, `pic${n}.png`, img)] }));
+  const cdn = Object.fromEntries([1, 2].map((n) => [`/attachments/${n}/pic${n}.png`, img]));
+  const r = await rig(t, fakeDiscord({ messages: { [CH]: msgs }, cdn }));
+  const outcomes = [{ delivered: true, postId: 5, md5: "b".repeat(32) }, { alreadyQueued: true, postId: 6, md5: "c".repeat(32) }];
+  const deliver = { name: "fake", prepare: async () => {}, accepts: () => null, deliver: async () => outcomes.shift() };
+  await r.run({ deliver });
+  const rows = (await fs.readFile(path.join(r.stateDir, "acquired.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((x) => [x.st, x.p, x.h]), [["posted", 5, "b".repeat(32)], ["held", 6, "c".repeat(32)]]);
+});
