@@ -11,7 +11,7 @@ const os = require("node:os");
 const path = require("node:path");
 const acq = require("./discordAcquire");
 const speak = require("./discordSpeak");
-const { indexOnce, creatorNameFor } = require("./discordIndex");
+const { indexOnce, creatorNameFor, readServers, seedServers, acquirable } = require("./discordIndex");
 const perms = require("./discordPerms");
 
 const CH = "1551446881308250114";
@@ -176,10 +176,12 @@ const HISTORY = String(1 << 16);
 const SEND = String(1 << 11);
 const EVERYONE_PERMS = String((1 << 10) | (1 << 11) | (1 << 16));
 
-function guildDiscord(messages) {
+function guildDiscord(messages, { memberOf = [{ id: GUILD, name: "AIchan" }], broken = [] } = {}) {
   const fetchImpl = async (url) => {
     const u = new URL(url);
     const p = u.pathname.replace(/^\/api\/v10/, "");
+    if (p === "/users/@me/guilds") return res(200, memberOf);
+    if (broken.some((g) => p.startsWith(`/guilds/${g}`))) return res(403, {});
     if (p === `/guilds/${GUILD}`) return res(200, { id: GUILD, name: "AIchan", owner_id: "1", roles: [{ id: GUILD, permissions: EVERYONE_PERMS }, { id: ROLE_BOT, permissions: "0" }] });
     if (p === `/guilds/${GUILD}/members/${SELF}`) return res(200, { user: { id: SELF }, roles: [ROLE_BOT] });
     if (p === `/guilds/${GUILD}/channels`) return res(200, [
@@ -224,7 +226,7 @@ test("the index lists every attachment in an assigned channel, each in scope or 
   assert.match(why["c.png"], /bot or webhook/);
   assert.match(why["d.png"], /her own message/);
   const g = JSON.parse(await fs.readFile(path.join(dir, "guilds.json"), "utf8"));
-  assert.deepEqual(g.guilds, [{ id: GUILD, name: "AIchan", prefix: "aichan" }]);
+  assert.deepEqual(g.guilds, [{ id: GUILD, name: "AIchan", label: null, prefix: "aichan" }]);
   assert.deepEqual(g.channels.map((c) => [c.name, c.target, c.presence.history, c.parent_id]), [
     ["art", true, true, "1551446881308250500"],
     ["chat", false, false, "1551446881308250500"],
@@ -241,6 +243,60 @@ test("targets come from the panel's targets.json", async (t) => {
   await indexOnce({ http: http(guildDiscord([])), stateDir: dir, prefixes: { [GUILD]: "aichan" }, channels: [], selfId: SELF, log: () => {} });
   const g = JSON.parse(await fs.readFile(path.join(dir, "guilds.json"), "utf8"));
   assert.deepEqual(g.channels.map((c) => [c.name, c.target]), [["art", false], ["chat", true]]);
+});
+
+const OTHER = "1551446880385245111";
+const servers = async (dir, list) => fs.writeFile(path.join(dir, "servers.json"), JSON.stringify({ servers: list }));
+
+test("servers come from the panel's servers.json: an uninvited one waits, an invited one nobody added is offered", async (t) => {
+  const dir = await tmp(t);
+  await servers(dir, [{ guild_id: GUILD, name: "AIchan (ours)", prefix: "aichan" }, { guild_id: OTHER, name: "Later", prefix: "later" }]);
+  const memberOf = [{ id: GUILD, name: "AIchan" }, { id: "1551446880385245222", name: "Somewhere new" }];
+  const r = await indexOnce({ http: http(guildDiscord([], { memberOf })), stateDir: dir, allowedPrefixes: new Set(["aichan_", "later_"]), selfId: SELF, log: () => {} });
+  assert.deepEqual(r.servers.map((x) => [x.guild_id, x.state]), [[GUILD, "indexed"], [OTHER, "awaiting_invite"]]);
+  const g = JSON.parse(await fs.readFile(path.join(dir, "guilds.json"), "utf8"));
+  assert.deepEqual(g.guilds.map((x) => [x.id, x.label, x.prefix]), [[GUILD, "AIchan (ours)", "aichan"]]);
+  assert.deepEqual(g.member_guilds.map((x) => x.name), ["AIchan", "Somewhere new"], "the panel offers the server she was invited to");
+});
+
+test("a prefix off the booru's list, or 41chan, is refused by name; an unread list indexes nothing", async (t) => {
+  const dir = await tmp(t);
+  await servers(dir, [{ guild_id: GUILD, prefix: "aichan" }, { guild_id: OTHER, prefix: "41chan" }]);
+  const memberOf = [{ id: GUILD, name: "AIchan" }, { id: OTHER, name: "Other" }];
+  let r = await indexOnce({ http: http(guildDiscord([], { memberOf })), stateDir: dir, allowedPrefixes: new Set(["4chan_", "41chan_"]), selfId: SELF, log: () => {} });
+  assert.equal(r.servers[0].state, "refused");
+  assert.match(r.servers[0].why, /aichan_ is not on the booru's creator-prefix list/);
+  assert.match(r.servers[1].why, /never 41chan or 4chan/);
+  assert.deepEqual(r.guilds, []);
+  r = await indexOnce({ http: http(guildDiscord([], { memberOf })), stateDir: dir, allowedPrefixes: null, selfId: SELF, log: () => {} });
+  assert.equal(r.servers[0].state, "waiting");
+  assert.deepEqual(r.guilds, [], "nothing is indexed under a prefix that cannot be confirmed");
+});
+
+test("one server that cannot be read does not cost the others their pass", async (t) => {
+  const dir = await tmp(t);
+  await servers(dir, [{ guild_id: OTHER, prefix: "other" }, { guild_id: GUILD, prefix: "aichan" }]);
+  const memberOf = [{ id: GUILD, name: "AIchan" }, { id: OTHER, name: "Other" }];
+  const r = await indexOnce({ http: http(guildDiscord([], { memberOf, broken: [OTHER] })), stateDir: dir, allowedPrefixes: new Set(["aichan_", "other_"]), selfId: SELF, log: () => {} });
+  assert.deepEqual(r.servers.map((x) => [x.guild_id, x.state]), [[OTHER, "error"], [GUILD, "indexed"]]);
+  assert.deepEqual(r.guilds.map((x) => x.id), [GUILD]);
+});
+
+test("config.yaml's guilds seed servers.json once, and never overwrite the panel's list", async (t) => {
+  const dir = await tmp(t);
+  assert.equal(await seedServers(dir, { [GUILD]: "aichan" }), true);
+  assert.deepEqual((await readServers(dir)).map((x) => [x.guild_id, x.prefix, x.why]), [[GUILD, "aichan", null]]);
+  await servers(dir, [{ guild_id: OTHER, prefix: "other" }]);
+  assert.equal(await seedServers(dir, { [GUILD]: "aichan" }), false);
+  assert.deepEqual((await readServers(dir)).map((x) => x.guild_id), [OTHER]);
+});
+
+test("acquisition takes only targets on servers the index accepted", () => {
+  const doc = { guilds: [{ id: GUILD, prefix: "aichan" }], channels: [{ id: CH, guild_id: GUILD }, { id: CH2, guild_id: OTHER }] };
+  const r = acquirable(doc, new Set([CH, CH2, "1551446881308259999"]));
+  assert.deepEqual(r.channels, [CH], "a target on a removed or unjoined server, or no longer listed, is not read");
+  assert.equal(r.prefixMap.get(GUILD), "aichan");
+  assert.deepEqual(acquirable(null, new Set([CH])).channels, []);
 });
 
 test("a merged account is posted under its master's name", () => {

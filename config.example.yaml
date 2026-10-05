@@ -46,11 +46,14 @@ bridge:
 # enabled: false, nothing Discord runs. The token is DISCORD_BOT_TOKEN in .env,
 # never here. state_dir is shared with fourier-sampling's panel (FS_DISCORD_DIR
 # there): mount /var/lib/fourier-tunnel/discord at /discord in compose.
+# SERVERS ARE ADDED ON THE PANEL (sampling's discord page, "+ add server"),
+# which writes servers.json in state_dir; she re-reads it every pass and
+# fills a server in once she is invited. A server's prefix must be on the
+# booru's creator-prefix list (/creator_prefixes). `guilds` here is read only
+# to seed servers.json the first time it is created, then ignored.
 # discord:
 #   enabled: true
 #   state_dir: /discord
-#   guilds:                       # guild id: creator prefix (never 41chan or 4chan)
-#     "123456789012345678": aichan
 #   index_every_minutes: 5        # the panel's "refresh now" also runs one within seconds
 #   acquire_every_seconds: 120
 #   speak_every_seconds: 3

@@ -557,6 +557,7 @@ module.exports = {
   Transient,
   userAgent,
   snowflakeCompare,
+  isSnowflake,
   redactUrl,
   contentWithheld,
   readChannelState,

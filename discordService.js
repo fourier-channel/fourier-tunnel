@@ -3,7 +3,7 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const acq = require("./discordAcquire");
-const { indexOnce, readTargets, readCreators, creatorNameFor, takeIndexRequest } = require("./discordIndex");
+const { indexOnce, readTargets, readCreators, creatorNameFor, takeIndexRequest, readServers, seedServers, readJson, acquirable } = require("./discordIndex");
 const speak = require("./discordSpeak");
 const { booruDeliverer } = require("./discordPost");
 const { PresenceClient } = require("./discordPresence");
@@ -47,16 +47,12 @@ function startDiscord(deps) {
 
   const token = (process.env.DISCORD_BOT_TOKEN || "").trim();
   const stateDir = dc.state_dir;
-  const prefixes = dc.guilds || {};
+  // THE SERVERS ARE THE PANEL'S (servers.json in state_dir, operator
+  // 2026-10-05), re-read every pass. config.yaml's discord.guilds only seeds
+  // that file the first time, so an older deployment keeps its servers.
   const problems = [];
   if (!token) problems.push("DISCORD_BOT_TOKEN is not set in the tunnel's .env");
   if (!stateDir) problems.push("discord.state_dir is not set (the directory shared with the panel; /discord in the container)");
-  if (!Object.keys(prefixes).length) problems.push("discord.guilds names no server (guild id: creator prefix, e.g. aichan)");
-  for (const [g, p] of Object.entries(prefixes)) {
-    if (!/^\d{17,20}$/.test(g) || !/^[a-z0-9]{1,16}$/.test(String(p)) || p === "41chan" || p === "4chan") {
-      problems.push(`discord.guilds entry ${g}: ${p} is not a guild id and a legal creator prefix (never 41chan or 4chan)`);
-    }
-  }
   if (problems.length) {
     say("error", `NOT STARTED -- ${problems.join("; ")}. The Matrix bridge runs as normal.`);
     return null;
@@ -112,12 +108,18 @@ function startDiscord(deps) {
   }
 
   const categorised = new Set();
+  let prefixMap = new Map();
+  // The booru's creator-prefix list as last read: null until it has been read.
+  let allowedPrefixes = null;
   const deliver = booruDeliverer({
     danbooru: deps.danbooru,
     autotag: deps.autotag,
     extractCreatorTagsFromFields: deps.extractCreatorTagsFromFields,
     config,
-    prefixFor: (guildId) => prefixes[guildId] || null,
+    // The servers that passed the last index pass's checks (configured, on
+    // the booru's prefix list, and she is a member), refreshed before every
+    // acquisition pass.
+    prefixFor: (guildId) => prefixMap.get(guildId) || null,
     creatorFor: async (author) => creatorNameFor(await readCreators(stateDir), author),
     categoriseArtist: async (tag) => {
       if (!tag || categorised.has(tag)) return;
@@ -134,9 +136,15 @@ function startDiscord(deps) {
     try {
       await fs.mkdir(stateDir, { recursive: true });
       await speak.initOutbox(stateDir);
+      if (await seedServers(stateDir, dc.guilds)) {
+        say("warn", "copied config.yaml discord.guilds into servers.json; the panel manages servers from now on and that config key is ignored -- remove it");
+      } else if (dc.guilds && Object.keys(dc.guilds).length) {
+        say("warn", "config.yaml discord.guilds is ignored: servers are managed on the panel (servers.json) -- remove the key");
+      }
       const me = await http.getJson("/users/@me", "the bot's own user");
       selfId = me.id;
-      say("log", `started as ${me.username} (${me.id}) for ${Object.keys(prefixes).length} server(s); state in ${stateDir}`);
+      const servers = (await readServers(stateDir)) || [];
+      say("log", `started as ${me.username} (${me.id}) for ${servers.length} configured server(s); state in ${stateDir}`);
     } catch (err) {
       if (err instanceof acq.AuthFailed) return stopAll(err.message);
       say("error", `NOT STARTED -- could not reach Discord or the state directory: ${err.message}`);
@@ -150,7 +158,13 @@ function startDiscord(deps) {
       if (!indexing) {
         indexing = (async () => {
           try {
-            const r = await indexOnce({ http, stateDir, prefixes, channels: [], selfId, log: (m) => say("log", m) });
+            try {
+              allowedPrefixes = new Set(await deps.danbooru.creatorPrefixes());
+            } catch (err) {
+              say("warn", `could not read the booru's creator-prefix list (${err.message}); ${allowedPrefixes ? "using the last one read" : "no server is indexed until it can be read"}`);
+            }
+            const r = await indexOnce({ http, stateDir, allowedPrefixes, channels: [], selfId, log: (m) => say("log", m) });
+            for (const x of r.servers) if (x.state !== "indexed") say("log", `server ${x.guild_id} (${x.prefix}_): ${x.state} -- ${x.why}`);
             const rows = r.results.reduce((s, x) => s + (x.rows || 0), 0);
             if (rows || why === "requested") say("log", `index (${why}): ${rows} new attachment(s) listed across ${r.results.length} channel(s)`);
           } finally {
@@ -166,7 +180,11 @@ function startDiscord(deps) {
     });
 
     loop("acquire", (dc.acquire_every_seconds || 120) * 1000, 60_000, async () => {
-      const channels = [...(await readTargets(stateDir))];
+      // Only targets on servers the last index pass accepted: a server removed
+      // on the panel, refused, or not yet joined collects nothing.
+      const pick = acquirable(await readJson(path.join(stateDir, "guilds.json"), { guilds: [], channels: [] }), await readTargets(stateDir));
+      prefixMap = pick.prefixMap;
+      const { channels } = pick;
       if (!channels.length) return;
       const { results } = await acq.acquireOnce({
         http, deliver, channels, stateDir, selfId,

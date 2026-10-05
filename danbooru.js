@@ -124,6 +124,16 @@ class DanbooruClient {
   // A post as THIS account sees it: the post, or null when the booru answers
   // 404 -- no such post, or one hidden from this account (deleted, jailed),
   // which the booru answers identically on purpose. Anything else throws.
+  // The booru's creator-prefix list (chanbooru /creator_prefixes.json, live
+  // config there): the prefixes that are locked creator provenance, each with
+  // its trailing underscore. A Discord server posts only under one of these.
+  async creatorPrefixes() {
+    const resp = await this._client().get("/creator_prefixes.json");
+    const list = resp.data && Array.isArray(resp.data.prefixes) ? resp.data.prefixes : null;
+    if (!list) throw new Error("the booru's /creator_prefixes.json carried no prefixes list");
+    return list.map((e) => String(e.prefix));
+  }
+
   async findVisiblePost(postId) {
     const resp = await this._client().get(`/posts/${postId}.json`, { validateStatus: () => true });
     if (resp.status === 404) return null;

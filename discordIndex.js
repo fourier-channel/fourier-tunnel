@@ -4,7 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const poster = require("./poster");
 const { POSTABLE } = require("./discordPost");
-const { snowflakeCompare, ChannelRefused, Transient } = require("./discordAcquire");
+const { snowflakeCompare, isSnowflake, ChannelRefused, Transient } = require("./discordAcquire");
 const { presenceIn } = require("./discordPerms");
 
 // THE PLAN: every attachment we intend to acquire, listed before we acquire it.
@@ -92,6 +92,56 @@ async function readTargets(stateDir) {
   return new Set(Array.isArray(t.targets) ? t.targets.map(String) : []);
 }
 
+/**
+ * THE SERVERS SHE WORKS IN: servers.json, written by the panel (operator,
+ * 2026-10-05: "adding/changing a server isn't a code change, it's a config
+ * change"). Each entry is { guild_id, name, prefix } -- the prefix without its
+ * underscore, as tunnel builds tags (aichan -> aichan_<username>). Re-read on
+ * every pass. Null when the file does not exist yet (seedServers fills it).
+ */
+const SERVERS_FILE = "servers.json";
+const legalPrefix = (p) => /^[a-z0-9]{1,16}$/.test(p) && p !== "41chan" && p !== "4chan";
+
+async function readServers(stateDir) {
+  const doc = await readJson(path.join(stateDir, SERVERS_FILE), null);
+  if (!doc) return null;
+  return (Array.isArray(doc.servers) ? doc.servers : []).map((s) => {
+    const id = String((s && s.guild_id) || "");
+    const prefix = String((s && s.prefix) || "");
+    const why = !isSnowflake(id) ? `${JSON.stringify(id)} is not a Discord server id`
+      : !legalPrefix(prefix) ? `prefix ${JSON.stringify(prefix)} is not a legal creator prefix (lowercase letters and digits; never 41chan or 4chan)`
+        : null;
+    return { guild_id: id, name: s && s.name ? String(s.name) : null, prefix, why };
+  });
+}
+
+/**
+ * The one-time move from config.yaml's discord.guilds to servers.json, so a
+ * deployment that configured servers there keeps them. Written only when
+ * servers.json does not exist; after that the panel owns the list and the
+ * config key is ignored. Returns whether it wrote.
+ */
+async function seedServers(stateDir, guilds) {
+  if (!guilds || !Object.keys(guilds).length) return false;
+  if ((await readServers(stateDir)) !== null) return false;
+  const at = new Date().toISOString();
+  const servers = Object.entries(guilds).map(([guild_id, prefix]) => ({ guild_id: String(guild_id), name: null, prefix: String(prefix), added_at: at }));
+  await writeJsonAtomic(path.join(stateDir, SERVERS_FILE), { servers, at, seeded_from: "config.yaml discord.guilds" });
+  return true;
+}
+
+/**
+ * What an acquisition pass may collect: the targets on servers the last index
+ * pass accepted (guilds.json's guilds -- configured, prefix on the booru's
+ * list, and she is a member). A server removed on the panel, refused, or not
+ * yet joined collects nothing, whatever targets.json still names.
+ */
+function acquirable(guildsDoc, targets) {
+  const prefixMap = new Map(((guildsDoc && guildsDoc.guilds) || []).map((g) => [g.id, g.prefix]));
+  const live = new Set(((guildsDoc && guildsDoc.channels) || []).filter((c) => prefixMap.has(c.guild_id)).map((c) => c.id));
+  return { prefixMap, channels: [...targets].filter((id) => live.has(id)) };
+}
+
 /** The panel's merges. Re-read on every call. */
 async function readCreators(stateDir) {
   const c = await readJson(path.join(stateDir, "creators.json"), { masters: [] });
@@ -145,25 +195,54 @@ async function refreshGuilds(ctx) {
   const guilds = [];
   const categories = [];
   const channels = [];
-  for (const [guildId, prefix] of Object.entries(ctx.prefixes)) {
-    const g = await ctx.http.getJson(`/guilds/${guildId}`, `server ${guildId}`);
-    const member = await ctx.http.getJson(`/guilds/${guildId}/members/${ctx.selfId}`, `her membership of server ${guildId}`);
-    guilds.push({ id: guildId, name: g.name, prefix });
-    const list = await ctx.http.getJson(`/guilds/${guildId}/channels`, `the channel list of server ${guildId}`);
-    for (const ch of list) {
-      if (ch.type === 4) {
-        categories.push({ id: ch.id, guild_id: guildId, name: ch.name, position: ch.position ?? 0 });
-        continue;
+  // Every server she is a member of, configured or not: an invitation shows
+  // up here, which is how the panel offers a server nobody has typed in yet.
+  const mine = await ctx.http.getJson("/users/@me/guilds", "the servers she is in");
+  const memberGuilds = (Array.isArray(mine) ? mine : []).map((g) => ({ id: String(g.id), name: g.name }));
+  const memberIds = new Set(memberGuilds.map((g) => g.id));
+  // What became of each configured server this pass, for the panel.
+  const servers = [];
+  for (const s of ctx.servers) {
+    const row = { guild_id: s.guild_id, name: s.name, prefix: s.prefix, state: "indexed", why: null };
+    servers.push(row);
+    if (s.why) { Object.assign(row, { state: "refused", why: s.why }); continue; }
+    if (ctx.allowedPrefixes === null) {
+      Object.assign(row, { state: "waiting", why: "the booru's creator-prefix list could not be read, so no prefix can be confirmed; tried again next pass" });
+      continue;
+    }
+    if (!ctx.allowedPrefixes.has(`${s.prefix}_`)) {
+      Object.assign(row, { state: "refused", why: `${s.prefix}_ is not on the booru's creator-prefix list, so its tags would be neither locked nor a known provenance. Fix: add it to the list (/creator_prefixes) or choose a listed prefix` });
+      continue;
+    }
+    if (!memberIds.has(s.guild_id)) {
+      Object.assign(row, { state: "awaiting_invite", why: "she is not a member of this server yet; invite her and it fills in on the next pass" });
+      continue;
+    }
+    // One server failing to read never costs the others their pass.
+    try {
+      const g = await ctx.http.getJson(`/guilds/${s.guild_id}`, `server ${s.guild_id}`);
+      const member = await ctx.http.getJson(`/guilds/${s.guild_id}/members/${ctx.selfId}`, `her membership of server ${s.guild_id}`);
+      const list = await ctx.http.getJson(`/guilds/${s.guild_id}/channels`, `the channel list of server ${s.guild_id}`);
+      guilds.push({ id: s.guild_id, name: g.name, label: s.name, prefix: s.prefix });
+      for (const ch of list) {
+        if (ch.type === 4) {
+          categories.push({ id: ch.id, guild_id: s.guild_id, name: ch.name, position: ch.position ?? 0 });
+          continue;
+        }
+        if (ch.type !== 0 && ch.type !== 5) continue;
+        channels.push({
+          id: ch.id, guild_id: s.guild_id, name: ch.name, position: ch.position ?? 0, parent_id: ch.parent_id || null,
+          presence: presenceIn(g, member, ch), target: targets.has(ch.id),
+        });
       }
-      if (ch.type !== 0 && ch.type !== 5) continue;
-      channels.push({
-        id: ch.id, guild_id: guildId, name: ch.name, position: ch.position ?? 0, parent_id: ch.parent_id || null,
-        presence: presenceIn(g, member, ch), target: targets.has(ch.id),
-      });
+    } catch (err) {
+      if (!(err instanceof ChannelRefused || err instanceof Transient)) throw err;
+      Object.assign(row, { state: "error", why: err.message });
+      ctx.log(`server ${s.guild_id}: ${err.message}`);
     }
   }
   const unseenTargets = [...targets].filter((id) => !channels.some((c) => c.id === id));
-  const doc = { at: new Date(ctx.now()).toISOString(), guilds, categories, channels, unseenTargets };
+  const doc = { at: new Date(ctx.now()).toISOString(), guilds, categories, channels, unseenTargets, servers, member_guilds: memberGuilds };
   await writeJsonAtomic(path.join(ctx.stateDir, "guilds.json"), doc);
   return doc;
 }
@@ -225,11 +304,17 @@ async function indexChannel(ctx, channel, guild) {
  * she can read. A channel that cannot be read is reported and the rest carry on.
  */
 async function indexOnce(opts) {
+  // The servers: given (opts.servers), or read from servers.json, or -- for
+  // the hand-run tool -- built from a guild id -> prefix map.
+  let servers = opts.servers || (await readServers(opts.stateDir));
+  if (!servers && opts.prefixes) servers = Object.entries(opts.prefixes).map(([guild_id, prefix]) => ({ guild_id, name: null, prefix, why: legalPrefix(prefix) ? null : `prefix ${JSON.stringify(prefix)} is not legal` }));
   const ctx = {
-    http: opts.http, stateDir: opts.stateDir, prefixes: opts.prefixes || {}, channels: opts.channels || [],
+    http: opts.http, stateDir: opts.stateDir, servers: servers || [], channels: opts.channels || [],
+    // A Set of listed prefixes ("aichan_"), or null when the list could not
+    // be read; undefined (a caller that does not check) allows every legal one.
+    allowedPrefixes: opts.allowedPrefixes === undefined ? new Set((servers || []).map((x) => `${x.prefix}_`)) : opts.allowedPrefixes,
     selfId: opts.selfId || null, now: opts.now || (() => Date.now()), log: opts.log || ((m) => console.log(m)),
   };
-  if (!Object.keys(ctx.prefixes).length) throw new Error("no servers configured: give each a creator prefix (guild id -> prefix)");
   if (!ctx.selfId) throw new Error("indexOnce needs selfId (the bot's user id) to read its own permissions");
   await fs.mkdir(path.join(ctx.stateDir, INDEX_DIR), { recursive: true });
   const doc = await refreshGuilds(ctx);
@@ -247,7 +332,7 @@ async function indexOnce(opts) {
       throw err;
     }
   }
-  return { guilds: doc.guilds, channels: doc.channels, results, unseenTargets: doc.unseenTargets };
+  return { guilds: doc.guilds, channels: doc.channels, results, unseenTargets: doc.unseenTargets, servers: doc.servers };
 }
 
 /**
@@ -267,4 +352,4 @@ async function takeIndexRequest(stateDir) {
   }
 }
 
-module.exports = { indexOnce, refreshGuilds, indexChannel, scopeOf, nameFits, readTargets, readCreators, creatorNameFor, takeIndexRequest, INDEX_DIR };
+module.exports = { indexOnce, refreshGuilds, indexChannel, scopeOf, nameFits, readTargets, readCreators, creatorNameFor, takeIndexRequest, readServers, seedServers, readJson, legalPrefix, acquirable, INDEX_DIR, SERVERS_FILE };

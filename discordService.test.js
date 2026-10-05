@@ -41,7 +41,6 @@ test("a discord block missing its parts does not start, and names every missing 
     assert.match(line, /NOT STARTED/);
     assert.match(line, /DISCORD_BOT_TOKEN is not set/);
     assert.match(line, /state_dir is not set/);
-    assert.match(line, /never 41chan or 4chan/);
     assert.match(line, /The Matrix bridge runs as normal/);
   } finally {
     if (old !== undefined) process.env.DISCORD_BOT_TOKEN = old;
