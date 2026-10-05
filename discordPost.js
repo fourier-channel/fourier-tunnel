@@ -46,7 +46,8 @@ function extOf(filename) {
  *         config, prefixFor(guildId) -> prefix|null, creatorFor(author) -> name, log }
  */
 function booruDeliverer(deps) {
-  const log = deps.log || ((m) => console.log(m));
+  // The caller labels the lines: the service prefixes "[discord] " itself.
+  const log = deps.log || ((m) => console.log(`[discord] ${m}`));
   return {
     name: "booru",
     async prepare() {},
@@ -102,7 +103,7 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
 
   if (plan.action === "refuse") return { refused: `${JSON.stringify(att.filename)} was not posted: ${plan.reason}` };
   if (plan.action === "duplicate") {
-    log(`[discord] ${permalink}: already on the booru as post #${plan.post && plan.post.id} (${plan.via} bytes); not reposted`);
+    log(`${permalink}: already on the booru as post #${plan.post && plan.post.id} (${plan.via} bytes); not reposted`);
     return { alreadyQueued: true };
   }
 
@@ -144,7 +145,7 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
     post = await danbooru.createPost(uploadMediaAssetId, { rating, tagString: publicTags.join(" "), source: permalink });
   } catch (err) {
     if (err instanceof BooruDuplicate) {
-      log(`[discord] ${permalink}: the booru already holds these bytes as post #${err.duplicateOf}; not reposted`);
+      log(`${permalink}: the booru already holds these bytes as post #${err.duplicateOf}; not reposted`);
       return { alreadyQueued: true };
     }
     if (err instanceof BooruRefusal && err.status === 422 && err.reason === "unpostable") {
@@ -182,7 +183,7 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
   } catch (err) {
     log(`[tag-hub] recordTagSources failed for post #${post.id}: ${err.message}`);
   }
-  log(`[discord] post #${post.id} from ${permalink} as ${posterTag} (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta)`);
+  log(`post #${post.id} from ${permalink} as ${posterTag} (${creatorOnly.length} creator[private] / ${autoOnly.length} auto / ${both.length} both / ${metaTags.length} meta)`);
   return { delivered: true, postId: post.id, stripped: Object.keys(fields).length > 0 };
 }
 

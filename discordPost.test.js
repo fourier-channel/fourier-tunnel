@@ -87,9 +87,12 @@ const att = (filename = "pic.png", contentType = "image/png") => ({ id: "155", f
 
 test("a Discord image is posted with the guild's creator tag and its permalink as the source", async () => {
   const f = fakeBooru();
-  const { d, categorised } = deliverer(f.booru);
+  const { d, categorised, logs } = deliverer(f.booru);
   const r = await d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() });
   assert.deepEqual(r, { delivered: true, postId: 42, stripped: false });
+  // The service labels each line "[discord] " itself; a label here doubled it.
+  assert.ok(logs.some((l) => l.startsWith("post #42 from ")), logs.join("\n"));
+  assert.ok(!logs.some((l) => l.startsWith("[discord]")), logs.join("\n"));
   const [post] = f.named("createPost");
   const { tagString, source } = post.args[1];
   assert.ok(tagString.split(" ").includes("aichan_selphdestruct"), tagString);
