@@ -22,6 +22,7 @@
 
 const BIT = {
   ADMINISTRATOR: 1n << 3n,
+  ADD_REACTIONS: 1n << 6n,
   VIEW_CHANNEL: 1n << 10n,
   SEND_MESSAGES: 1n << 11n,
   READ_MESSAGE_HISTORY: 1n << 16n,
@@ -84,6 +85,8 @@ function presenceIn(guild, member, channel) {
     view,
     history: view && Boolean(p & BIT.READ_MESSAGE_HISTORY),
     send: view && Boolean(p & BIT.SEND_MESSAGES),
+    // Reacting needs history as well as Add Reactions (Discord, Create Reaction).
+    react: view && Boolean(p & BIT.READ_MESSAGE_HISTORY) && Boolean(p & BIT.ADD_REACTIONS),
   };
 }
 

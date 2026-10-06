@@ -355,3 +355,18 @@ test("each outcome row records the booru post and its md5, which the panel's thu
   const rows = (await fs.readFile(path.join(r.stateDir, "acquired.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
   assert.deepEqual(rows.map((x) => [x.st, x.p, x.h]), [["posted", 5, "b".repeat(32)], ["held", 6, "c".repeat(32)]]);
 });
+
+test("she reacts once per message that put an image on the booru, never for one that saved nothing", async (t) => {
+  const img = png();
+  const msgs = [
+    message(1, { attachments: [attachment(1, "a.png", img), attachment(2, "b.png", img)] }),
+    message(2, { attachments: [attachment(3, "c.png", img)] }),
+  ];
+  const cdn = Object.fromEntries([[1, "a"], [2, "b"], [3, "c"]].map(([n, f]) => [`/attachments/${n}/${f}.png`, img]));
+  const r = await rig(t, fakeDiscord({ messages: { [CH]: msgs }, cdn }));
+  const outcomes = [{ delivered: true, postId: 1 }, { alreadyQueued: true, postId: 2 }, { refused: "the booru refused it" }];
+  const deliver = { name: "fake", prepare: async () => {}, accepts: () => null, deliver: async () => outcomes.shift() };
+  const reacted = [];
+  await r.run({ deliver, react: async (ch, msg) => { reacted.push(msg.id); } });
+  assert.deepEqual(reacted, [msgs[0].id], "message 1 once, for two saved images; message 2 saved nothing");
+});

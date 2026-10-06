@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const acq = require("./discordAcquire");
 const { indexOnce, readTargets, readCreators, creatorNameFor, takeIndexRequest, readServers, seedServers, readJson, acquirable } = require("./discordIndex");
+const { readReaction, makeReactor, refreshAppEmojis } = require("./discordReact");
 const speak = require("./discordSpeak");
 const { booruDeliverer } = require("./discordPost");
 const { PresenceClient } = require("./discordPresence");
@@ -164,6 +165,11 @@ function startDiscord(deps) {
               say("warn", `could not read the booru's creator-prefix list (${err.message}); ${allowedPrefixes ? "using the last one read" : "no server is indexed until it can be read"}`);
             }
             const r = await indexOnce({ http, stateDir, allowedPrefixes, channels: [], selfId, log: (m) => say("log", m) });
+            // Her application emojis, for the panel's reaction picker.
+            try { await refreshAppEmojis({ http, stateDir }); } catch (err) {
+              if (err instanceof acq.AuthFailed) throw err;
+              say("warn", `could not list her application emojis: ${err.message}`);
+            }
             for (const x of r.servers) if (x.state !== "indexed") say("log", `server ${x.guild_id} (${x.prefix}_): ${x.state} -- ${x.why}`);
             const rows = r.results.reduce((s, x) => s + (x.rows || 0), 0);
             if (rows || why === "requested") say("log", `index (${why}): ${rows} new attachment(s) listed across ${r.results.length} channel(s)`);
@@ -182,12 +188,14 @@ function startDiscord(deps) {
     loop("acquire", (dc.acquire_every_seconds || 120) * 1000, 60_000, async () => {
       // Only targets on servers the last index pass accepted: a server removed
       // on the panel, refused, or not yet joined collects nothing.
-      const pick = acquirable(await readJson(path.join(stateDir, "guilds.json"), { guilds: [], channels: [] }), await readTargets(stateDir));
+      const guildsDoc = await readJson(path.join(stateDir, "guilds.json"), { guilds: [], channels: [] });
+      const pick = acquirable(guildsDoc, await readTargets(stateDir));
       prefixMap = pick.prefixMap;
       const { channels } = pick;
+      const react = makeReactor({ http, stateDir, guildsDoc, emoji: await readReaction(stateDir), log: (m) => say("log", m) });
       if (!channels.length) return;
       const { results } = await acq.acquireOnce({
-        http, deliver, channels, stateDir, selfId,
+        http, deliver, channels, stateDir, selfId, react,
         startFrom: dc.start_from === "now" ? "now" : "beginning",
         log: (m) => say("log", m),
       });

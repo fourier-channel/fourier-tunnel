@@ -236,6 +236,48 @@ class DiscordHttp {
     }
   }
 
+  /**
+   * React to a message as the bot (Create Reaction). `emoji` is a standard
+   * emoji or "name:id" for one of her application emojis. NEVER THROWS: a
+   * reaction is a courtesy and must not stop collection, so every outcome is
+   * a value -- { ok: true } or { ok: false, why }. Only a 401 throws, as
+   * everywhere: a dead token stops everything.
+   */
+  async putReaction(channelId, messageId, emoji) {
+    const apiPath = `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`;
+    for (let attempt = 0; ; attempt++) {
+      await this.#wait();
+      this.requests++;
+      let res;
+      try {
+        res = await this.fetch(API + apiPath, { method: "PUT", headers: { Authorization: `Bot ${this.token}`, "User-Agent": this.ua, Accept: "application/json" } });
+      } catch (err) {
+        return { ok: false, why: `the reaction request did not complete: ${err && err.message ? err.message : String(err)}` };
+      }
+      this.#noteBucket(res);
+      if (res.status === 204 || res.status === 200) return { ok: true };
+      if (res.status === 401) throw new AuthFailed(`Discord answered 401 to a reaction: the bot token is wrong or has been reset. Fix: reset the token in the Discord developer portal and update DISCORD_BOT_TOKEN.`);
+      if (res.status === 429 && attempt < MAX_RETRIES) {
+        let retry = Number(res.headers.get("retry-after"));
+        try {
+          const b = await res.json();
+          if (b && Number.isFinite(Number(b.retry_after))) retry = Number(b.retry_after);
+        } catch { /* the header stands */ }
+        await this.sleep(Math.ceil((Number.isFinite(retry) && retry > 0 ? retry : 1) * 1000) + 50);
+        continue;
+      }
+      let code = null;
+      let message = "";
+      try { const b = await res.json(); code = b && b.code; message = (b && b.message) || ""; } catch { /* none */ }
+      const why = code === 10014 ? "Discord does not know that emoji (10014): choose another on the panel, or check it is one of her application emojis"
+        : code === 50013 ? "she lacks Add Reactions here (50013): grant it, or turn reactions off"
+          : code === 10008 ? "the message was deleted before she could react (10008)"
+            : code === 90001 ? "the author has blocked reactions from her (90001)"
+              : `Discord answered ${res.status}${code ? ` (${code})` : ""}${message ? `: ${message}` : ""}`;
+      return { ok: false, why, code };
+    }
+  }
+
   /** Download an attachment from its signed URL. No credential is sent to the CDN. */
   async download(url, expectedSize, maxBytes) {
     await this.#wait();
@@ -434,6 +476,7 @@ async function acquireChannel(ctx, channelId) {
         return out;
       }
       out.messages++;
+      let saved = 0;
       if (!(ctx.selfId && msg.author && msg.author.id === ctx.selfId)) {
         for (const att of msg.attachments || []) {
           let r;
@@ -451,6 +494,7 @@ async function acquireChannel(ctx, channelId) {
             out.refused.push({ message: msg.id, attachment: att.id, reason: r.refused });
             ctx.log(`#${channel.name}: refused attachment ${att.id} of message ${msg.id}: ${r.refused}`);
           } else {
+            if (r.delivered || r.alreadyQueued) saved++;
             if (r.delivered) out.delivered++;
             if (r.alreadyQueued) out.alreadyQueued++;
             if (r.stripped) out.stripped++;
@@ -465,6 +509,9 @@ async function acquireChannel(ctx, channelId) {
           });
         }
       }
+      // Her mark on a message whose images reached the booru (operator,
+      // 2026-10-06). Never throws; a reaction cannot stop collection.
+      if (saved && ctx.react) await ctx.react(channel, msg);
       state.after = msg.id;
       state.lastMessageAt = msg.timestamp;
       await writeChannelState(ctx.stateDir, channelId, state);
@@ -498,6 +545,7 @@ async function acquireOnce(opts) {
     selfId: opts.selfId || null,
     now: opts.now || (() => Date.now()),
     log: opts.log || ((m) => console.log(m)),
+    react: opts.react || null,
     // WHAT BECAME OF EACH ATTACHMENT, checked off against the plan
     // (discordIndex.js). One row per outcome: posted, held (already on the
     // booru or already queued) or refused with its reason. Append-only; a
