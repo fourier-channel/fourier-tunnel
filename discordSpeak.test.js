@@ -48,7 +48,7 @@ function fakeDiscord({ onPost } = {}) {
       if (onPost) { const r = await onPost(calls.filter((c) => c.method === "POST").length); if (r) return r; }
       const id = String(9000000000000000000n + BigInt(++n));
       const body = JSON.parse(init.body);
-      posted.set(id, { id, channel_id: m[1], content: body.content });
+      posted.set(id, { id, channel_id: m[1], content: body.content, sticker_items: (body.sticker_ids || []).map((x) => ({ id: x, name: "s", format_type: 1 })) });
       return res(200, posted.get(id));
     }
     if (m[2]) return posted.has(m[2]) ? res(200, posted.get(m[2])) : res(404, {});
@@ -74,6 +74,29 @@ test("a queued message is sent, read back, and filed as sent with its Discord id
   assert.ok(sent.message_id);
   assert.deepEqual(d.calls.find((c) => c.method === "POST").body.allowed_mentions, { parse: ["users"] }, "no @everyone, @here or role pings");
   assert.deepEqual(await fs.readdir(path.join(dir, "outbox", "ready")), []);
+});
+
+test("stickers are sent with the message, alone if need be, and read back as part of it", async (t) => {
+  const dir = await tmp(t);
+  await speak.initOutbox(dir);
+  const ST = ["1556000000000000881", "1556000000000000882"];
+  await queue(dir, "001.json", { id: "001", channel: CH, text: "", stickers: ST });
+  const d = fakeDiscord();
+  const r = await speak.processOutbox({ http: http(d.fetchImpl), stateDir: dir, channels: [CH], log: () => {} });
+  assert.equal(r.sent.length, 1);
+  assert.equal(r.sent[0].verified, true, "verified includes the stickers");
+  assert.deepEqual(d.calls.find((c) => c.method === "POST").body.sticker_ids, ST);
+});
+
+test("more than three stickers is refused before anything is sent", async (t) => {
+  const dir = await tmp(t);
+  await speak.initOutbox(dir);
+  await queue(dir, "001.json", { id: "001", channel: CH, text: "hi", stickers: ["1556000000000000881", "1556000000000000882", "1556000000000000883", "1556000000000000884"] });
+  const d = fakeDiscord();
+  const r = await speak.processOutbox({ http: http(d.fetchImpl), stateDir: dir, channels: [CH], log: () => {} });
+  assert.equal(r.failed.length, 1);
+  assert.equal(d.calls.filter((c) => c.method === "POST").length, 0);
+  assert.match(JSON.parse(await fs.readFile(path.join(dir, "outbox", "failed", "001.json"), "utf8")).reason, /at most 3 stickers/);
 });
 
 test("paused: nothing is sent and the queue waits", async (t) => {
@@ -186,6 +209,7 @@ function guildDiscord(messages, { memberOf = [{ id: GUILD, name: "AIchan" }], br
       return res(200, {
         id: GUILD, name: "AIchan", owner_id: "1", roles: [{ id: GUILD, permissions: EVERYONE_PERMS }, { id: ROLE_BOT, permissions: "0" }],
         emojis: [{ id: "1556000000000000777", name: "wave", animated: false }, { id: "1556000000000000778", name: "gone", available: false }],
+        stickers: [{ id: "1556000000000000881", name: "hello", format_type: 1 }, { id: "1556000000000000882", name: "off", format_type: 1, available: false }],
       });
     }
     if (p === `/guilds/${GUILD}/members/${SELF}`) return res(200, { user: { id: SELF }, roles: [ROLE_BOT] });
@@ -231,8 +255,11 @@ test("the index lists every attachment in an assigned channel, each in scope or 
   assert.match(why["c.png"], /bot or webhook/);
   assert.match(why["d.png"], /her own message/);
   const g = JSON.parse(await fs.readFile(path.join(dir, "guilds.json"), "utf8"));
-  assert.deepEqual(g.guilds, [{ id: GUILD, name: "AIchan", label: null, prefix: "aichan", emojis: [{ id: "1556000000000000777", name: "wave", animated: false }] }],
-    "the server's usable custom emojis travel with it; an unavailable one does not");
+  assert.deepEqual(g.guilds, [{
+    id: GUILD, name: "AIchan", label: null, prefix: "aichan",
+    emojis: [{ id: "1556000000000000777", name: "wave", animated: false }],
+    stickers: [{ id: "1556000000000000881", name: "hello", format: 1 }],
+  }], "the server's usable custom emojis and stickers travel with it; an unavailable one does not");
   assert.deepEqual(g.channels.map((c) => [c.name, c.target, c.presence.history, c.parent_id]), [
     ["art", true, true, "1551446881308250500"],
     ["chat", false, false, "1551446881308250500"],

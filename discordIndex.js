@@ -228,7 +228,11 @@ async function refreshGuilds(ctx) {
       const emojis = (Array.isArray(g.emojis) ? g.emojis : [])
         .filter((e) => e && e.id && e.name && e.available !== false)
         .map((e) => ({ id: String(e.id), name: String(e.name), animated: Boolean(e.animated) }));
-      guilds.push({ id: s.guild_id, name: g.name, label: s.name, prefix: s.prefix, emojis });
+      // And its stickers: a bot may send only the server's own (up to three).
+      const stickers = (Array.isArray(g.stickers) ? g.stickers : [])
+        .filter((x) => x && x.id && x.name && x.available !== false)
+        .map((x) => ({ id: String(x.id), name: String(x.name), format: Number(x.format_type) || 1 }));
+      guilds.push({ id: s.guild_id, name: g.name, label: s.name, prefix: s.prefix, emojis, stickers });
       for (const ch of list) {
         if (ch.type === 4) {
           categories.push({ id: ch.id, guild_id: s.guild_id, name: ch.name, position: ch.position ?? 0 });

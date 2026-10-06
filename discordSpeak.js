@@ -121,9 +121,13 @@ async function processOutbox(opts) {
       continue;
     }
     const text = typeof entry.text === "string" ? entry.text : "";
+    // Up to three of the server's own stickers (operator, 2026-10-06); a bot
+    // may send only stickers belonging to the server it posts in.
+    const stickers = Array.isArray(entry.stickers) ? entry.stickers.map(String) : [];
     let refusal = null;
     if (!allowed.has(entry.channel)) refusal = `channel ${JSON.stringify(entry.channel)} is not one she can speak in (no Send Messages there, or not in a configured server)`;
-    else if (!text.trim()) refusal = "the message is empty";
+    else if (!text.trim() && !stickers.length) refusal = "the message is empty";
+    else if (stickers.length > 3 || stickers.some((s) => !/^\d{17,20}$/.test(s))) refusal = "a message carries at most 3 stickers, each a Discord id";
     else if (text.length > MAX_LEN) refusal = `the message is ${text.length} characters; Discord allows ${MAX_LEN}`;
     if (refusal) {
       await fail(d, name, entry, refusal, now);
@@ -133,7 +137,9 @@ async function processOutbox(opts) {
     }
     let msg;
     try {
-      msg = await http.postJson(`/channels/${entry.channel}/messages`, { content: text, allowed_mentions: { parse: ["users"] } }, `channel ${entry.channel}`);
+      const body = { content: text, allowed_mentions: { parse: ["users"] } };
+      if (stickers.length) body.sticker_ids = stickers;
+      msg = await http.postJson(`/channels/${entry.channel}/messages`, body, `channel ${entry.channel}`);
     } catch (err) {
       if (err instanceof AuthFailed) throw err;
       if (err instanceof ChannelRefused || err instanceof Transient) {
@@ -151,8 +157,9 @@ async function processOutbox(opts) {
     let note = null;
     try {
       const back = await http.getJson(`/channels/${entry.channel}/messages/${msg.id}`, `channel ${entry.channel}`);
-      verified = back && back.id === msg.id && back.content === text;
-      if (!verified) note = "read back, but the content differs from what was sent";
+      const backStickers = ((back && back.sticker_items) || []).map((s) => String(s.id)).sort();
+      verified = back && back.id === msg.id && back.content === text && JSON.stringify(backStickers) === JSON.stringify([...stickers].sort());
+      if (!verified) note = "read back, but the content or stickers differ from what was sent";
     } catch (err) {
       note = `sent, but reading it back failed: ${err.message}`;
     }
