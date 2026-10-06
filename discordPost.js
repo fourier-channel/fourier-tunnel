@@ -77,15 +77,16 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
     );
   }
   // Posted under the MASTER name when the operator merged this account under
-  // one (creators.json, from the panel), else under its own username.
-  const name = deps.creatorFor ? await deps.creatorFor(author) : author.username;
+  // one (creators.json, from the panel), else under its own name -- exact, or
+  // folded with its account id (poster.discordCreatorName).
+  const name = deps.creatorFor ? await deps.creatorFor(author) : poster.discordCreatorName(author.username, author.id);
   const posterTag = poster.discordPosterTagFor(name, prefix);
   if (!posterTag) {
     return {
       refused:
         `no creator tag for Discord user ${author.id} (posting name ${JSON.stringify(name)}) under prefix ${JSON.stringify(prefix)}: ` +
-        "the username is outside [a-z0-9_-] or the prefix is not a legal one. Not posted, because a post needs a creator and the tag " +
-        "must match the name exactly for a claim to mean anything. Fix: rule on how such usernames are tagged.",
+        "the author has no usable account id or the prefix is not a legal one. Not posted, because a post needs a creator. " +
+        "Fix: check the server's prefix on the panel.",
     };
   }
   const posterRef = `discord:${author.id}`;

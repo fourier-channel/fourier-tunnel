@@ -182,7 +182,12 @@ function guildDiscord(messages, { memberOf = [{ id: GUILD, name: "AIchan" }], br
     const p = u.pathname.replace(/^\/api\/v10/, "");
     if (p === "/users/@me/guilds") return res(200, memberOf);
     if (broken.some((g) => p.startsWith(`/guilds/${g}`))) return res(403, {});
-    if (p === `/guilds/${GUILD}`) return res(200, { id: GUILD, name: "AIchan", owner_id: "1", roles: [{ id: GUILD, permissions: EVERYONE_PERMS }, { id: ROLE_BOT, permissions: "0" }] });
+    if (p === `/guilds/${GUILD}`) {
+      return res(200, {
+        id: GUILD, name: "AIchan", owner_id: "1", roles: [{ id: GUILD, permissions: EVERYONE_PERMS }, { id: ROLE_BOT, permissions: "0" }],
+        emojis: [{ id: "1556000000000000777", name: "wave", animated: false }, { id: "1556000000000000778", name: "gone", available: false }],
+      });
+    }
     if (p === `/guilds/${GUILD}/members/${SELF}`) return res(200, { user: { id: SELF }, roles: [ROLE_BOT] });
     if (p === `/guilds/${GUILD}/channels`) return res(200, [
       { id: "1551446881308250500", type: 4, name: "Text Channels", position: 0 },
@@ -217,24 +222,25 @@ test("the index lists every attachment in an assigned channel, each in scope or 
   const r = await indexOnce({ http: http(guildDiscord(messages)), stateDir: dir, prefixes: { [GUILD]: "aichan" }, channels: [CH], selfId: SELF, log: () => {} });
   assert.equal(r.results.length, 1, "only the channel whose history she can read is walked");
   assert.equal(r.results[0].rows, 5);
-  assert.equal(r.results[0].inScope, 1);
+  assert.equal(r.results[0].inScope, 2, "a.b is carried exactly now");
   const rows = (await fs.readFile(path.join(dir, "index", `${CH}.jsonl`), "utf8")).trim().split("\n").map(JSON.parse);
   const why = Object.fromEntries(rows.map((x) => [x.f, x.ok ? "ok" : x.why]));
   assert.equal(why["a.png"], "ok");
   assert.match(why["clip.mp4"], /not an image/);
-  assert.match(why["b.png"], /cannot be carried exactly/);
+  assert.equal(why["b.png"], "ok");
   assert.match(why["c.png"], /bot or webhook/);
   assert.match(why["d.png"], /her own message/);
   const g = JSON.parse(await fs.readFile(path.join(dir, "guilds.json"), "utf8"));
-  assert.deepEqual(g.guilds, [{ id: GUILD, name: "AIchan", label: null, prefix: "aichan" }]);
+  assert.deepEqual(g.guilds, [{ id: GUILD, name: "AIchan", label: null, prefix: "aichan", emojis: [{ id: "1556000000000000777", name: "wave", animated: false }] }],
+    "the server's usable custom emojis travel with it; an unavailable one does not");
   assert.deepEqual(g.channels.map((c) => [c.name, c.target, c.presence.history, c.parent_id]), [
     ["art", true, true, "1551446881308250500"],
     ["chat", false, false, "1551446881308250500"],
   ], "voice channels are not listed; chat hides its history from @everyone");
   assert.deepEqual(g.categories.map((c) => c.name), ["Text Channels"]);
   const nameRow = rows.find((x) => x.f === "b.png");
-  assert.equal(nameRow.xok, true, "only the name ground fails, so a merge can bring it back");
-  assert.equal(nameRow.nameOk, false);
+  assert.equal(nameRow.xok, true);
+  assert.equal(nameRow.nameOk, true, "a period is a legal creator name (2026-10-06)");
 });
 
 test("targets come from the panel's targets.json", async (t) => {

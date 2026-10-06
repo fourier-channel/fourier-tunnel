@@ -46,7 +46,11 @@ function localpartIfLocal(mxid, domain) {
 // tag (a.b and a_b both becoming a_b) -- anything outside the safe charset is
 // refused. Measured 2026-09-08: every localpart on this homeserver is already
 // within it, so this rejects nothing today and stays honest if that changes.
-const SAFE = /^[a-z0-9_-]+$/;
+// What a creator name may hold after its prefix, exactly: a-z 0-9 . _ -.
+// Periods since 2026-10-06 (operator: sanitize, do not drop) -- the booru and
+// both Matrix localparts and Discord usernames allow them, so a name with one
+// stays exact and claims still compare equal.
+const SAFE = /^[a-z0-9._-]+$/;
 
 /** The master prefix: a Matrix sender on this homeserver. */
 const MATRIX_PREFIX = "41chan";
@@ -58,28 +62,62 @@ const PREFIX = /^[a-z0-9]{1,16}$/;
 function posterTagFor(mxid, domain) {
   const local = localpartIfLocal(mxid, domain);
   if (!local) return null;
-  if (!SAFE.test(local)) return null;
+  if (!DISCORD_TAGGABLE(local)) return null;
   return `${MATRIX_PREFIX}_${local}`;
 }
 
 /**
- * A Discord author's creator tag: <prefix>_<username>, the prefix being the one
- * configured for the guild the message came from ("aichan" for the AIchan
- * Discord).
+ * THE NAME A DISCORD ACCOUNT IS TAGGED UNDER (operator, 2026-10-06: "we
+ * should be sanitizing them so they can be acquired, not just going 'oh lol I
+ * guess we won't download these'").
  *
- * The USERNAME, never the display name: Discord usernames are unique and
- * lowercase, display names are neither, and a claim needs a name that means
- * one person. Null when the username is outside the safe charset (Discord
- * allows "." in usernames; it is refused here, not folded), or when the prefix
- * is not a legal one -- including the master and 4chan prefixes, which a
- * Discord guild must never mint, since a guild configured as "41chan" would
- * forge Matrix identities.
+ * The USERNAME, never the display name: usernames are unique, display names
+ * are not, and a claim needs a name that means one person.
+ *
+ *   EXACT when the booru can hold it as it is: a-z 0-9 . _ - (Discord's own
+ *   username alphabet), not beginning or ending with "_" and with no "__"
+ *   (the booru's tag rules, after the prefix). Periods are kept: the booru
+ *   and Matrix localparts both allow them, so aichan_a.b still strips to
+ *   exactly @a.b's 41chan_a.b and the claim rule holds.
+ *
+ *   FOLDED otherwise -- spaces, capitals, anything non-ASCII, a leading or
+ *   trailing underscore, and Discord's "Deleted User" -- to a legal name with
+ *   the ACCOUNT ID appended: deleted_user_136983939662348288. The id is what
+ *   makes a fold safe: a fold alone could land on another person's exact name
+ *   and hand them this one's images; with the id it is that account's alone,
+ *   and every deleted account stays its own creator. The panel's merge gives
+ *   a folded name a better one when the operator has one.
+ *
+ * Null only for an author with no usable id. Mirrored in fourier-sampling
+ * src/web/discord.ts (discordCreatorName); the tests share their vectors.
  */
-function discordPosterTagFor(username, prefix) {
+function discordCreatorName(username, userId) {
+  const u = typeof username === "string" ? username : "";
+  if (DISCORD_TAGGABLE(u)) return u;
+  const id = String(userId || "");
+  if (!/^\d{17,20}$/.test(id)) return null;
+  const folded = u.toLowerCase().replace(/[^a-z0-9.-]+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40).replace(/_+$/, "");
+  return `${folded || "user"}_${id}`;
+}
+
+/** A name discordCreatorName could have produced: what a creator tag may carry after the prefix. */
+function DISCORD_TAGGABLE(n) {
+  return typeof n === "string" && n.length > 0 && n.length <= 64 && SAFE.test(n) && !n.startsWith("_") && !n.endsWith("_") && !n.includes("__");
+}
+
+/**
+ * A Discord author's creator tag: <prefix>_<name>, `name` from
+ * discordCreatorName (or a merge's master name, which went through it too).
+ * Null when the name is not one it produces, or the prefix is not a legal one
+ * -- including the master and 4chan prefixes, which a Discord server must
+ * never mint, since a server configured as "41chan" would forge Matrix
+ * identities.
+ */
+function discordPosterTagFor(name, prefix) {
   if (typeof prefix !== "string" || !PREFIX.test(prefix)) return null;
   if (prefix === MATRIX_PREFIX || prefix === FOURCHAN_PREFIX) return null;
-  if (typeof username !== "string" || !SAFE.test(username)) return null;
-  return `${prefix}_${username}`;
+  if (!DISCORD_TAGGABLE(name)) return null;
+  return `${prefix}_${name}`;
 }
 
 // THERE IS NO INVERSE HERE, ON PURPOSE. There was one (mxidForPosterTag), and
@@ -91,4 +129,4 @@ function discordPosterTagFor(username, prefix) {
 // (danbooru.js recordPostCreator; operator ruling 2026-09-29), and nothing
 // derived from tags may stand in for it.
 
-module.exports = { posterTagFor, discordPosterTagFor, localpartIfLocal, SAFE, MATRIX_PREFIX, FOURCHAN_PREFIX };
+module.exports = { posterTagFor, discordPosterTagFor, discordCreatorName, localpartIfLocal, SAFE, MATRIX_PREFIX, FOURCHAN_PREFIX };

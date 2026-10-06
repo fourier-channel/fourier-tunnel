@@ -65,8 +65,8 @@ function extOf(filename) {
 }
 
 /** The username ground alone: does this name fit a creator tag exactly? */
-function nameFits(username, prefix) {
-  return poster.discordPosterTagFor(username, prefix) !== null;
+function nameFits(author, prefix) {
+  return poster.discordPosterTagFor(poster.discordCreatorName(author.username, author.id), prefix) !== null;
 }
 
 /**
@@ -76,13 +76,13 @@ function nameFits(username, prefix) {
  */
 function scopeOf(msg, att, prefix, selfId) {
   const author = msg.author || {};
-  const nameOk = nameFits(author.username, prefix);
+  const nameOk = nameFits(author, prefix);
   let why = null;
   if (selfId && author.id === selfId) why = "her own message";
   else if (author.bot) why = "posted by a bot or webhook";
   else if (!POSTABLE.has(extOf(att.filename))) why = `not an image (${extOf(att.filename) || "no extension"})`;
   const xok = why === null;
-  if (xok && !nameOk) why = "username cannot be carried exactly in a creator tag";
+  if (xok && !nameOk) why = "the author has no usable account id, so no creator tag can name them";
   return { xok, nameOk, ok: xok && nameOk, why };
 }
 
@@ -157,10 +157,10 @@ async function readCreators(stateDir) {
 function creatorNameFor(masters, author) {
   const id = author && author.id;
   for (const m of masters) {
-    if (m.user_id === id) return m.username;
-    if ((m.subs || []).some((x) => x.user_id === id)) return m.username;
+    if (m.user_id === id) return poster.discordCreatorName(m.username, m.user_id);
+    if ((m.subs || []).some((x) => x.user_id === id)) return poster.discordCreatorName(m.username, m.user_id);
   }
-  return author ? author.username : undefined;
+  return author ? poster.discordCreatorName(author.username, author.id) : undefined;
 }
 
 async function readJson(file, fallback) {
@@ -223,7 +223,12 @@ async function refreshGuilds(ctx) {
       const g = await ctx.http.getJson(`/guilds/${s.guild_id}`, `server ${s.guild_id}`);
       const member = await ctx.http.getJson(`/guilds/${s.guild_id}/members/${ctx.selfId}`, `her membership of server ${s.guild_id}`);
       const list = await ctx.http.getJson(`/guilds/${s.guild_id}/channels`, `the channel list of server ${s.guild_id}`);
-      guilds.push({ id: s.guild_id, name: g.name, label: s.name, prefix: s.prefix });
+      // The server's own custom emojis, which she may use in its messages:
+      // the panel turns :name: in what she is to say into Discord's <:name:id>.
+      const emojis = (Array.isArray(g.emojis) ? g.emojis : [])
+        .filter((e) => e && e.id && e.name && e.available !== false)
+        .map((e) => ({ id: String(e.id), name: String(e.name), animated: Boolean(e.animated) }));
+      guilds.push({ id: s.guild_id, name: g.name, label: s.name, prefix: s.prefix, emojis });
       for (const ch of list) {
         if (ch.type === 4) {
           categories.push({ id: ch.id, guild_id: s.guild_id, name: ch.name, position: ch.position ?? 0 });

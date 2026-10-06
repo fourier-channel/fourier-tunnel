@@ -134,10 +134,19 @@ test("an image already on the booru is not uploaded again", async () => {
   assert.equal(f.named("createUploadFromBytes").length, 0);
 });
 
-test("a username that cannot be tagged exactly is refused, not folded, and nothing is uploaded", async () => {
+test("a username with a period is posted exactly, and one the booru cannot hold is folded with its account id", async () => {
+  let f = fakeBooru();
+  await deliverer(f.booru).d.deliver({ channel: CHANNEL, msg: msg({ author: { id: "136983939662348288", username: "a.b" } }), att: att(), bytes: png() });
+  assert.ok(f.named("createPost")[0].args[1].tagString.split(" ").includes("aichan_a.b"));
+  f = fakeBooru();
+  await deliverer(f.booru).d.deliver({ channel: CHANNEL, msg: msg({ author: { id: "136983939662348288", username: "Deleted User" } }), att: att(), bytes: png() });
+  assert.ok(f.named("createPost")[0].args[1].tagString.split(" ").includes("aichan_deleted_user_136983939662348288"));
+});
+
+test("an author with no usable id is refused, and nothing is uploaded", async () => {
   const f = fakeBooru();
-  const r = await deliverer(f.booru).d.deliver({ channel: CHANNEL, msg: msg({ author: { id: "5", username: "a.b" } }), att: att(), bytes: png() });
-  assert.match(r.refused, /outside \[a-z0-9_-\]/);
+  const r = await deliverer(f.booru).d.deliver({ channel: CHANNEL, msg: msg({ author: { id: "5", username: "Deleted User" } }), att: att(), bytes: png() });
+  assert.match(r.refused, /no usable account id/);
   assert.equal(f.calls.length, 0);
 });
 

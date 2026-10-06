@@ -35,10 +35,11 @@ test("the tag is exactly 41chan_ and the localpart, nothing folded", () => {
   }
 });
 
-test("an unsafe localpart is REFUSED, not folded", () => {
-  // Folding would break exactness and, worse, collide: a.b and a_b would both
+test("a period is carried exactly; anything the booru cannot hold exactly is REFUSED, not folded", () => {
+  // A period is kept (2026-10-06): the booru allows it, so 41chan_a.b is exact.
+  // Folding would break exactness and, worse, collide: a+b and a_b would both
   // become 41chan_a_b, silently attributing one person's posts to another.
-  assert.equal(posterTagFor("@a.b:41chan.net", D), null);
+  assert.equal(posterTagFor("@a.b:41chan.net", D), "41chan_a.b");
   assert.equal(posterTagFor("@a+b:41chan.net", D), null);
   assert.equal(posterTagFor("@a/b:41chan.net", D), null);
   assert.notEqual(posterTagFor("@a_b:41chan.net", D), null);
@@ -66,7 +67,7 @@ test("there is no way back from a tag to an MXID: a tag is a label anyone can ed
   // It existed once, and was used to decide who could read a post's private
   // generation record from the post's member-editable tags.
   assert.equal(poster.mxidForPosterTag, undefined);
-  assert.deepEqual(Object.keys(poster).sort(), ["FOURCHAN_PREFIX", "MATRIX_PREFIX", "SAFE", "discordPosterTagFor", "localpartIfLocal", "posterTagFor"]);
+  assert.deepEqual(Object.keys(poster).sort(), ["FOURCHAN_PREFIX", "MATRIX_PREFIX", "SAFE", "discordCreatorName", "discordPosterTagFor", "localpartIfLocal", "posterTagFor"]);
 });
 
 // Operator ruling 2026-10-04: 4chan_ / 41chan_ / aichan_, 41chan_ the master,
@@ -78,11 +79,46 @@ test("a Discord author's creator tag is <guild prefix>_<username>, and strips ba
   assert.equal(strip(poster.discordPosterTagFor("selphdestruct", "aichan")), strip(poster.posterTagFor("@selphdestruct:41chan.net", "41chan.net")));
 });
 
-test("a Discord username is checked, never folded: a.b must not become a_b and land on someone else's claim", () => {
-  assert.equal(poster.discordPosterTagFor("a.b", "aichan"), null);
-  assert.equal(poster.discordPosterTagFor("Alice", "aichan"), null, "Discord usernames are lowercase; anything else is not a username");
+// Operator, 2026-10-06: "we should be sanitizing them so they can be
+// acquired". The same vectors are in fourier-sampling tests/discordPanel.test.ts.
+const ID = "136983939662348288";
+const NAME_VECTORS = [
+  ["selphdestruct", ID, "selphdestruct"],
+  ["a.b", ID, "a.b"],
+  [".name", ID, ".name"],
+  ["name.", ID, "name."],
+  ["Deleted User", ID, `deleted_user_${ID}`],
+  ["Deleted User", "136983939662348289", "deleted_user_136983939662348289"],
+  ["_lead", ID, `lead_${ID}`],
+  ["trail_", ID, `trail_${ID}`],
+  ["a__b", ID, `a_b_${ID}`],
+  ["Alice", ID, `alice_${ID}`],
+  ["\u00fcn\u00efcode n\u00e4me", ID, `n_code_n_me_${ID}`],
+  ["\u2728", ID, `user_${ID}`],
+  [undefined, ID, `user_${ID}`],
+  ["a.b", undefined, "a.b"],
+  ["Deleted User", undefined, null],
+];
+
+test("a Discord name is kept exactly when the booru can hold it, periods included, and folded with its account id when not", () => {
+  for (const [username, id, want] of NAME_VECTORS) assert.equal(poster.discordCreatorName(username, id), want, JSON.stringify([username, id]));
+});
+
+test("a folded name can never be another person's exact name, and every one is a legal creator tag", () => {
+  assert.notEqual(poster.discordCreatorName("Alice", ID), poster.discordCreatorName("alice", ID), "the fold carries the id; the exact name does not");
+  for (const [username, id, want] of NAME_VECTORS) {
+    if (want === null) continue;
+    const tag = poster.discordPosterTagFor(poster.discordCreatorName(username, id), "aichan");
+    assert.ok(tag && !tag.includes("__") && !tag.endsWith("_") && /^[\x21-\x7e]+$/.test(tag), tag);
+  }
+  assert.equal(poster.discordPosterTagFor("a.b", "aichan"), "aichan_a.b");
+  assert.equal(poster.discordPosterTagFor("Deleted User", "aichan"), null, "a raw, unfolded name is not a tag");
   assert.equal(poster.discordPosterTagFor("", "aichan"), null);
-  assert.equal(poster.discordPosterTagFor(undefined, "aichan"), null);
+});
+
+test("a period survives on both sides, so the claim rule still matches exactly", () => {
+  const strip = (t) => t.replace(/^[a-z0-9]+_/, "");
+  assert.equal(strip(poster.discordPosterTagFor("a.b", "aichan")), strip(poster.posterTagFor("@a.b:41chan.net", "41chan.net")));
 });
 
 test("a Discord guild can never mint the master or the 4chan prefix", () => {
