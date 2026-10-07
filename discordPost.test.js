@@ -99,6 +99,7 @@ test("a Discord image is posted with the guild's creator tag and its permalink a
   const { tagString, source } = post.args[1];
   assert.ok(tagString.split(" ").includes("aichan_selphdestruct"), tagString);
   assert.ok(tagString.split(" ").includes("1girl"), "spectrum's tags, as on Matrix");
+  assert.ok(tagString.split(" ").includes("no_train"), "a Discord post is never training data (operator 2026-10-07)");
   assert.equal(source, `https://discord.com/channels/${GUILD}/${CHANNEL.id}/1551459230517821480`);
   assert.deepEqual(categorised, ["aichan_selphdestruct"]);
   assert.equal(f.named("recordTagSources").length, 1);
@@ -193,7 +194,7 @@ test("a tagger outage still posts, with the creator tag", async () => {
   const { d } = deliverer(f.booru, { autotag: async () => { throw new Error("spectrum down"); } });
   const r = await d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() });
   assert.equal(r.delivered, true);
-  assert.equal(f.named("createPost")[0].args[1].tagString, "aichan_selphdestruct");
+  assert.equal(f.named("createPost")[0].args[1].tagString, "aichan_selphdestruct no_train");
 });
 
 test("a sub-account merged under a master is posted under the master's name", async () => {

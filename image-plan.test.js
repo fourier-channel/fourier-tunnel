@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const zlib = require("node:zlib");
 const {
-  planImage, findPostForBytes, generationRecord, publicTagsFor, recordGeneration, recordCreator, md5hex,
+  planImage, findPostForBytes, generationRecord, publicTagsFor, recordGeneration, recordCreator, md5hex, NO_TRAIN_TAG,
   STRIP_REFUSED, AI_GENERATED_TAG,
 } = require("./image-plan");
 const { stripGeneration } = require("./strip-generation");
@@ -303,4 +303,11 @@ test("private creator tags never come from text left public: a sentence the stri
   assert.equal(plan.action, "upload");
   assert.equal(plan.upload.buffer, raw, "kept as a caption");
   assert.deepEqual(plan.scraped.tags, [], "and so not a private creator tag");
+});
+
+test("publicTagsFor: no_train only when asked -- the Discord path asks, the Matrix path does not", () => {
+  const base = { autoTags: ["1girl"], posterTag: "41chan_alice" };
+  assert.deepEqual(publicTagsFor(base), ["1girl", "41chan_alice"]);
+  assert.deepEqual(publicTagsFor({ ...base, noTrain: true }), ["1girl", "41chan_alice", NO_TRAIN_TAG]);
+  assert.equal(NO_TRAIN_TAG, "no_train", "the tag fourier-sampling puts on archive posts, so one search covers both");
 });

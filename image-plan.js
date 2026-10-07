@@ -40,6 +40,11 @@ const STRIP_REFUSED = "strip-refused";
 // Counted apart from "done" and from "failed" (index.js heldByTheBooru).
 const HELD_HIDDEN = "held-hidden";
 const AI_GENERATED_TAG = "ai-generated";
+// Discord posts are never training data (operator ruling 2026-10-07: "keep
+// Discord posts as no_train"). The same tag fourier-sampling puts on
+// archive-sourced posts, so one search excludes both from a training set. A
+// claim on the creator tag does not lift it.
+const NO_TRAIN_TAG = "no_train";
 const NO_SCRAPE = Object.freeze({ tags: [], meta: [], characters: [] });
 
 function md5hex(buffer) {
@@ -86,11 +91,12 @@ function generationRecord({ md5, rawMd5, poster, removed, source = "matrix" }) {
 }
 
 /** The booru's PUBLIC tag string, as a list. Creator-only tags never enter it. */
-function publicTagsFor({ autoTags = [], metaTags = [], ocTags = [], posterTag = null, aiGenerated = false }) {
+function publicTagsFor({ autoTags = [], metaTags = [], ocTags = [], posterTag = null, aiGenerated = false, noTrain = false }) {
   return [...new Set([
     ...autoTags, ...metaTags, ...ocTags,
     ...(posterTag ? [posterTag] : []),
     ...(aiGenerated ? [AI_GENERATED_TAG] : []),
+    ...(noTrain ? [NO_TRAIN_TAG] : []),
   ])];
 }
 
@@ -261,4 +267,5 @@ module.exports = {
   STRIP_REFUSED,
   HELD_HIDDEN,
   AI_GENERATED_TAG,
+  NO_TRAIN_TAG,
 };

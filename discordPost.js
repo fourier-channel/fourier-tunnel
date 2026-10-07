@@ -139,7 +139,7 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
   const both = autoTags.filter((t) => creatorSet.has(t));
   const autoOnly = autoTags.filter((t) => !creatorSet.has(t));
   const creatorOnly = creatorTags.filter((t) => !autoSet.has(t));
-  const publicTags = imagePlan.publicTagsFor({ autoTags, metaTags, ocTags, posterTag, aiGenerated: plan.aiGenerated });
+  const publicTags = imagePlan.publicTagsFor({ autoTags, metaTags, ocTags, posterTag, aiGenerated: plan.aiGenerated, noTrain: true });
   const rating = (derived && derived.rating) || (deps.config && deps.config.bridge && deps.config.bridge.default_rating) || "q";
 
   let post;
