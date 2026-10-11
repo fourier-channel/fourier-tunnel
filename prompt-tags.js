@@ -321,14 +321,30 @@ function normalizeTerm(raw) {
 // of the prompt: it goes in its own list for the booru to put on the post
 // publicly and file as a character, and it never counts against `max`. A
 // qualifier naming anyone or anything else -- saber_(fate), hilda_(pokemon),
-// another member's character -- is an ordinary prompt term, and so is every
-// oc_<name>, the shape this rule replaced. The same shape as chanbooru's
-// FourierTagSource ORIGINAL_CHARACTER, which checks the qualifier again
-// against the post's RECORDED creator and names what it will not declare.
+// another member's character -- is an ordinary prompt term. The same shape as
+// chanbooru's FourierTagSource ORIGINAL_CHARACTER, which checks the qualifier
+// again against the post's RECORDED creator and names what it will not declare.
+//
+// THE LEGACY FORMS. Operator, 2026-10-11: "I'll still need oc_<name> or
+// <name>_oc to be recognized as an alias since pre-existing images all use
+// it." Exactly the four shapes the 2026-09-19 rule accepted -- oc_<name>,
+// character_oc_<name>, <name>_oc, <name>_character_oc; measured in this
+// deployment's prompts, "(ariah_oc:0)" five times -- and the same pattern as
+// that rule's booru regex. A term in one goes in the oc list AS WRITTEN, for
+// ANY poster, owner or not: the booru is the ONE authority that rewrites it,
+// to <name>_(<the post's recorded creator>), or refuses it by name with its
+// remedy. The tunnel never rewrites; who the creator is, is the booru's
+// record, not this guess. Bare "oc" alone is nobody's name. A name that
+// already ends in a creator in brackets (oc_maple_(alice)) is that creator's,
+// whatever it starts with, and is read by its qualifier like any other --
+// the booru's reading too (FourierTagSource.legacy_original_character): sent
+// as a legacy form, someone else's would be refused and lost, not kept private.
 const ORIGINAL_CHARACTER = /^([a-z0-9][^()]*)_\(([^()]+)\)$/;
+const LEGACY_ORIGINAL_CHARACTER = /^(?:(?:character_)?oc_[a-z0-9].*|.*[a-z0-9]_(?:character_)?oc)$/;
 function isOriginalCharacter(term, owner) {
-  const m = owner ? ORIGINAL_CHARACTER.exec(term) : null;
-  return !!m && m[2] === String(owner).toLowerCase();
+  const m = ORIGINAL_CHARACTER.exec(term);
+  if (!m) return LEGACY_ORIGINAL_CHARACTER.test(term);
+  return !!owner && m[2] === String(owner).toLowerCase();
 }
 
 // A PARENTHESISED TOKEN RUNS INTO THE WORDS AFTER IT. "(ariah_oc:0) white
@@ -370,10 +386,11 @@ function expandTerm(raw) {
 // Normalise a freeform prompt into Danbooru-style tags: comma-split, strip
 // weights/brackets/LoRA tokens, lowercase, spaces -> underscores, dedupe. Returns
 // { tags, meta, characters } -- content tags, quality/meta terms (kept,
-// de-emphasised), and original characters (<name>_(<owner>), above).
+// de-emphasised), and original characters (<name>_(<owner>) and the legacy
+// forms, above).
 // opts: { max, owner } -- owner is the poster's Matrix localpart on this
 // homeserver, or null when there is none (a Discord author, a remote account,
-// an unknown uploader), and then nothing is an original character.
+// an unknown uploader), and then only a legacy form is an original character.
 function promptToTags(prompt, opts) {
   const max = (opts && opts.max) || 60;
   const owner = (opts && opts.owner) || null;
@@ -481,4 +498,4 @@ function extractCreatorTagsFromFields(fields, opts) {
   return { tags: [], meta: [], characters: [] };
 }
 
-module.exports = { extractCreatorTags, extractCreatorTagsFromFields, chunksFromFields, normalizeTerm, expandTerm, ORIGINAL_CHARACTER, embeddedChunks, pngTextChunks, exifTextFields, exifChunks, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };
+module.exports = { extractCreatorTags, extractCreatorTagsFromFields, chunksFromFields, normalizeTerm, expandTerm, ORIGINAL_CHARACTER, LEGACY_ORIGINAL_CHARACTER, embeddedChunks, pngTextChunks, exifTextFields, exifChunks, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };

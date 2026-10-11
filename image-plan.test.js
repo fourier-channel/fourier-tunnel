@@ -105,18 +105,20 @@ test("an image with no generation data: the raw md5 is not asked twice, no ai-ge
 });
 
 // ORIGINAL CHARACTERS (operator ruling 2026-10-11): the poster is the
-// SENDER, and only a sender on this homeserver has a localpart to name.
-test("original characters: declared only under the sender's own localpart on this homeserver", async () => {
+// SENDER, and only a sender on this homeserver has a localpart to name. A
+// LEGACY form (oc_kayla) is sent for every sender, as written: the booru
+// rewrites it under the post's recorded creator, or refuses it by name.
+test("original characters: declared only under the sender's own localpart on this homeserver; legacy forms for anyone", async () => {
   const removed = { "png:parameters": "1girl, (maple_\\(alice\\):1.2), maple_\\(bob\\), oc_kayla, saber_(fate)\nSteps: 20" };
   const deps = (over) => ({ ...rig().deps, strip: (buffer) => ({ buffer, removed, changed: false, confident: true }), creatorTags: extractCreatorTagsFromFields, domain: "41chan.net", ...over });
   const asAlice = await planImage({ buffer: RAW, contentType: "image/png", sender: ALICE }, deps());
-  assert.deepEqual(asAlice.scraped.characters, ["maple_(alice)"]);
-  assert.deepEqual(asAlice.scraped.tags, ["1girl", "maple_(bob)", "oc_kayla", "saber_(fate)"]);
+  assert.deepEqual(asAlice.scraped.characters, ["maple_(alice)", "oc_kayla"]);
+  assert.deepEqual(asAlice.scraped.tags, ["1girl", "maple_(bob)", "saber_(fate)"]);
   const asBob = await planImage({ buffer: RAW, contentType: "image/png", sender: BOB }, deps());
-  assert.deepEqual(asBob.scraped.characters, ["maple_(bob)"]);
+  assert.deepEqual(asBob.scraped.characters, ["maple_(bob)", "oc_kayla"]);
   for (const [sender, over] of [["@alice:elsewhere.org", {}], ["discord:136983939662348288", {}], [ALICE, { domain: undefined }]]) {
     const plan = await planImage({ buffer: RAW, contentType: "image/png", sender }, deps(over));
-    assert.deepEqual(plan.scraped.characters, [], `${sender} ${JSON.stringify(over)}`);
+    assert.deepEqual(plan.scraped.characters, ["oc_kayla"], `${sender} ${JSON.stringify(over)}`);
     assert.ok(plan.scraped.tags.includes("maple_(alice)"), "an undeclared name stays a private prompt term");
   }
 });

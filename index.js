@@ -673,7 +673,10 @@ async function handleImageEvent(bridge, event) {
   const metaTags = plan.scraped.meta || [];
   // Original characters (<name>_(<the sender's own localpart>), operator ruling
   // 2026-10-11; prompt-tags ORIGINAL_CHARACTER): the creator naming their own
-  // character. PUBLIC, unlike the rest of the prompt -- a name is the point of
+  // character -- or a LEGACY form (oc_<name>, <name>_oc and their character_
+  // variants, LEGACY_ORIGINAL_CHARACTER), listed for any sender AS WRITTEN:
+  // the booru alone rewrites it to <name>_(<the post's recorded creator>) or
+  // refuses it by name, and the tunnel only forwards. PUBLIC, unlike the rest of the prompt -- a name is the point of
   // a name -- but made public BY THE BOORU: they go only in the hub's `oc`
   // list, and the booru, checking them against the recorded creator, puts each
   // one it declares on the post and files it as a character. Never in the

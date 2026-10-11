@@ -432,37 +432,46 @@ test("the private creator tags come from what the strip TOOK -- never from the r
 // NOT in the tag string the post is created with: the booru puts a name it
 // declares on the post itself, and refuses to re-file a general tag that
 // already has a post -- which a name in the creating tag string is, by the
-// time the hub reads `oc`. Every other prompt term -- oc_<name> and a
-// qualifier naming someone else among them -- is a private creator tag.
-const OC_PARAMS = "masterpiece, (maple_\\(saber\\):1.2), oc_kayla, saber_(fate)\nSteps: 20, Sampler: Euler a";
+// time the hub reads `oc`. A LEGACY form (oc_<name>, <name>_oc and their
+// character_ variants; operator 2026-10-11, "pre-existing images all use it")
+// goes the same way, as written, for ANY sender: the booru alone rewrites it
+// to <name>_(<recorded creator>) or refuses it. A qualifier naming someone
+// else is a private creator tag.
+const OC_PARAMS = "masterpiece, oc_kayla, mahogany_oc, (maple_\\(saber\\):1.2), saber_(fate)\nSteps: 20, Sampler: Euler a";
 const OC_PNG = Buffer.concat([...PNG_PARTS, chunk("tEXt", Buffer.from(`parameters\0${OC_PARAMS}`, "latin1")), IEND]);
 
-test("an original character: the poster's own <name>_(<localpart>) is sent to be declared; oc_ and someone else's qualifier stay private", async () => {
+test("an original character: the poster's own <name>_(<localpart>) and the legacy forms are sent to be declared; someone else's qualifier stays private", async () => {
   const { outcome, lines } = await post("ocpic", OC_PNG, "image/png", "@saber:41chan.net");
   assert.equal(outcome, "posted", lines.join("\n"));
   const tags = world.created[0].post.tag_string.split(" ");
-  assert.ok(!tags.includes("maple_(saber)"), `the booru puts a declared name on the post, never the creating tag string: ${tags.join(" ")}`);
-  assert.ok(!tags.includes("oc_kayla") && !tags.includes("saber_(fate)"), `nothing else from the prompt is public: ${tags.join(" ")}`);
+  for (const name of ["maple_(saber)", "oc_kayla", "mahogany_oc", "saber_(fate)"]) {
+    assert.ok(!tags.includes(name), `${name}: the booru puts a declared name on the post, and a private term stays private: ${tags.join(" ")}`);
+  }
   const sent = world.tagSources[0];
-  assert.deepEqual(sent.oc, ["maple_(saber)"]);
-  assert.deepEqual(sent.creator, ["oc_kayla", "saber_(fate)"]);
+  assert.deepEqual(sent.oc, ["oc_kayla", "mahogany_oc", "maple_(saber)"]);
+  assert.deepEqual(sent.creator, ["saber_(fate)"]);
   assert.deepEqual(sent.meta, ["masterpiece"]);
-  assert.ok(lines.some((l) => /1 oc\)/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /3 oc\)/.test(l)), lines.join("\n"));
 });
 
-test("the same picture from someone else declares nothing: maple_(saber) is a private prompt term for alice", async () => {
+test("the same picture from someone else: maple_(saber) is a private prompt term for alice, and the legacy forms still go to the booru to judge", async () => {
   const { outcome, lines } = await post("ocpic2", OC_PNG, "image/png", ALICE);
   assert.equal(outcome, "posted", lines.join("\n"));
-  assert.ok(!world.created[0].post.tag_string.split(" ").includes("maple_(saber)"));
-  assert.deepEqual(world.tagSources[0].oc, []);
-  assert.deepEqual(world.tagSources[0].creator, ["maple_(saber)", "oc_kayla", "saber_(fate)"]);
+  const tags = world.created[0].post.tag_string.split(" ");
+  assert.ok(!tags.includes("maple_(saber)") && !tags.includes("oc_kayla") && !tags.includes("mahogany_oc"), tags.join(" "));
+  assert.deepEqual(world.tagSources[0].oc, ["oc_kayla", "mahogany_oc"]);
+  assert.deepEqual(world.tagSources[0].creator, ["maple_(saber)", "saber_(fate)"]);
 });
 
 test("an original character the booru would not declare is logged with the booru's reason", async () => {
-  world.replies.tagSources = { original_characters_not_declared: { "maple_(saber)": "maple_(saber) is already a general tag on 3 posts, so it is not re-filed" } };
+  world.replies.tagSources = { original_characters_not_declared: {
+    "maple_(saber)": "maple_(saber) is already a general tag on 3 posts, so it is not re-filed",
+    "oc_kayla": "oc_kayla was read as kayla_(saber), the poster's own name in brackets: kayla_(saber) is filed as copyright: ask an admin to re-file it as a character, then send the tags again",
+  } };
   const { outcome, lines } = await post("ocpic3", OC_PNG, "image/png", "@saber:41chan.net");
   assert.equal(outcome, "posted", lines.join("\n"));
   assert.ok(lines.some((l) => /^warn: \[tag-hub\] post #42: original character NOT declared: maple_\(saber\) is already a general tag on 3 posts/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /^warn: \[tag-hub\] post #42: original character NOT declared: oc_kayla was read as kayla_\(saber\), the poster's own name in brackets: kayla_\(saber\) is filed as copyright/.test(l)), "a legacy name's refusal says what the booru read it as");
 });
 
 // --- THE HISTORY WALK, through backfillRoomNow ------------------------------------

@@ -54,9 +54,16 @@ first component.
    `maple \(saber\)` in a prompt by `@saber`), is sent in the provenance
    partition's `oc` list -- never in the tag string the post is created with --
    and the booru, checking it against the recorded creator, puts it on the
-   post publicly and files it as a character, or says why not. A qualifier
-   naming anyone else (`saber_(fate)`) and every `oc_<name>` are ordinary
-   private prompt terms (operator ruling 2026-10-11).
+   post publicly and files it as a character, or says why not. The LEGACY
+   forms the earlier rule used -- `oc_<name>`, `character_oc_<name>`,
+   `<name>_oc`, `<name>_character_oc` -- go in the same `oc` list as
+   written, whoever posted them: the booru rewrites each to
+   `<name>_(<the post's recorded creator>)` and declares it the same way, or
+   says why not (pre-existing images all use them). A qualifier naming anyone
+   else (`saber_(fate)`, `sample_(41chan)`, `oc_maple_(alice)` -- a name
+   ending in a creator in brackets is that creator's, oc_ prefix or not) is
+   an ordinary private prompt term (operator rulings 2026-10-11). A Discord post sends no `oc` list:
+   its legacy forms stay private prompt terms too.
 7. The tags are written into the room as a `net.41chan.media.tags` state
    event, keyed by the image's MXC URI, with the post id, rating, an
    `updated_by` of the bot's localpart, and a `sources` object naming which

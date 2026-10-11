@@ -254,8 +254,24 @@ test("original characters on a re-read: read for the uploader on this homeserver
     const again = rig({ download: async () => ({ buffer: BYTES, contentType: "image/png", uploader }), domain, creatorTags: (removed, opts) => { seen.push(opts.owner); return { ...TAGS, characters: [] }; } });
     const o = await rescan(MXC, again.deps);
     assert.deepEqual(seen, [null], `${uploader} on ${domain}`);
-    assert.match(o.report, /No uploader on this homeserver is recorded for it, so no term was read as an original character\./);
+    assert.match(o.report, /No uploader on this homeserver is recorded for it, so no <name>_\(<localpart>\) term was read as the uploader's own character\./);
   }
+});
+
+// A LEGACY form (oc_kayla, mahogany_oc) is sent whoever uploaded it -- the
+// booru rewrites it under the post's RECORDED creator, which a rescan never
+// changes -- so a re-read with no uploader still sends it, and says so.
+test("legacy original characters on a re-read with no known uploader: still sent, and the report says the booru judges them", async () => {
+  const r = rig({
+    download: async () => ({ buffer: BYTES, contentType: "image/png", uploader: null }),
+    domain: "41chan.net",
+    creatorTags: () => ({ tags: ["smile"], meta: [], characters: ["oc_kayla", "mahogany_oc"] }),
+  });
+  const out = await rescan(MXC, r.deps);
+  assert.equal(out.ok, true);
+  assert.deepEqual(r.written[0][1].oc, ["oc_kayla", "mahogany_oc"]);
+  assert.match(out.report, /Sent to the booru as original characters: oc_kayla, mahogany_oc\./);
+  assert.match(out.report, /No uploader on this homeserver is recorded for it, so no <name>_\(<localpart>\) term was read as the uploader's own character\./);
 });
 
 test("original characters on a refused strip: the bytes are read for the uploader too", async () => {

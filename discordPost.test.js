@@ -130,16 +130,18 @@ test("generation data is stripped from the upload and filed privately as source 
 
 // An original character is <name>_(<the poster's Matrix localpart>), operator
 // ruling 2026-10-11, and a Discord author has no Matrix account: even a name
-// in their own username stays a private prompt term.
-test("a Discord post declares no original character, even one named for its author", async () => {
+// in their own username stays a private prompt term. So does a LEGACY form
+// (oc_<name>, <name>_oc): the Matrix path sends one for the booru to rewrite
+// under the recorded creator, and a Discord post records none to rewrite to.
+test("a Discord post declares no original character, even one named for its author or in a legacy form", async () => {
   const f = fakeBooru();
-  const prompt = "1girl, (maple_\\(selphdestruct\\):1.2), oc_kayla\nSteps: 20";
+  const prompt = "1girl, (maple_\\(selphdestruct\\):1.2), oc_kayla, mahogany_oc\nSteps: 20";
   await deliverer(f.booru).d.deliver({ channel: CHANNEL, msg: msg(), att: att("oc.png"), bytes: png([chunk("tEXt", Buffer.from(`parameters\0${prompt}`, "latin1"))]) });
   const tags = f.named("createPost")[0].args[1].tagString.split(" ");
-  assert.ok(!tags.includes("maple_(selphdestruct)") && !tags.includes("oc_kayla"), tags.join(" "));
+  assert.ok(!tags.includes("maple_(selphdestruct)") && !tags.includes("oc_kayla") && !tags.includes("mahogany_oc"), tags.join(" "));
   const [ts] = f.named("recordTagSources");
   assert.equal(ts.args[1].oc, undefined, "no oc list is sent from Discord");
-  assert.ok(ts.args[1].creator.includes("maple_(selphdestruct)") && ts.args[1].creator.includes("oc_kayla"), JSON.stringify(ts.args[1]));
+  for (const name of ["maple_(selphdestruct)", "oc_kayla", "mahogany_oc"]) assert.ok(ts.args[1].creator.includes(name), `${name}: ${JSON.stringify(ts.args[1])}`);
 });
 
 test("an image already on the booru is not uploaded again", async () => {

@@ -241,10 +241,31 @@ test("original characters: a qualifier naming anyone but the poster is an ordina
   assert.deepEqual(promptToTags("maple_\\(saberx\\), maple_\\(sabe\\)", { owner: "saber" }).characters, [], "the whole qualifier, never a prefix of it");
 });
 
-test("original characters: oc_<name> and its 2026-09-19 shapes are ordinary prompt terms now", () => {
-  const r = promptToTags("(oc_mahogany:0), oc_kayla, (ariah_oc:0) white hair, character_oc_mira, rin_character_oc, oc, 1girl", { owner: "saber" });
-  assert.deepEqual(r.characters, []);
-  assert.deepEqual(r.tags, ["oc_mahogany", "oc_kayla", "ariah_oc", "white_hair", "character_oc_mira", "rin_character_oc", "oc", "1girl"]);
+// THE LEGACY FORMS (operator 2026-10-11: "I'll still need oc_<name> or
+// <name>_oc to be recognized as an alias since pre-existing images all use
+// it"): exactly the four shapes the 2026-09-19 rule accepted. Each goes in the
+// oc list AS WRITTEN, whoever the poster is -- the booru is the one authority
+// that rewrites it to <name>_(<recorded creator>), or refuses it and says why.
+test("original characters: the four legacy shapes go in the oc list as written, for any poster", () => {
+  const prompt = "(oc_mahogany:0), oc_kayla, (ariah_oc:0) white hair, character_oc_mira, rin_character_oc, oc, 1girl";
+  for (const owner of ["saber", "alice", null, undefined]) {
+    const r = promptToTags(prompt, { owner });
+    assert.deepEqual(r.characters, ["oc_mahogany", "oc_kayla", "ariah_oc", "character_oc_mira", "rin_character_oc"], String(owner));
+    assert.deepEqual(r.tags, ["white_hair", "oc", "1girl"], `bare oc is nobody's name (${owner})`);
+  }
+  assert.deepEqual(promptToTags("oc_, _oc, ocean, doc_brown, oc_(series), kayla_ocs").characters, [], "nothing that is not one of the four shapes");
+});
+
+// A name ending in a creator in brackets is THAT creator's, whatever it starts
+// with -- the booru's own reading (FourierTagSource.legacy_original_character
+// is nil for it, and the qualifier is checked). Sent as a legacy form, the
+// booru refused oc_maple_(alice) from @saber as naming alice and dropped it,
+// so a private prompt term vanished from the post.
+test("original characters: an oc_ name that already names a creator in brackets is that creator's, not a legacy form", () => {
+  const r = promptToTags("oc_maple_\\(alice\\), character_oc_pine \\(fate\\), oc_birch_\\(saber\\), 1girl", { owner: "saber" });
+  assert.deepEqual(r.characters, ["oc_birch_(saber)"], "the poster's own qualifier is theirs, as any qualified name");
+  assert.deepEqual(r.tags, ["oc_maple_(alice)", "character_oc_pine_(fate)", "1girl"], "someone else's qualifier stays a private term");
+  assert.deepEqual(promptToTags("oc_birch_\\(saber\\)").characters, [], "no known poster, nothing declared");
 });
 
 test("original characters never count against max", () => {
@@ -254,9 +275,15 @@ test("original characters never count against max", () => {
   assert.deepEqual(r.tags, ["1girl"]);
 });
 
-test("the operator's example: one own character, everything else private or meta", () => {
-  const r = promptToTags("masterpiece, (maple_\\(saber\\):1.2), oc_kayla, saber_(fate)", { owner: "saber" });
-  assert.deepEqual(r, { tags: ["oc_kayla", "saber_(fate)"], meta: ["masterpiece"], characters: ["maple_(saber)"] });
+test("the operator's example: own and legacy characters in the oc list, everything else private or meta", () => {
+  const r = promptToTags("masterpiece, oc_kayla, mahogany_oc, (maple_\\(saber\\):1.2), saber_(fate)", { owner: "saber" });
+  assert.deepEqual(r, { tags: ["saber_(fate)"], meta: ["masterpiece"], characters: ["oc_kayla", "mahogany_oc", "maple_(saber)"] });
+});
+
+test("the site mascots' true names are someone else's qualifier: ordinary prompt terms", () => {
+  const r = promptToTags("sample_\\(41chan\\), tunnel_(41chan), 1girl", { owner: "saber" });
+  assert.deepEqual(r.characters, []);
+  assert.deepEqual(r.tags, ["sample_(41chan)", "tunnel_(41chan)", "1girl"]);
 });
 
 test("the owner reaches promptToTags through both extractors", () => {

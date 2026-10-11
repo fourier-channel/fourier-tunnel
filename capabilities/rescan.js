@@ -42,8 +42,11 @@
 // 2026-10-11: <name>_(<creator>), the creator's own localpart in brackets).
 // With no event sender here, the uploader canon recorded from Synapse is the
 // best name the tunnel has; it only decides which terms are SENT in the `oc`
-// list. The booru declares one only under the post's recorded creator and
-// names each it refuses, which the report carries. Nothing is recorded.
+// list. A LEGACY form (oc_<name>, <name>_oc; operator 2026-10-11) is sent
+// whoever the uploader is, unknown included: the booru rewrites it to
+// <name>_(<recorded creator>). The booru declares one only under the post's
+// recorded creator and names each it refuses, which the report carries.
+// Nothing is recorded.
 //
 // EVERY DEPENDENCY IS INJECTED (see avatar.js for why): the DM command and
 // the rescan CLI hand this the same functions, and the tests hand it fakes.
@@ -177,7 +180,7 @@ async function rescan(target, deps) {
   audit({ kind: "rescan", post_id: post.id, md5, content_type: contentType, creator: creatorTags.length, both: both.length, oc: ocTags.length, oc_not_declared: notDeclared.length, rows: recorded && recorded.recorded, generation: generation.state });
   const ocNote = (ocTags.length ? ` Sent to the booru as original characters: ${ocTags.join(", ")}.` : "") +
     notDeclared.map((why) => ` Not declared: ${why}.`).join("") +
-    (owner ? "" : " No uploader on this homeserver is recorded for it, so no term was read as an original character.");
+    (owner ? "" : " No uploader on this homeserver is recorded for it, so no <name>_(<localpart>) term was read as the uploader's own character.");
   const report = (creatorTags.length || ocTags.length
     ? `Post #${post.id} (${kind}): read ${creatorTags.length} creator tag(s) from its metadata, ${both.length} of them also the autotagger's; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} provenance rows now on the post.${ocNote}`
     : `Post #${post.id} (${kind}): no prompt in these bytes. Its old creator rows, if any, are cleared; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} rows remain.`) +
