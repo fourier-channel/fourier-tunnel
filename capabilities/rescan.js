@@ -38,11 +38,19 @@
 // recorded once when the tunnel made the post, and whoever they allow. The
 // post's 41chan_ tags are not consulted: any member can edit them.
 //
+// ORIGINAL CHARACTERS are read for the media's UPLOADER (operator ruling
+// 2026-10-11: <name>_(<creator>), the creator's own localpart in brackets).
+// With no event sender here, the uploader canon recorded from Synapse is the
+// best name the tunnel has; it only decides which terms are SENT in the `oc`
+// list. The booru declares one only under the post's recorded creator and
+// names each it refuses, which the report carries. Nothing is recorded.
+//
 // EVERY DEPENDENCY IS INJECTED (see avatar.js for why): the DM command and
 // the rescan CLI hand this the same functions, and the tests hand it fakes.
 "use strict";
 
 const { findPostForBytes, generationRecord, generationRefusal, md5hex } = require("../image-plan");
+const { localpartIfLocal } = require("../poster");
 
 const MD5 = /^[0-9a-f]{32}$/i;
 const USAGE = "Usage: !rescan <mxc://server/media-id | md5>";
@@ -53,7 +61,8 @@ const USAGE = "Usage: !rescan <mxc://server/media-id | md5>";
  *
  * @param {string} target  an mxc:// url or a 32-hex md5
  * @param {object} deps
- * @param {(mxc: string) => Promise<{buffer: Buffer, contentType: string}>} deps.download
+ * @param {(mxc: string) => Promise<{buffer: Buffer, contentType: string, uploader?: string|null}>} deps.download
+ *   uploader: the MXID that uploaded the media, from canon's record, or null
  * @param {(md5: string) => Promise<object|null>} deps.findPostByMd5
  * @param {(postId: number) => Promise<{tags: string[], sources: object}|null>} deps.getTagProjection
  * @param {(postId: number, partition: object) => Promise<object>} deps.recordTagSources
@@ -66,6 +75,8 @@ const USAGE = "Usage: !rescan <mxc://server/media-id | md5>";
  *   creator tags from what the strip took out -- the live path's source
  * @param {(buffer: Buffer, contentType: string) => {buffer: Buffer, removed: object, changed: boolean}} deps.strip
  * @param {number} [deps.maxCreatorTags]
+ * @param {string} [deps.domain]  this homeserver's name: only an uploader on it
+ *   has a localpart an original character may carry
  * @param {(record: object) => void} deps.audit
  * @returns {Promise<{ok: boolean, report: string, postId?: number, partition?: object, generation?: string}>}
  */
@@ -80,7 +91,7 @@ async function rescan(target, deps) {
   const t = String(target || "").trim();
   if (!t) return { ok: false, report: USAGE };
 
-  let post, buffer, contentType, md5;
+  let post, buffer, contentType, md5, uploader;
   // The strip of the raw bytes: { buffer, removed, changed }, or the reason it
   // refused. A refusal does not stop the creator-tag rewrite; it only means no
   // generation record is sent from bytes that could not be cleanly read.
@@ -102,11 +113,11 @@ async function rescan(target, deps) {
       if (!post) return { ok: false, report: `No post on the booru has md5 ${md5}, and no generation record names it as a Matrix original (or the post is deleted and hidden from me). Rescan by the image's mxc url instead: that finds a post under every md5 it could have.` };
       const source = String(post.source || "");
       if (!source.startsWith("mxc://")) return { ok: false, report: `Post #${post.id} was not posted by me: its source is ${source || "empty"}, not an mxc url, so I have nowhere to fetch its bytes from.` };
-      ({ buffer, contentType } = await download(source));
+      ({ buffer, contentType, uploader } = await download(source));
       stripRaw();
       md5 = post.md5 || md5;
     } else if (t.startsWith("mxc://")) {
-      ({ buffer, contentType } = await download(t));
+      ({ buffer, contentType, uploader } = await download(t));
       stripRaw();
       const rawMd5 = md5hex(buffer);
       const strippedMd5 = stripped && stripped.changed ? md5hex(stripped.buffer) : rawMd5;
@@ -124,7 +135,9 @@ async function rescan(target, deps) {
   // The prompt, read with the extractor as it is TODAY, from what the strip
   // took out -- or, when the strip refused, from the bytes, so the post's
   // provenance is still rewritten.
-  const scraped = (stripped ? tagsFromRemoved(stripped.removed, { max: deps.maxCreatorTags }) : extract(buffer, contentType, { max: deps.maxCreatorTags })) || {};
+  const owner = localpartIfLocal(uploader, deps.domain);
+  const opts = { max: deps.maxCreatorTags, owner };
+  const scraped = (stripped ? tagsFromRemoved(stripped.removed, opts) : extract(buffer, contentType, opts)) || {};
   const creatorTags = scraped.tags || [];
   const scrapedMeta = scraped.meta || [];
   const ocTags = scraped.characters || [];
@@ -160,8 +173,11 @@ async function rescan(target, deps) {
   const generation = await resendGeneration({ post, md5, rawMd5: md5hex(buffer), stripped, stripError, deps });
 
   const kind = (contentType || "").replace(/^image\//, "") || "?";
-  audit({ kind: "rescan", post_id: post.id, md5, content_type: contentType, creator: creatorTags.length, both: both.length, oc: ocTags.length, rows: recorded && recorded.recorded, generation: generation.state });
-  const ocNote = ocTags.length ? ` Original characters: ${ocTags.join(", ")}.` : "";
+  const notDeclared = Object.values((recorded && recorded.original_characters_not_declared) || {});
+  audit({ kind: "rescan", post_id: post.id, md5, content_type: contentType, creator: creatorTags.length, both: both.length, oc: ocTags.length, oc_not_declared: notDeclared.length, rows: recorded && recorded.recorded, generation: generation.state });
+  const ocNote = (ocTags.length ? ` Sent to the booru as original characters: ${ocTags.join(", ")}.` : "") +
+    notDeclared.map((why) => ` Not declared: ${why}.`).join("") +
+    (owner ? "" : " No uploader on this homeserver is recorded for it, so no term was read as an original character.");
   const report = (creatorTags.length || ocTags.length
     ? `Post #${post.id} (${kind}): read ${creatorTags.length} creator tag(s) from its metadata, ${both.length} of them also the autotagger's; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} provenance rows now on the post.${ocNote}`
     : `Post #${post.id} (${kind}): no prompt in these bytes. Its old creator rows, if any, are cleared; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} rows remain.`) +

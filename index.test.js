@@ -198,7 +198,7 @@ const ROUTES = [
   }],
   ["POST", /^\/posts\/(\d+)\/tag_sources\.json$/, (req, m, body) => {
     world.tagSources.push({ postId: Number(m[1]), ...JSON.parse(body) });
-    return [200, { post_id: Number(m[1]), recorded: 1, projection: { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } } }];
+    return [200, { post_id: Number(m[1]), recorded: 1, projection: { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }, ...(world.replies.tagSources || {}) }];
   }],
   ["GET", /^\/posts\/(\d+)\/tag_sources\.json$/, () => [200, { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }]],
   ["GET", /^\/tags\.json$/, () => [200, []]],
@@ -425,6 +425,44 @@ test("the private creator tags come from what the strip TOOK -- never from the r
   assert.ok(world.uploads[0].includes(CAPTION), "the caption is kept in the file");
   assert.deepEqual(world.tagSources[0].creator, [], "so it is nobody's private creator tag");
   assert.deepEqual(world.metadata, [], "and nothing was recorded privately");
+});
+
+// ORIGINAL CHARACTERS (operator ruling 2026-10-11): <name>_(<creator>), the
+// creator's own localpart in brackets, is sent in the hub's `oc` list and
+// NOT in the tag string the post is created with: the booru puts a name it
+// declares on the post itself, and refuses to re-file a general tag that
+// already has a post -- which a name in the creating tag string is, by the
+// time the hub reads `oc`. Every other prompt term -- oc_<name> and a
+// qualifier naming someone else among them -- is a private creator tag.
+const OC_PARAMS = "masterpiece, (maple_\\(saber\\):1.2), oc_kayla, saber_(fate)\nSteps: 20, Sampler: Euler a";
+const OC_PNG = Buffer.concat([...PNG_PARTS, chunk("tEXt", Buffer.from(`parameters\0${OC_PARAMS}`, "latin1")), IEND]);
+
+test("an original character: the poster's own <name>_(<localpart>) is sent to be declared; oc_ and someone else's qualifier stay private", async () => {
+  const { outcome, lines } = await post("ocpic", OC_PNG, "image/png", "@saber:41chan.net");
+  assert.equal(outcome, "posted", lines.join("\n"));
+  const tags = world.created[0].post.tag_string.split(" ");
+  assert.ok(!tags.includes("maple_(saber)"), `the booru puts a declared name on the post, never the creating tag string: ${tags.join(" ")}`);
+  assert.ok(!tags.includes("oc_kayla") && !tags.includes("saber_(fate)"), `nothing else from the prompt is public: ${tags.join(" ")}`);
+  const sent = world.tagSources[0];
+  assert.deepEqual(sent.oc, ["maple_(saber)"]);
+  assert.deepEqual(sent.creator, ["oc_kayla", "saber_(fate)"]);
+  assert.deepEqual(sent.meta, ["masterpiece"]);
+  assert.ok(lines.some((l) => /1 oc\)/.test(l)), lines.join("\n"));
+});
+
+test("the same picture from someone else declares nothing: maple_(saber) is a private prompt term for alice", async () => {
+  const { outcome, lines } = await post("ocpic2", OC_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.ok(!world.created[0].post.tag_string.split(" ").includes("maple_(saber)"));
+  assert.deepEqual(world.tagSources[0].oc, []);
+  assert.deepEqual(world.tagSources[0].creator, ["maple_(saber)", "oc_kayla", "saber_(fate)"]);
+});
+
+test("an original character the booru would not declare is logged with the booru's reason", async () => {
+  world.replies.tagSources = { original_characters_not_declared: { "maple_(saber)": "maple_(saber) is already a general tag on 3 posts, so it is not re-filed" } };
+  const { outcome, lines } = await post("ocpic3", OC_PNG, "image/png", "@saber:41chan.net");
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.ok(lines.some((l) => /^warn: \[tag-hub\] post #42: original character NOT declared: maple_\(saber\) is already a general tag on 3 posts/.test(l)), lines.join("\n"));
 });
 
 // --- THE HISTORY WALK, through backfillRoomNow ------------------------------------

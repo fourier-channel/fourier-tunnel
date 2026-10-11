@@ -133,13 +133,15 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
   const autoTags = (derived && derived.tags) || [];
   const creatorTags = plan.scraped.tags || [];
   const metaTags = plan.scraped.meta || [];
-  const ocTags = plan.scraped.characters || [];
+  // No original characters: one is <name>_(<the poster's Matrix localpart>)
+  // (operator ruling 2026-10-11) and a Discord author has no Matrix account,
+  // so planImage reads the prompt with no owner and every term is a prompt term.
   const creatorSet = new Set(creatorTags);
   const autoSet = new Set(autoTags);
   const both = autoTags.filter((t) => creatorSet.has(t));
   const autoOnly = autoTags.filter((t) => !creatorSet.has(t));
   const creatorOnly = creatorTags.filter((t) => !autoSet.has(t));
-  const publicTags = imagePlan.publicTagsFor({ autoTags, metaTags, ocTags, posterTag, aiGenerated: plan.aiGenerated, noTrain: true });
+  const publicTags = imagePlan.publicTagsFor({ autoTags, metaTags, posterTag, aiGenerated: plan.aiGenerated, noTrain: true });
   const rating = (derived && derived.rating) || (deps.config && deps.config.bridge && deps.config.bridge.default_rating) || "q";
 
   let post;
@@ -179,7 +181,7 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
   } catch (err) {
     log(`[poster] artist tag ${posterTag} not categorised for post #${post.id}: ${err.message}`);
   }
-  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, oc: ocTags, spectrum: [...autoOnly, ...both, ...metaTags] };
+  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, spectrum: [...autoOnly, ...both, ...metaTags] };
   try {
     await danbooru.recordTagSources(post.id, partition);
   } catch (err) {

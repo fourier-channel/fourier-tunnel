@@ -31,6 +31,7 @@
 // tunnel, at creation, writes it (operator ruling 2026-09-29).
 
 const crypto = require("crypto");
+const { localpartIfLocal } = require("./poster");
 
 // The distinct outcome of a refused strip. backfill.js and catchup.js count it
 // apart from "done": a picture that was never posted is not a success.
@@ -90,10 +91,14 @@ function generationRecord({ md5, rawMd5, poster, removed, source = "matrix" }) {
   return { md5, rawMd5, source, poster: poster || null, fields };
 }
 
-/** The booru's PUBLIC tag string, as a list. Creator-only tags never enter it. */
-function publicTagsFor({ autoTags = [], metaTags = [], ocTags = [], posterTag = null, aiGenerated = false, noTrain = false }) {
+/**
+ * The booru's PUBLIC tag string, as a list. Creator-only tags never enter it,
+ * and neither do original characters: the booru puts each one it declares on
+ * the post itself (index.js, at the `oc` list).
+ */
+function publicTagsFor({ autoTags = [], metaTags = [], posterTag = null, aiGenerated = false, noTrain = false }) {
   return [...new Set([
-    ...autoTags, ...metaTags, ...ocTags,
+    ...autoTags, ...metaTags,
     ...(posterTag ? [posterTag] : []),
     ...(aiGenerated ? [AI_GENERATED_TAG] : []),
     ...(noTrain ? [NO_TRAIN_TAG] : []),
@@ -110,6 +115,10 @@ function publicTagsFor({ autoTags = [], metaTags = [], ocTags = [], posterTag = 
  * @param {(md5: string) => Promise<object|null>} deps.findPostByMd5
  * @param {(rawMd5: string) => Promise<string|null>} deps.findByRawMd5
  * @param {number} [deps.maxCreatorTags]
+ * @param {string} [deps.domain]  this homeserver's name. The sender's localpart
+ *   on it is the one name an original character may carry in brackets
+ *   (prompt-tags ORIGINAL_CHARACTER); a sender anywhere else -- a remote
+ *   account, a Discord author -- declares none.
  * @param {(line: string) => void} deps.log
  * @returns {Promise<object>} one of
  *   { action: "refuse", status: "strip-refused", reason }
@@ -138,10 +147,11 @@ async function planImage({ buffer, contentType, sender, rawMd5: knownRawMd5 }, d
   const upload = { buffer: stripped.buffer, md5: stripped.changed ? md5hex(stripped.buffer) : rawMd5 };
   const removed = stripped.removed || {};
 
-  // 2. The prompt, from the text the strip took out.
+  // 2. The prompt, from the text the strip took out, read for its SENDER: an
+  // original character is <name>_(<the sender's own localpart>).
   let scraped = NO_SCRAPE;
   try {
-    scraped = creatorTags(removed, { max: deps.maxCreatorTags }) || NO_SCRAPE;
+    scraped = creatorTags(removed, { max: deps.maxCreatorTags, owner: localpartIfLocal(sender, deps.domain) }) || NO_SCRAPE;
   } catch (err) {
     log(`[creator-tags] prompt scrape failed: ${err.message}`);
   }

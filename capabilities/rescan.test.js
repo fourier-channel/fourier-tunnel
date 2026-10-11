@@ -12,7 +12,7 @@ const ROOM = "!dm:41chan.net";
 const MXC = "mxc://41chan.net/abc123";
 const BYTES = Buffer.from("not really a jpeg");
 const MD5 = require("crypto").createHash("md5").update(BYTES).digest("hex");
-const TAGS = { tags: ["hilda_(pokemon)", "smile"], meta: ["masterpiece"], characters: ["oc_kayla"] };
+const TAGS = { tags: ["hilda_(pokemon)", "smile"], meta: ["masterpiece"], characters: ["maple_(saber)"] };
 
 function rig(over = {}) {
   const sent = [], audited = [], written = [], generation = [], lookups = [], rawLookups = [];
@@ -49,9 +49,9 @@ test("by mxc: downloads, finds the post by md5, rebuilds the split against the a
   assert.deepEqual(p.auto, ["1girl"]);
   assert.deepEqual(p.meta, ["highres", "masterpiece"]);
   assert.equal(p.replace_creator, true);
-  assert.deepEqual(p.oc, ["oc_kayla"]);
+  assert.deepEqual(p.oc, ["maple_(saber)"]);
   assert.match(out.report, /Post #7 \(jpeg\): read 2 creator tag/);
-  assert.match(out.report, /Original characters: oc_kayla/);
+  assert.match(out.report, /Sent to the booru as original characters: maple_\(saber\)\./);
 });
 
 test("by md5: fetches the bytes from the post's own mxc source", async () => {
@@ -227,6 +227,50 @@ test("a strip that refuses: creator tags are still rewritten from the bytes, not
   assert.equal(r.generation.length, 0);
   assert.equal(out.generation, "strip-refused");
   assert.match(out.report, /Generation metadata NOT re-recorded: generation data survived the strip/);
+});
+
+// ORIGINAL CHARACTERS (operator ruling 2026-10-11): a rescan has no event
+// sender, so the poster it reads characters for is the media's UPLOADER, which
+// canon recorded from Synapse. The booru checks it against the post's recorded
+// creator; the rescan records nobody.
+test("original characters on a re-read: read for the uploader on this homeserver, and the booru's refusals reported", async () => {
+  const seen = [];
+  const r = rig({
+    download: async () => ({ buffer: BYTES, contentType: "image/png", uploader: "@saber:41chan.net" }),
+    domain: "41chan.net",
+    creatorTags: (removed, opts) => { seen.push(opts.owner); return TAGS; },
+    recordTagSources: async (id, partition) => {
+      r.written.push([id, partition]);
+      return { post_id: id, recorded: 4, original_characters_not_declared: { "maple_(saber)": "maple_(saber) is already a general tag on 3 posts" } };
+    },
+  });
+  const out = await rescan(MXC, r.deps);
+  assert.equal(out.ok, true);
+  assert.deepEqual(seen, ["saber"]);
+  assert.match(out.report, /Not declared: maple_\(saber\) is already a general tag on 3 posts\./);
+  assert.ok(r.audited.some((a) => a.kind === "rescan" && a.oc_not_declared === 1), JSON.stringify(r.audited));
+  for (const [uploader, domain] of [["@saber:elsewhere.org", "41chan.net"], [null, "41chan.net"], ["@saber:41chan.net", undefined]]) {
+    seen.length = 0;
+    const again = rig({ download: async () => ({ buffer: BYTES, contentType: "image/png", uploader }), domain, creatorTags: (removed, opts) => { seen.push(opts.owner); return { ...TAGS, characters: [] }; } });
+    const o = await rescan(MXC, again.deps);
+    assert.deepEqual(seen, [null], `${uploader} on ${domain}`);
+    assert.match(o.report, /No uploader on this homeserver is recorded for it, so no term was read as an original character\./);
+  }
+});
+
+test("original characters on a refused strip: the bytes are read for the uploader too", async () => {
+  const seen = [];
+  const r = rig({
+    download: async () => ({ buffer: RAW, contentType: "image/png", uploader: "@saber:41chan.net" }),
+    domain: "41chan.net",
+    strip: () => { throw new Error("generation data survived the strip: something"); },
+    findPostByMd5: async (m) => (m === md5(RAW) ? { id: 14, md5: md5(RAW), source: MXC } : null),
+    extract: (buffer, type, opts) => { seen.push(opts.owner); return { tags: [], meta: [], characters: ["maple_(saber)"] }; },
+  });
+  const out = await rescan(MXC, r.deps);
+  assert.equal(out.ok, true);
+  assert.deepEqual(seen, ["saber"]);
+  assert.deepEqual(r.written[0][1].oc, ["maple_(saber)"]);
 });
 
 test("the booru refusing the record is a sentence and an audit line, never a throw, and never the field text", async () => {

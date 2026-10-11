@@ -618,6 +618,7 @@ async function handleImageEvent(bridge, event) {
     findPostByMd5: (md5) => danbooru.findPostByMd5(md5),
     findByRawMd5: (rawMd5) => danbooru.findGenerationByRawMd5(rawMd5),
     maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
+    domain: config.homeserver.domain,
     log: (line) => console.warn(line),
   });
   if (plan.action === "refuse") {
@@ -670,9 +671,15 @@ async function handleImageEvent(bridge, event) {
   const autoTags = (derived && derived.tags) || [];
   const creatorTags = plan.scraped.tags || [];
   const metaTags = plan.scraped.meta || [];
-  // Original characters (oc_<name>): the creator naming a character. PUBLIC,
-  // unlike the rest of the prompt -- a name is the point of a name -- so
-  // they go into tag_string below and the booru files them as characters.
+  // Original characters (<name>_(<the sender's own localpart>), operator ruling
+  // 2026-10-11; prompt-tags ORIGINAL_CHARACTER): the creator naming their own
+  // character. PUBLIC, unlike the rest of the prompt -- a name is the point of
+  // a name -- but made public BY THE BOORU: they go only in the hub's `oc`
+  // list, and the booru, checking them against the recorded creator, puts each
+  // one it declares on the post and files it as a character. Never in the
+  // tag_string the post is created with: that makes the name a general tag
+  // with a post before the hub reads `oc`, and the booru never re-files such
+  // a tag at post time, so every new character was refused and left public.
   const ocTags = plan.scraped.characters || [];
   // Provenance partition (UI: creator=green, auto=orange, both=gradient; meta =
   // de-emphasised quality/meta section). Creator-only display is privacy-gated
@@ -700,7 +707,7 @@ async function handleImageEvent(bridge, event) {
   // used to derive it from the file's metadata, and the file it reads no longer
   // has any. Not when it removed only something shaped like a prompt, which a
   // photo's caption can be.
-  const publicTags = imagePlan.publicTagsFor({ autoTags, metaTags, ocTags, posterTag, aiGenerated: plan.aiGenerated });
+  const publicTags = imagePlan.publicTagsFor({ autoTags, metaTags, posterTag, aiGenerated: plan.aiGenerated });
   const rating = (derived && derived.rating) || config.bridge.default_rating;
 
   let post;
@@ -763,6 +770,10 @@ async function handleImageEvent(bridge, event) {
   try {
     const recorded = await danbooru.recordTagSources(post.id, partition);
     projection = recorded && recorded.projection;
+    // The booru names each original character it would not declare, and why.
+    for (const why of Object.values((recorded && recorded.original_characters_not_declared) || {})) {
+      console.warn(`[tag-hub] post #${post.id}: original character NOT declared: ${why}`);
+    }
   } catch (err) {
     console.warn(`[tag-hub] recordTagSources failed for post #${post.id}: ${err.message}`);
   }
@@ -1086,7 +1097,7 @@ async function canonRawForRescan(mxcUrl) {
   if (!c.raw) {
     throw new Error(`the original of ${mxcUrl}, the only file that carried its generation data, is gone (superseded/ was cleared). There is nothing to re-read; the post's creator tags are left as they are.`);
   }
-  return { buffer: c.raw, contentType: c.media_type };
+  return { buffer: c.raw, contentType: c.media_type, uploader: c.uploader || null };
 }
 
 // The bridge bot's !rescan, through the shared capability: an admin, in a
@@ -1105,6 +1116,7 @@ function rescanDeps(bridge) {
     creatorTags: extractCreatorTagsFromFields,
     strip: stripGeneration,
     maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
+    domain: config.homeserver.domain,
     sendText: (room, text) => bridge.getIntent().sendText(room, text),
     admins: botAdmins(),
     isDm: async (room) => (await joinedMemberCount(bridge, room)) === 2,

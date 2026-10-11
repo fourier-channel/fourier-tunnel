@@ -44,7 +44,7 @@ function rig(over = {}) {
   const rawRecords = over.rawRecords || {};
   const deps = {
     strip: (buffer) => { calls.push(["strip", buffer]); return { buffer: STRIPPED, removed: REMOVED, changed: true, confident: true }; },
-    creatorTags: (removed) => { calls.push(["creatorTags", removed]); return { tags: ["smile"], meta: ["masterpiece"], characters: ["oc_kayla"] }; },
+    creatorTags: (removed) => { calls.push(["creatorTags", removed]); return { tags: ["smile"], meta: ["masterpiece"], characters: ["maple_(alice)"] }; },
     findPostByMd5: async (md5) => { calls.push(["find", md5]); return posts[md5] || null; },
     findByRawMd5: async (md5) => { calls.push(["raw", md5]); return rawRecords[md5] || null; },
     maxCreatorTags: 40,
@@ -102,6 +102,23 @@ test("an image with no generation data: the raw md5 is not asked twice, no ai-ge
   assert.equal(plan.upload.buffer, RAW);
   assert.equal(plan.aiGenerated, false);
   assert.equal(plan.record, null);
+});
+
+// ORIGINAL CHARACTERS (operator ruling 2026-10-11): the poster is the
+// SENDER, and only a sender on this homeserver has a localpart to name.
+test("original characters: declared only under the sender's own localpart on this homeserver", async () => {
+  const removed = { "png:parameters": "1girl, (maple_\\(alice\\):1.2), maple_\\(bob\\), oc_kayla, saber_(fate)\nSteps: 20" };
+  const deps = (over) => ({ ...rig().deps, strip: (buffer) => ({ buffer, removed, changed: false, confident: true }), creatorTags: extractCreatorTagsFromFields, domain: "41chan.net", ...over });
+  const asAlice = await planImage({ buffer: RAW, contentType: "image/png", sender: ALICE }, deps());
+  assert.deepEqual(asAlice.scraped.characters, ["maple_(alice)"]);
+  assert.deepEqual(asAlice.scraped.tags, ["1girl", "maple_(bob)", "oc_kayla", "saber_(fate)"]);
+  const asBob = await planImage({ buffer: RAW, contentType: "image/png", sender: BOB }, deps());
+  assert.deepEqual(asBob.scraped.characters, ["maple_(bob)"]);
+  for (const [sender, over] of [["@alice:elsewhere.org", {}], ["discord:136983939662348288", {}], [ALICE, { domain: undefined }]]) {
+    const plan = await planImage({ buffer: RAW, contentType: "image/png", sender }, deps(over));
+    assert.deepEqual(plan.scraped.characters, [], `${sender} ${JSON.stringify(over)}`);
+    assert.ok(plan.scraped.tags.includes("maple_(alice)"), "an undeclared name stays a private prompt term");
+  }
 });
 
 test("a strip that throws REFUSES: nothing is looked up, nothing uploaded, and the reason comes back", async () => {
@@ -185,9 +202,9 @@ test("generationRecord: null when nothing was removed; poster null rather than u
 });
 
 test("publicTagsFor: ai-generated only when asked, never duplicated", () => {
-  const base = { autoTags: ["1girl", "smile"], metaTags: ["highres"], ocTags: ["oc_kayla"], posterTag: "41chan_alice" };
-  assert.deepEqual(publicTagsFor({ ...base, aiGenerated: false }), ["1girl", "smile", "highres", "oc_kayla", "41chan_alice"]);
-  assert.deepEqual(publicTagsFor({ ...base, aiGenerated: true }), ["1girl", "smile", "highres", "oc_kayla", "41chan_alice", AI_GENERATED_TAG]);
+  const base = { autoTags: ["1girl", "smile"], metaTags: ["highres"], posterTag: "41chan_alice" };
+  assert.deepEqual(publicTagsFor({ ...base, aiGenerated: false }), ["1girl", "smile", "highres", "41chan_alice"]);
+  assert.deepEqual(publicTagsFor({ ...base, aiGenerated: true }), ["1girl", "smile", "highres", "41chan_alice", AI_GENERATED_TAG]);
   assert.deepEqual(publicTagsFor({ autoTags: [AI_GENERATED_TAG], aiGenerated: true }), [AI_GENERATED_TAG]);
   assert.equal(AI_GENERATED_TAG, "ai-generated", "the tag chanbooru's is_ai_generated? used to add");
 });

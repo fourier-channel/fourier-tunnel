@@ -310,20 +310,26 @@ function normalizeTerm(raw) {
     .replace(/^[-~*@_]+|_+$/g, "");
 }
 
-// ORIGINAL CHARACTERS. Operator, 2026-09-19: "We use lora-style names for
-// original characters. so (oc_mahogany:0) or (oc_kayla) (with or without the
-// parens) within a prompt is an original character and should be extracted
-// and declared as such." So a term that normalises to oc_<name> -- the
-// weight and the parentheses are gone by then -- is not a creator tag like
-// the rest of the prompt: it is the creator NAMING a character, and it goes
-// in its own list for the booru to put on the post publicly and file as a
-// character. It never counts against `max`.
-// BOTH SHAPES, prefix and suffix, with or without "character" (operator:
-// "it looks like it might be character_oc ... I'd program in both just to
-// be safe"). Measured in this deployment's own prompts: "(ariah_oc:0)",
-// five times -- the suffix form. Bare "oc" alone is nobody's name.
-const OC_PREFIX = "oc_";
-const OC_NAME = /^(?:(?:character_)?oc_[a-z0-9][a-z0-9_'.-]*|[a-z0-9][a-z0-9_'.-]*_(?:character_)?oc)$/;
+// ORIGINAL CHARACTERS. Operator ruling 2026-10-11: an original character's
+// tag is <name>_(<creator>) -- the character's name, then in brackets the
+// Matrix localpart of the creator whose character it is. In a prompt it is
+// written the way any qualified name is, "maple \(saber\)" (or weighted,
+// emphasised, or unescaped after a name), and normalizeTerm makes all of them
+// maple_(saber). Such a term is the creator NAMING their own character only
+// when the qualifier is the POSTER's own localpart (`owner`, which the caller
+// knows from who sent the image). Then it is not a creator tag like the rest
+// of the prompt: it goes in its own list for the booru to put on the post
+// publicly and file as a character, and it never counts against `max`. A
+// qualifier naming anyone or anything else -- saber_(fate), hilda_(pokemon),
+// another member's character -- is an ordinary prompt term, and so is every
+// oc_<name>, the shape this rule replaced. The same shape as chanbooru's
+// FourierTagSource ORIGINAL_CHARACTER, which checks the qualifier again
+// against the post's RECORDED creator and names what it will not declare.
+const ORIGINAL_CHARACTER = /^([a-z0-9][^()]*)_\(([^()]+)\)$/;
+function isOriginalCharacter(term, owner) {
+  const m = owner ? ORIGINAL_CHARACTER.exec(term) : null;
+  return !!m && m[2] === String(owner).toLowerCase();
+}
 
 // A PARENTHESISED TOKEN RUNS INTO THE WORDS AFTER IT. "(ariah_oc:0) white
 // hair" is one comma-separated term in a real prompt: a weighted lora-style
@@ -333,8 +339,10 @@ const OC_NAME = /^(?:(?:character_)?oc_[a-z0-9][a-z0-9_'.-]*|[a-z0-9][a-z0-9_'.-
 // term with text after it, is its own piece, and the text around it is
 // another. The one group left alone is a trailing, unweighted "(series)"
 // after a name -- that is a qualifier and normalizeTerm keeps it. Escaped
-// \(...\) never splits: it is part of a Danbooru name.
-const GROUP = /(?<!\\)\(([^()]*?)(?<!\\)\)/g;
+// \(...\) never splits: it is part of a Danbooru name -- and a group may HOLD
+// one, "(maple_\(saber\):1.1) white hair", or a weighted qualified name would
+// run into the words after it.
+const GROUP = /(?<!\\)\(((?:\\[()]|[^()])*?)(?<!\\)\)/g;
 function expandTerm(raw) {
   const t = String(raw);
   const groups = [...t.matchAll(GROUP)];
@@ -362,9 +370,13 @@ function expandTerm(raw) {
 // Normalise a freeform prompt into Danbooru-style tags: comma-split, strip
 // weights/brackets/LoRA tokens, lowercase, spaces -> underscores, dedupe. Returns
 // { tags, meta, characters } -- content tags, quality/meta terms (kept,
-// de-emphasised), and original characters (oc_<name>).
+// de-emphasised), and original characters (<name>_(<owner>), above).
+// opts: { max, owner } -- owner is the poster's Matrix localpart on this
+// homeserver, or null when there is none (a Discord author, a remote account,
+// an unknown uploader), and then nothing is an original character.
 function promptToTags(prompt, opts) {
   const max = (opts && opts.max) || 60;
+  const owner = (opts && opts.owner) || null;
   const out = { tags: [], meta: [], characters: [] };
   if (!prompt) return out;
   const seen = new Set();
@@ -375,7 +387,7 @@ function promptToTags(prompt, opts) {
     if (/^[\d_.]+$/.test(t)) continue;
     if (seen.has(t)) continue;
     seen.add(t);
-    if (OC_NAME.test(t)) out.characters.push(t);
+    if (isOriginalCharacter(t, owner)) out.characters.push(t);
     else if (QUALITY_META.has(t)) out.meta.push(t);
     else if (out.tags.length < max) out.tags.push(t);
   }
@@ -469,4 +481,4 @@ function extractCreatorTagsFromFields(fields, opts) {
   return { tags: [], meta: [], characters: [] };
 }
 
-module.exports = { extractCreatorTags, extractCreatorTagsFromFields, chunksFromFields, normalizeTerm, expandTerm, OC_PREFIX, OC_NAME, embeddedChunks, pngTextChunks, exifTextFields, exifChunks, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };
+module.exports = { extractCreatorTags, extractCreatorTagsFromFields, chunksFromFields, normalizeTerm, expandTerm, ORIGINAL_CHARACTER, embeddedChunks, pngTextChunks, exifTextFields, exifChunks, jpegTiff, webpTiff, decodeUserComment, rawPrompt, promptToTags, QUALITY_META };

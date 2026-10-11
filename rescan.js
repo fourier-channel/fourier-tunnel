@@ -41,7 +41,7 @@ async function download(mxcUrl) {
   if (!c.raw) {
     throw new Error(`the original of ${mxcUrl}, the only file that carried its generation data, is gone (superseded/ was cleared). There is nothing to re-read; the post's creator tags are left as they are.`);
   }
-  return { buffer: c.raw, contentType: c.media_type };
+  return { buffer: c.raw, contentType: c.media_type, uploader: c.uploader || null };
 }
 
 async function main() {
@@ -58,6 +58,7 @@ async function main() {
     creatorTags: extractCreatorTagsFromFields,
     strip: stripGeneration,
     maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
+    domain: config.homeserver.domain,
     audit: (record) => console.log("[audit]", JSON.stringify(record)),
   };
   let failed = 0;

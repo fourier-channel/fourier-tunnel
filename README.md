@@ -49,6 +49,14 @@ first component.
    Prompt-derived tags and the generation data are visible ONLY to that
    creator -- no admin or moderator bypass (operator ruling 2026-09-29). They
    never enter the booru's tag string, the image file, or the room state.
+   The one exception is an ORIGINAL CHARACTER: a prompt term that normalises
+   to `<name>_(<localpart>)`, where the localpart is the sender's own (written
+   `maple \(saber\)` in a prompt by `@saber`), is sent in the provenance
+   partition's `oc` list -- never in the tag string the post is created with --
+   and the booru, checking it against the recorded creator, puts it on the
+   post publicly and files it as a character, or says why not. A qualifier
+   naming anyone else (`saber_(fate)`) and every `oc_<name>` are ordinary
+   private prompt terms (operator ruling 2026-10-11).
 7. The tags are written into the room as a `net.41chan.media.tags` state
    event, keyed by the image's MXC URI, with the post id, rating, an
    `updated_by` of the bot's localpart, and a `sources` object naming which

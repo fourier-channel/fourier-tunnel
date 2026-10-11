@@ -452,3 +452,26 @@ node:22-slim with `npm ci`; engines ">=22 <23" with engine-strict; and
 nedb-compat.test.js pins the ceiling. Suite inside the built image: 391 tests,
 390 pass, 1 skipped (sibling checkout not mounted).
 
+
+## 2026-10-11 -- original characters are <name>_(<poster>), not oc_<name>
+
+Operator ruling 2026-10-11: an original character's tag is
+<name>_(<creator>), the creator being the poster's own Matrix name, and it
+replaces the 2026-09-19 oc_<name> rule ("oc_name is my personal tag for the
+characters--I will switch"). The booru half is chanbooru b69fff0f4: creators
+claim and own such tags, and the tag hub declares one only when its
+qualifier is the recorded poster's own name.
+
+prompt-tags.js: OC_PREFIX/OC_NAME are gone. A prompt term that normalises
+to <name>_(<q>) is an original character only when <q> is the poster's own
+localpart on this homeserver (a live post: the event sender; !rescan: the
+uploader canon recorded; a remote or Discord author: nobody). It is sent in
+the oc list and NOT put in the creating tag string: put there first, it
+became a general tag with one post, and the booru (rightly) will not re-file
+a general tag with posts as a character, so no new name could ever have been
+declared. The booru adds a declared name to the post itself. oc_<name> and
+someone else's qualifier (saber_(fate)) are ordinary private prompt terms.
+GROUP accepts escaped brackets inside a weighted group, so
+(maple_\(saber\):1.2) stays one term. Refusals the booru returns
+(original_characters_not_declared) are logged and shown in the rescan
+report. Tests 498, lint clean.

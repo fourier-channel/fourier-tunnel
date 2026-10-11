@@ -208,21 +208,62 @@ test("normaliser: search operators and handles do not become tags", () => {
   assert.equal(normalizeTerm("k-on!"), "k-on!");
 });
 
-test("original characters: oc_<name> is extracted on its own, weighted or bare, parenthesised or not", () => {
-  const r = promptToTags("masterpiece, 1girl, (oc_mahogany:0), oc_kayla, (oc_rin), smile, oc_x");
-  assert.deepEqual(r.characters, ["oc_mahogany", "oc_kayla", "oc_rin", "oc_x"]);
-  assert.deepEqual(r.tags, ["1girl", "smile"], "an OC is not also a creator tag");
+// ORIGINAL CHARACTERS (operator ruling 2026-10-11): <name>_(<creator>), the
+// creator's own Matrix localpart in brackets. `owner` is the poster's
+// localpart; only a term naming it is declared.
+test("original characters: <name>_(<owner>) is declared, escaped, weighted or emphasised", () => {
+  const r = promptToTags("masterpiece, 1girl, maple_\\(saber\\), smile", { owner: "saber" });
+  assert.deepEqual(r.characters, ["maple_(saber)"]);
+  assert.deepEqual(r.tags, ["1girl", "smile"], "an original character is not also a creator tag");
   assert.deepEqual(r.meta, ["masterpiece"]);
-  assert.deepEqual(promptToTags("1girl, solo", { max: 1 }).characters, []);
-  assert.deepEqual(promptToTags("oc_a, oc_b, 1girl", { max: 1 }).characters, ["oc_a", "oc_b"], "OCs never count against max");
+  for (const form of [
+    "maple_\\(saber\\)", "maple \\(saber\\)", "(maple_\\(saber\\):1.2)", "((maple_\\(saber\\)))",
+    "[maple \\(saber\\)]", "maple (saber)", "Maple_\\(Saber\\)", "(maple_\\(saber\\):0)",
+  ]) {
+    assert.deepEqual(promptToTags(`1girl, ${form}`, { owner: "saber" }).characters, ["maple_(saber)"], form);
+  }
+  assert.deepEqual(promptToTags("maple_\\(saber\\)", { owner: "Saber" }).characters, ["maple_(saber)"], "a localpart compares without case, as the booru's does");
 });
 
-test("original characters: both shapes, and a weighted token split from the words after it", () => {
-  const r = promptToTags("(ariah_oc:0) white hair, character_oc_mira, (rin_character_oc:1.1), oc, 1girl");
-  assert.deepEqual(r.characters, ["ariah_oc", "character_oc_mira", "rin_character_oc"]);
-  assert.deepEqual(r.tags, ["white_hair", "oc", "1girl"]);
-  assert.deepEqual(promptToTags("(oc_kayla) white hair").characters, ["oc_kayla"], "a leading unweighted group splits too");
-  assert.deepEqual(promptToTags("(oc_kayla) white hair").tags, ["white_hair"]);
+test("original characters: a weighted one is split from the words after it", () => {
+  const r = promptToTags("(maple_\\(saber\\):1.1) white hair, 1girl", { owner: "saber" });
+  assert.deepEqual(r.characters, ["maple_(saber)"]);
+  assert.deepEqual(r.tags, ["white_hair", "1girl"]);
+});
+
+test("original characters: a qualifier naming anyone but the poster is an ordinary prompt term", () => {
+  const r = promptToTags("saber_(fate), hilda \\(pokemon\\), maple_\\(alice\\), 1girl", { owner: "saber" });
+  assert.deepEqual(r.characters, []);
+  assert.deepEqual(r.tags, ["saber_(fate)", "hilda_(pokemon)", "maple_(alice)", "1girl"]);
+  assert.deepEqual(promptToTags("maple_\\(saber\\), 1girl").characters, [], "no known poster, nothing declared");
+  assert.deepEqual(promptToTags("maple_\\(saber\\), 1girl").tags, ["maple_(saber)", "1girl"]);
+  assert.deepEqual(promptToTags("maple_\\(saber\\)", { owner: null }).characters, []);
+  assert.deepEqual(promptToTags("maple_\\(saberx\\), maple_\\(sabe\\)", { owner: "saber" }).characters, [], "the whole qualifier, never a prefix of it");
+});
+
+test("original characters: oc_<name> and its 2026-09-19 shapes are ordinary prompt terms now", () => {
+  const r = promptToTags("(oc_mahogany:0), oc_kayla, (ariah_oc:0) white hair, character_oc_mira, rin_character_oc, oc, 1girl", { owner: "saber" });
+  assert.deepEqual(r.characters, []);
+  assert.deepEqual(r.tags, ["oc_mahogany", "oc_kayla", "ariah_oc", "white_hair", "character_oc_mira", "rin_character_oc", "oc", "1girl"]);
+});
+
+test("original characters never count against max", () => {
+  assert.deepEqual(promptToTags("1girl, solo", { max: 1 }).characters, []);
+  const r = promptToTags("a_\\(saber\\), b_\\(saber\\), 1girl, solo", { max: 1, owner: "saber" });
+  assert.deepEqual(r.characters, ["a_(saber)", "b_(saber)"]);
+  assert.deepEqual(r.tags, ["1girl"]);
+});
+
+test("the operator's example: one own character, everything else private or meta", () => {
+  const r = promptToTags("masterpiece, (maple_\\(saber\\):1.2), oc_kayla, saber_(fate)", { owner: "saber" });
+  assert.deepEqual(r, { tags: ["oc_kayla", "saber_(fate)"], meta: ["masterpiece"], characters: ["maple_(saber)"] });
+});
+
+test("the owner reaches promptToTags through both extractors", () => {
+  const params = "1girl, maple_\\(saber\\), saber_(fate)\nSteps: 20";
+  assert.deepEqual(extractCreatorTagsFromFields({ "png:parameters": params }, { owner: "saber" }).characters, ["maple_(saber)"]);
+  assert.deepEqual(extractCreatorTags(png([tEXt("parameters", params), chunk("IEND", Buffer.alloc(0))]), "image/png", { owner: "saber" }).characters, ["maple_(saber)"]);
+  assert.deepEqual(extractCreatorTagsFromFields({ "png:parameters": params }).characters, []);
 });
 
 test("splitting leaves qualifiers, weights and emphasis exactly as before", () => {
