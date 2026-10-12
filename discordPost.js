@@ -131,15 +131,15 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
     log(`[autotag] fourier-spectrum unavailable, posting untagged: ${err.message}`);
   }
   const autoTags = (derived && derived.tags) || [];
-  // No original characters: one is <name>_(<the poster's Matrix localpart>)
-  // (operator ruling 2026-10-11) and a Discord author has no Matrix account,
-  // so planImage reads the prompt with no owner. What it still lists as a
-  // character is a LEGACY form (oc_<name>, <name>_oc), which the Matrix path
-  // sends for the booru to rewrite under the post's recorded creator; a
-  // Discord post records none, so no oc list is sent and those terms stay
-  // what every other term here is, private prompt terms.
-  const creatorTags = [...(plan.scraped.tags || []), ...(plan.scraped.characters || [])];
+  // Original characters, as the Matrix path sends them (index.js). A Discord
+  // author has no Matrix account, so planImage reads the prompt with no owner:
+  // nothing is their own <name>_(<localpart>), every qualified name is a
+  // private term offered in `oc` for the booru to declare only if it is an
+  // established original character, and a LEGACY form (oc_<name>, <name>_oc)
+  // goes in `oc` alone, declared whoever posted it (operator 2026-10-12).
+  const creatorTags = plan.scraped.tags || [];
   const metaTags = plan.scraped.meta || [];
+  const ocTags = plan.scraped.characters || [];
   const creatorSet = new Set(creatorTags);
   const autoSet = new Set(autoTags);
   const both = autoTags.filter((t) => creatorSet.has(t));
@@ -185,9 +185,12 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
   } catch (err) {
     log(`[poster] artist tag ${posterTag} not categorised for post #${post.id}: ${err.message}`);
   }
-  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, spectrum: [...autoOnly, ...both, ...metaTags] };
+  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, oc: ocTags, spectrum: [...autoOnly, ...both, ...metaTags] };
   try {
-    await danbooru.recordTagSources(post.id, partition);
+    const recorded = await danbooru.recordTagSources(post.id, partition);
+    for (const why of Object.values((recorded && recorded.original_characters_not_declared) || {})) {
+      log(`[tag-hub] post #${post.id}: original character NOT declared: ${why}`);
+    }
   } catch (err) {
     log(`[tag-hub] recordTagSources failed for post #${post.id}: ${err.message}`);
   }

@@ -453,62 +453,62 @@ nedb-compat.test.js pins the ceiling. Suite inside the built image: 391 tests,
 390 pass, 1 skipped (sibling checkout not mounted).
 
 
-## 2026-10-11 -- original characters are <name>_(<poster>), not oc_<name>
+## 2026-10-11 -- original characters are <name>_(<creator>), not oc_<name>
 
 Operator ruling 2026-10-11: an original character's tag is
-<name>_(<creator>), the creator being the poster's own Matrix name, and it
-replaces the 2026-09-19 oc_<name> rule ("oc_name is my personal tag for the
-characters--I will switch"). The booru half is chanbooru b69fff0f4: creators
-claim and own such tags, and the tag hub declares one only when its
-qualifier is the recorded poster's own name.
+<name>_(<creator>), and it replaces the 2026-09-19 oc_<name> rule ("oc_name
+is my personal tag for the characters--I will switch"). Corrected
+2026-10-12, before anything deployed: "Many of these characters belong to
+other creators, I'll just be the first one to post them." THE POSTER IS NOT
+THE CREATOR. The booru half is chanbooru b69fff0f4 and its rework: creators
+claim and own such tags; the tag hub declares a name, and declaring confers
+no ownership.
 
-prompt-tags.js: OC_PREFIX/OC_NAME are gone. A prompt term that normalises
-to <name>_(<q>) is an original character only when <q> is the poster's own
-localpart on this homeserver (a live post: the event sender; !rescan: the
-uploader canon recorded; a remote or Discord author: nobody). It is sent in
-the oc list and NOT put in the creating tag string: put there first, it
-became a general tag with one post, and the booru (rightly) will not re-file
-a general tag with posts as a character, so no new name could ever have been
-declared. The booru adds a declared name to the post itself. Someone else's
-qualifier (saber_(fate)) is an ordinary private prompt term; the legacy
-oc_<name> forms are in the entry below.
+prompt-tags.js: OC_PREFIX/OC_NAME are gone. Every prompt term is one of
+three kinds, and the hub's `oc` list (`characters`) carries them so:
+<name>_(<q>) with <q> the poster's own localpart on this homeserver (a live
+post: the event sender; !rescan: the uploader canon recorded; a remote or
+Discord author: nobody) is in `oc` alone, declared or refused by name; any
+OTHER qualified name (saber_(fate), kayla_(selphdestruct) posted by saber,
+anything with no known poster) stays a private creator term AND is in `oc`,
+where the booru declares it only if it is already an established original
+character (a character tag implying original) or, by its own record, the
+post creator's own name, and otherwise leaves it private and says nothing,
+on a post with no recorded creator too -- so the booru can tell a declaration (in `oc`
+alone) from an offer (in `oc` and the creator lists) by the lists alone. An
+offered name counts against max like any private term, and one past the cap
+is in neither list, never in `oc` alone. Nothing in `oc` goes in the
+creating tag string: put there first, a name became a general tag with one
+post, and the booru (rightly) will not re-file a general tag with posts as a
+character. The booru adds a declared name to the post itself.
 GROUP accepts escaped brackets inside a weighted group, so
 (maple_\(saber\):1.2) stays one term. Refusals the booru returns
 (original_characters_not_declared) are logged and shown in the rescan
-report. Tests 498, lint clean.
+report, which lists declarations and offers apart.
 
-## 2026-10-11 -- the legacy oc_ forms still name a character; the booru rewrites them
+## 2026-10-11 -- the legacy oc_ forms are still accepted, declared as themselves until mapped
 
 Operator, after the ruling above: "I'll still need oc_<name> or <name>_oc to
-be recognized as an alias since pre-existing images all use it." And the two
-site mascots' true names are sample_(41chan) and tunnel_(41chan) (the booru's
-mascot script; to the tunnel those are someone else's qualifier, ordinary
-private prompt terms).
+be recognized as an alias since pre-existing images all use it"; and
+2026-10-12: "continue to accept the pre-existing format but prepare for them
+to be changed manually for the first few. so oc_kayla will, for example,
+become the kayla_(selphdestruct) tag itself". The two site mascots' true
+names are sample_(41chan) and tunnel_(41chan) (the booru's mascot script);
+to the tunnel those are someone else's qualifier, offered like any other.
 
-One authority: the BOORU rewrites, the tunnel forwards. prompt-tags.js gains
-LEGACY_ORIGINAL_CHARACTER, exactly the four shapes the 2026-09-19 rule
-accepted (oc_<name>, character_oc_<name>, <name>_oc, <name>_character_oc;
-the old booru regex's pattern). A term in one goes in the oc list AS
-WRITTEN, for any poster -- own, someone else, remote, unknown uploader on a
-rescan -- and NOT in the creating tag string, for the reason above. The
-booru rewrites it to <name>_(<the post's recorded creator>) and runs the
-same checks as a qualified name, or names it in
-original_characters_not_declared with what it read it as; the tunnel logs
-that line as it is. The tunnel does not guess the creator: the recorded one
-is the booru's, and a rescan never changes it. Own-qualified names are
-unchanged; other people's qualifiers stay private terms. discordPost sends
-no oc list, so a Discord prompt's legacy forms are folded back into its
-private creator terms, as they were. The rescan report's no-uploader line
-now says only <name>_(<localpart>) terms were not read, since legacy forms
-were still sent. Tests first: 7 red, then green; the Discord test went red
-on the prompt-tags change alone and green with its fold.
+prompt-tags.js LEGACY_ORIGINAL_CHARACTER is exactly the four shapes the
+2026-09-19 rule accepted (oc_<name>, character_oc_<name>, <name>_oc,
+<name>_character_oc; the old booru regex's pattern). A term in one goes in
+`oc` alone, AS WRITTEN, for any poster -- own, someone else, remote, Discord,
+unknown uploader on a rescan. The booru declares it as itself (the character
+tag oc_kayla, public on the post), or, once the operator has aliased it to
+its creator's <name>_(<creator>) with the booru's mapping script, as that
+alias's consequent; nobody rewrites it by who posted it. Discord, which has
+no localpart to own anything, sends an `oc` list again: its legacy forms and
+its offered names, and logs the booru's refusals as the Matrix path does. A
+name that already ends in a creator in brackets (oc_maple_(alice)) is read by
+that qualifier, as the booru reads it, never as a legacy form.
 
-Review of the pair, same day: a legacy-shaped name that already ends in a
-creator in brackets (oc_maple_(alice)) was sent in the oc list too, where the
-booru -- which reads such a name by its qualifier, never as a legacy form --
-refused it as naming alice and dropped it, so another member's qualifier
-vanished instead of staying a private term. isOriginalCharacter now reads
-the qualifier first, as the booru does, and only an unqualified name can be a
-legacy form. Test first (red on the old order). The index.js refusal fixture
-now carries the booru's real wording for a legacy name ("oc_kayla was read
-as kayla_(saber), the poster's own name in brackets: ...").
+2026-10-12 correction, tests first: 13 red across prompt-tags, image-plan,
+discordPost, index and rescan, plus a Discord refusal-log test red against
+the old discordPost.js; then green.

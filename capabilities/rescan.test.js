@@ -12,7 +12,7 @@ const ROOM = "!dm:41chan.net";
 const MXC = "mxc://41chan.net/abc123";
 const BYTES = Buffer.from("not really a jpeg");
 const MD5 = require("crypto").createHash("md5").update(BYTES).digest("hex");
-const TAGS = { tags: ["hilda_(pokemon)", "smile"], meta: ["masterpiece"], characters: ["maple_(saber)"] };
+const TAGS = { tags: ["hilda_(pokemon)", "smile"], meta: ["masterpiece"], characters: ["maple_(saber)", "hilda_(pokemon)"] };
 
 function rig(over = {}) {
   const sent = [], audited = [], written = [], generation = [], lookups = [], rawLookups = [];
@@ -49,9 +49,10 @@ test("by mxc: downloads, finds the post by md5, rebuilds the split against the a
   assert.deepEqual(p.auto, ["1girl"]);
   assert.deepEqual(p.meta, ["highres", "masterpiece"]);
   assert.equal(p.replace_creator, true);
-  assert.deepEqual(p.oc, ["maple_(saber)"]);
+  assert.deepEqual(p.oc, ["maple_(saber)", "hilda_(pokemon)"], "a name also among the creator terms (here in both) is offered, not declared");
   assert.match(out.report, /Post #7 \(jpeg\): read 2 creator tag/);
   assert.match(out.report, /Sent to the booru as original characters: maple_\(saber\)\./);
+  assert.match(out.report, /Offered to the booru, declared only if already an original character and private otherwise: hilda_\(pokemon\)\./);
 });
 
 test("by md5: fetches the bytes from the post's own mxc source", async () => {
@@ -254,13 +255,14 @@ test("original characters on a re-read: read for the uploader on this homeserver
     const again = rig({ download: async () => ({ buffer: BYTES, contentType: "image/png", uploader }), domain, creatorTags: (removed, opts) => { seen.push(opts.owner); return { ...TAGS, characters: [] }; } });
     const o = await rescan(MXC, again.deps);
     assert.deepEqual(seen, [null], `${uploader} on ${domain}`);
-    assert.match(o.report, /No uploader on this homeserver is recorded for it, so no <name>_\(<localpart>\) term was read as the uploader's own character\./);
+    assert.match(o.report, /No uploader on this homeserver is recorded for it, so no <name>_\(<localpart>\) term was sent as the uploader's own character: each was offered like any other creator's name\./);
   }
 });
 
 // A LEGACY form (oc_kayla, mahogany_oc) is sent whoever uploaded it -- the
-// booru rewrites it under the post's RECORDED creator, which a rescan never
-// changes -- so a re-read with no uploader still sends it, and says so.
+// booru declares it as itself, or as its alias's consequent once the operator
+// has mapped it, never by who posted it -- so a re-read with no uploader still
+// sends it, and says so.
 test("legacy original characters on a re-read with no known uploader: still sent, and the report says the booru judges them", async () => {
   const r = rig({
     download: async () => ({ buffer: BYTES, contentType: "image/png", uploader: null }),
@@ -271,7 +273,7 @@ test("legacy original characters on a re-read with no known uploader: still sent
   assert.equal(out.ok, true);
   assert.deepEqual(r.written[0][1].oc, ["oc_kayla", "mahogany_oc"]);
   assert.match(out.report, /Sent to the booru as original characters: oc_kayla, mahogany_oc\./);
-  assert.match(out.report, /No uploader on this homeserver is recorded for it, so no <name>_\(<localpart>\) term was read as the uploader's own character\./);
+  assert.match(out.report, /No uploader on this homeserver is recorded for it, so no <name>_\(<localpart>\) term was sent as the uploader's own character: each was offered like any other creator's name\./);
 });
 
 test("original characters on a refused strip: the bytes are read for the uploader too", async () => {

@@ -116,10 +116,11 @@ function publicTagsFor({ autoTags = [], metaTags = [], posterTag = null, aiGener
  * @param {(rawMd5: string) => Promise<string|null>} deps.findByRawMd5
  * @param {number} [deps.maxCreatorTags]
  * @param {string} [deps.domain]  this homeserver's name. The sender's localpart
- *   on it is the one name an original character may carry in brackets
- *   (prompt-tags ORIGINAL_CHARACTER); a sender anywhere else -- a remote
- *   account, a Discord author -- has none. A LEGACY form (oc_<name>,
- *   <name>_oc) is listed for every sender, as written: the booru rewrites it.
+ *   on it is the one qualifier a term may carry to be the sender's OWN
+ *   original character (prompt-tags ORIGINAL CHARACTERS); a sender anywhere
+ *   else -- a remote account, a Discord author -- has none, and every
+ *   qualified name is offered. A LEGACY form (oc_<name>, <name>_oc) is listed
+ *   for every sender, as written.
  * @param {(line: string) => void} deps.log
  * @returns {Promise<object>} one of
  *   { action: "refuse", status: "strip-refused", reason }
@@ -148,9 +149,10 @@ async function planImage({ buffer, contentType, sender, rawMd5: knownRawMd5 }, d
   const upload = { buffer: stripped.buffer, md5: stripped.changed ? md5hex(stripped.buffer) : rawMd5 };
   const removed = stripped.removed || {};
 
-  // 2. The prompt, from the text the strip took out, read for its SENDER: an
-  // original character is <name>_(<the sender's own localpart>), or a legacy
-  // oc_<name> / <name>_oc form whoever sent it.
+  // 2. The prompt, from the text the strip took out, read for its SENDER: a
+  // <name>_(<the sender's own localpart>) is theirs to declare; any other
+  // qualified name is offered, and a legacy oc_<name> / <name>_oc form is
+  // sent whoever sent it.
   let scraped = NO_SCRAPE;
   try {
     scraped = creatorTags(removed, { max: deps.maxCreatorTags, owner: localpartIfLocal(sender, deps.domain) }) || NO_SCRAPE;

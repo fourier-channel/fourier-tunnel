@@ -671,15 +671,17 @@ async function handleImageEvent(bridge, event) {
   const autoTags = (derived && derived.tags) || [];
   const creatorTags = plan.scraped.tags || [];
   const metaTags = plan.scraped.meta || [];
-  // Original characters (<name>_(<the sender's own localpart>), operator ruling
-  // 2026-10-11; prompt-tags ORIGINAL_CHARACTER): the creator naming their own
-  // character -- or a LEGACY form (oc_<name>, <name>_oc and their character_
-  // variants, LEGACY_ORIGINAL_CHARACTER), listed for any sender AS WRITTEN:
-  // the booru alone rewrites it to <name>_(<the post's recorded creator>) or
-  // refuses it by name, and the tunnel only forwards. PUBLIC, unlike the rest of the prompt -- a name is the point of
-  // a name -- but made public BY THE BOORU: they go only in the hub's `oc`
-  // list, and the booru, checking them against the recorded creator, puts each
-  // one it declares on the post and files it as a character. Never in the
+  // Original characters (prompt-tags ORIGINAL CHARACTERS; operator rulings
+  // 2026-10-11/12): the hub's `oc` list. The sender's own <name>_(<localpart>)
+  // and the LEGACY forms (oc_<name>, <name>_oc and their character_ variants,
+  // for any sender, as written) are in it alone: the booru declares each --
+  // a legacy one as itself or as its alias's consequent -- or refuses it by
+  // name. Every OTHER qualified name is in it AND among the private creator
+  // tags: the poster is not the creator, so the booru declares it only if it
+  // is already an established original character and otherwise leaves it
+  // private, silently. PUBLIC, unlike the rest of the prompt -- a name is the
+  // point of a name -- but made public BY THE BOORU, which puts each one it
+  // declares on the post and files it as a character. Never in the
   // tag_string the post is created with: that makes the name a general tag
   // with a post before the hub reads `oc`, and the booru never re-files such
   // a tag at post time, so every new character was refused and left public.

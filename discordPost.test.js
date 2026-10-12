@@ -128,20 +128,28 @@ test("generation data is stripped from the upload and filed privately as source 
   assert.ok(ts.args[1].creator.includes("smile"), "they travel in the private partition instead");
 });
 
-// An original character is <name>_(<the poster's Matrix localpart>), operator
-// ruling 2026-10-11, and a Discord author has no Matrix account: even a name
-// in their own username stays a private prompt term. So does a LEGACY form
-// (oc_<name>, <name>_oc): the Matrix path sends one for the booru to rewrite
-// under the recorded creator, and a Discord post records none to rewrite to.
-test("a Discord post declares no original character, even one named for its author or in a legacy form", async () => {
+// A Discord author has no Matrix account, so nothing they post is their own
+// <name>_(<localpart>). But a LEGACY form is declared whoever posted it (as
+// itself, or as its alias's consequent once mapped; operator 2026-10-12), and
+// an established original character is declared from anyone's prompt -- so a
+// Discord post sends the oc list like a Matrix one. Every qualified name is
+// someone else's here: kept as a private prompt term and offered in `oc`.
+test("a Discord post sends legacy forms to be declared and offers every qualified name, which stays private", async () => {
   const f = fakeBooru();
-  const prompt = "1girl, (maple_\\(selphdestruct\\):1.2), oc_kayla, mahogany_oc\nSteps: 20";
+  const prompt = "1girl, (maple_\\(selphdestruct\\):1.2), oc_kayla, mahogany_oc, saber_(fate)\nSteps: 20";
   await deliverer(f.booru).d.deliver({ channel: CHANNEL, msg: msg(), att: att("oc.png"), bytes: png([chunk("tEXt", Buffer.from(`parameters\0${prompt}`, "latin1"))]) });
   const tags = f.named("createPost")[0].args[1].tagString.split(" ");
-  assert.ok(!tags.includes("maple_(selphdestruct)") && !tags.includes("oc_kayla") && !tags.includes("mahogany_oc"), tags.join(" "));
+  for (const name of ["maple_(selphdestruct)", "oc_kayla", "mahogany_oc", "saber_(fate)"]) assert.ok(!tags.includes(name), `${name}: the booru puts a declared name on the post itself: ${tags.join(" ")}`);
   const [ts] = f.named("recordTagSources");
-  assert.equal(ts.args[1].oc, undefined, "no oc list is sent from Discord");
-  for (const name of ["maple_(selphdestruct)", "oc_kayla", "mahogany_oc"]) assert.ok(ts.args[1].creator.includes(name), `${name}: ${JSON.stringify(ts.args[1])}`);
+  assert.deepEqual(ts.args[1].oc, ["maple_(selphdestruct)", "oc_kayla", "mahogany_oc", "saber_(fate)"]);
+  assert.deepEqual(ts.args[1].creator.filter((t) => t !== "1girl"), ["maple_(selphdestruct)", "saber_(fate)"], "qualified names stay private terms; legacy forms are the booru's to declare");
+});
+
+test("a Discord post logs each name the booru would not declare, with the booru's reason", async () => {
+  const f = fakeBooru({ recordTagSources: async () => ({ original_characters_not_declared: { oc_kayla: "oc_kayla is filed as copyright: ask an admin to re-file it as a character, then send the tags again" } }) });
+  const { d, logs } = deliverer(f.booru);
+  await d.deliver({ channel: CHANNEL, msg: msg(), att: att("oc.png"), bytes: png([chunk("tEXt", Buffer.from("parameters\u0000oc_kayla\nSteps: 20", "latin1"))]) });
+  assert.ok(logs.includes("[tag-hub] post #42: original character NOT declared: oc_kayla is filed as copyright: ask an admin to re-file it as a character, then send the tags again"), logs.join("\n"));
 });
 
 test("an image already on the booru is not uploaded again", async () => {

@@ -208,13 +208,16 @@ test("normaliser: search operators and handles do not become tags", () => {
   assert.equal(normalizeTerm("k-on!"), "k-on!");
 });
 
-// ORIGINAL CHARACTERS (operator ruling 2026-10-11): <name>_(<creator>), the
-// creator's own Matrix localpart in brackets. `owner` is the poster's
-// localpart; only a term naming it is declared.
+// ORIGINAL CHARACTERS (operator rulings 2026-10-11/12). `characters` is the
+// hub's `oc` list: every name the booru may declare as a character on the
+// post. A name ONLY there is the poster declaring it (their own
+// <name>_(<owner>), or a legacy oc_ shape); a name ALSO in `tags` is a
+// qualified name that is not the poster's own -- a private prompt term the
+// booru declares only if it is already an established original character.
 test("original characters: <name>_(<owner>) is declared, escaped, weighted or emphasised", () => {
   const r = promptToTags("masterpiece, 1girl, maple_\\(saber\\), smile", { owner: "saber" });
   assert.deepEqual(r.characters, ["maple_(saber)"]);
-  assert.deepEqual(r.tags, ["1girl", "smile"], "an original character is not also a creator tag");
+  assert.deepEqual(r.tags, ["1girl", "smile"], "the poster's own character is not also a private creator tag");
   assert.deepEqual(r.meta, ["masterpiece"]);
   for (const form of [
     "maple_\\(saber\\)", "maple \\(saber\\)", "(maple_\\(saber\\):1.2)", "((maple_\\(saber\\)))",
@@ -231,21 +234,32 @@ test("original characters: a weighted one is split from the words after it", () 
   assert.deepEqual(r.tags, ["white_hair", "1girl"]);
 });
 
-test("original characters: a qualifier naming anyone but the poster is an ordinary prompt term", () => {
+// Operator 2026-10-12: "Many of these characters belong to other creators,
+// I'll just be the first one to post them." A qualified name that is not the
+// poster's own is kept as a private prompt term AND offered to the booru,
+// which declares it only when it is already an established original
+// character (kayla_(selphdestruct)) and says nothing about the rest
+// (saber_(fate) is not an error).
+test("original characters: a qualifier naming anyone but the poster stays a private term and is offered to the booru", () => {
   const r = promptToTags("saber_(fate), hilda \\(pokemon\\), maple_\\(alice\\), 1girl", { owner: "saber" });
-  assert.deepEqual(r.characters, []);
-  assert.deepEqual(r.tags, ["saber_(fate)", "hilda_(pokemon)", "maple_(alice)", "1girl"]);
-  assert.deepEqual(promptToTags("maple_\\(saber\\), 1girl").characters, [], "no known poster, nothing declared");
-  assert.deepEqual(promptToTags("maple_\\(saber\\), 1girl").tags, ["maple_(saber)", "1girl"]);
-  assert.deepEqual(promptToTags("maple_\\(saber\\)", { owner: null }).characters, []);
-  assert.deepEqual(promptToTags("maple_\\(saberx\\), maple_\\(sabe\\)", { owner: "saber" }).characters, [], "the whole qualifier, never a prefix of it");
+  assert.deepEqual(r.tags, ["saber_(fate)", "hilda_(pokemon)", "maple_(alice)", "1girl"], "never lost from the private terms");
+  assert.deepEqual(r.characters, ["saber_(fate)", "hilda_(pokemon)", "maple_(alice)"], "every one offered, in both lists");
+  for (const opts of [undefined, { owner: null }]) {
+    const n = promptToTags("maple_\\(saber\\), 1girl", opts);
+    assert.deepEqual(n.tags, ["maple_(saber)", "1girl"], "no known poster: nobody's own, so a private term");
+    assert.deepEqual(n.characters, ["maple_(saber)"], "and offered like any other qualified name");
+  }
+  const p = promptToTags("maple_\\(saberx\\), maple_\\(sabe\\)", { owner: "saber" });
+  assert.deepEqual(p.tags, ["maple_(saberx)", "maple_(sabe)"], "the whole qualifier, never a prefix of it");
+  assert.deepEqual(p.characters, p.tags);
 });
 
 // THE LEGACY FORMS (operator 2026-10-11: "I'll still need oc_<name> or
-// <name>_oc to be recognized as an alias since pre-existing images all use
-// it"): exactly the four shapes the 2026-09-19 rule accepted. Each goes in the
-// oc list AS WRITTEN, whoever the poster is -- the booru is the one authority
-// that rewrites it to <name>_(<recorded creator>), or refuses it and says why.
+// <name>_oc to be recognized ... since pre-existing images all use it";
+// 2026-10-12: "continue to accept the pre-existing format"): exactly the four
+// shapes the 2026-09-19 rule accepted. Each goes in the oc list AS WRITTEN,
+// whoever the poster is, and nowhere else: the booru declares it as itself,
+// or as its alias's consequent once the operator has mapped it.
 test("original characters: the four legacy shapes go in the oc list as written, for any poster", () => {
   const prompt = "(oc_mahogany:0), oc_kayla, (ariah_oc:0) white hair, character_oc_mira, rin_character_oc, oc, 1girl";
   for (const owner of ["saber", "alice", null, undefined]) {
@@ -253,44 +267,55 @@ test("original characters: the four legacy shapes go in the oc list as written, 
     assert.deepEqual(r.characters, ["oc_mahogany", "oc_kayla", "ariah_oc", "character_oc_mira", "rin_character_oc"], String(owner));
     assert.deepEqual(r.tags, ["white_hair", "oc", "1girl"], `bare oc is nobody's name (${owner})`);
   }
-  assert.deepEqual(promptToTags("oc_, _oc, ocean, doc_brown, oc_(series), kayla_ocs").characters, [], "nothing that is not one of the four shapes");
+  assert.deepEqual(promptToTags("oc_, _oc, ocean, doc_brown, kayla_ocs").characters, [], "nothing that is not one of the four shapes");
 });
 
 // A name ending in a creator in brackets is THAT creator's, whatever it starts
 // with -- the booru's own reading (FourierTagSource.legacy_original_character
-// is nil for it, and the qualifier is checked). Sent as a legacy form, the
-// booru refused oc_maple_(alice) from @saber as naming alice and dropped it,
-// so a private prompt term vanished from the post.
-test("original characters: an oc_ name that already names a creator in brackets is that creator's, not a legacy form", () => {
+// is nil for it). So it is read by its qualifier: the poster's own is
+// declared, anyone else's is a private term offered to the booru.
+test("original characters: an oc_ name that already names a creator in brackets is read by its qualifier, not as a legacy form", () => {
   const r = promptToTags("oc_maple_\\(alice\\), character_oc_pine \\(fate\\), oc_birch_\\(saber\\), 1girl", { owner: "saber" });
-  assert.deepEqual(r.characters, ["oc_birch_(saber)"], "the poster's own qualifier is theirs, as any qualified name");
   assert.deepEqual(r.tags, ["oc_maple_(alice)", "character_oc_pine_(fate)", "1girl"], "someone else's qualifier stays a private term");
-  assert.deepEqual(promptToTags("oc_birch_\\(saber\\)").characters, [], "no known poster, nothing declared");
+  assert.deepEqual(r.characters, ["oc_maple_(alice)", "character_oc_pine_(fate)", "oc_birch_(saber)"]);
+  const n = promptToTags("oc_birch_\\(saber\\)");
+  assert.deepEqual([n.tags, n.characters], [["oc_birch_(saber)"], ["oc_birch_(saber)"]], "no known poster: offered, and kept private");
 });
 
-test("original characters never count against max", () => {
+// The poster's own characters and the legacy forms never count against max;
+// an offered name does, because it is a private term first -- one past the
+// cap is dropped from both lists, never sent in `oc` alone, where the booru
+// would read it as the poster's declaration.
+test("original characters: declarations never count against max; an offered name is a private term and does", () => {
   assert.deepEqual(promptToTags("1girl, solo", { max: 1 }).characters, []);
-  const r = promptToTags("a_\\(saber\\), b_\\(saber\\), 1girl, solo", { max: 1, owner: "saber" });
-  assert.deepEqual(r.characters, ["a_(saber)", "b_(saber)"]);
+  const r = promptToTags("a_\\(saber\\), oc_b, 1girl, solo", { max: 1, owner: "saber" });
+  assert.deepEqual(r.characters, ["a_(saber)", "oc_b"]);
   assert.deepEqual(r.tags, ["1girl"]);
+  const o = promptToTags("1girl, saber_(fate), maple_\\(alice\\)", { max: 2, owner: "saber" });
+  assert.deepEqual(o.tags, ["1girl", "saber_(fate)"]);
+  assert.deepEqual(o.characters, ["saber_(fate)"], "maple_(alice) fell past the cap, so it is in neither list");
 });
 
-test("the operator's example: own and legacy characters in the oc list, everything else private or meta", () => {
-  const r = promptToTags("masterpiece, oc_kayla, mahogany_oc, (maple_\\(saber\\):1.2), saber_(fate)", { owner: "saber" });
-  assert.deepEqual(r, { tags: ["saber_(fate)"], meta: ["masterpiece"], characters: ["oc_kayla", "mahogany_oc", "maple_(saber)"] });
+test("the operator's example: legacy and own names declared, other creators' names private and offered", () => {
+  const r = promptToTags("masterpiece, oc_kayla, (maple_\\(saber\\):1.2), kayla_\\(selphdestruct\\), saber_(fate)", { owner: "saber" });
+  assert.deepEqual(r, {
+    tags: ["kayla_(selphdestruct)", "saber_(fate)"],
+    meta: ["masterpiece"],
+    characters: ["oc_kayla", "maple_(saber)", "kayla_(selphdestruct)", "saber_(fate)"],
+  });
 });
 
-test("the site mascots' true names are someone else's qualifier: ordinary prompt terms", () => {
+test("the site mascots' true names are someone else's qualifier: private terms, offered to the booru", () => {
   const r = promptToTags("sample_\\(41chan\\), tunnel_(41chan), 1girl", { owner: "saber" });
-  assert.deepEqual(r.characters, []);
   assert.deepEqual(r.tags, ["sample_(41chan)", "tunnel_(41chan)", "1girl"]);
+  assert.deepEqual(r.characters, ["sample_(41chan)", "tunnel_(41chan)"]);
 });
 
 test("the owner reaches promptToTags through both extractors", () => {
   const params = "1girl, maple_\\(saber\\), saber_(fate)\nSteps: 20";
-  assert.deepEqual(extractCreatorTagsFromFields({ "png:parameters": params }, { owner: "saber" }).characters, ["maple_(saber)"]);
-  assert.deepEqual(extractCreatorTags(png([tEXt("parameters", params), chunk("IEND", Buffer.alloc(0))]), "image/png", { owner: "saber" }).characters, ["maple_(saber)"]);
-  assert.deepEqual(extractCreatorTagsFromFields({ "png:parameters": params }).characters, []);
+  assert.deepEqual(extractCreatorTagsFromFields({ "png:parameters": params }, { owner: "saber" }).characters, ["maple_(saber)", "saber_(fate)"]);
+  assert.deepEqual(extractCreatorTags(png([tEXt("parameters", params), chunk("IEND", Buffer.alloc(0))]), "image/png", { owner: "saber" }).tags, ["1girl", "saber_(fate)"]);
+  assert.deepEqual(extractCreatorTagsFromFields({ "png:parameters": params }).tags, ["1girl", "maple_(saber)", "saber_(fate)"]);
 });
 
 test("splitting leaves qualifiers, weights and emphasis exactly as before", () => {

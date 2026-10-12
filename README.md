@@ -49,21 +49,28 @@ first component.
    Prompt-derived tags and the generation data are visible ONLY to that
    creator -- no admin or moderator bypass (operator ruling 2026-09-29). They
    never enter the booru's tag string, the image file, or the room state.
-   The one exception is an ORIGINAL CHARACTER: a prompt term that normalises
-   to `<name>_(<localpart>)`, where the localpart is the sender's own (written
-   `maple \(saber\)` in a prompt by `@saber`), is sent in the provenance
-   partition's `oc` list -- never in the tag string the post is created with --
-   and the booru, checking it against the recorded creator, puts it on the
-   post publicly and files it as a character, or says why not. The LEGACY
-   forms the earlier rule used -- `oc_<name>`, `character_oc_<name>`,
-   `<name>_oc`, `<name>_character_oc` -- go in the same `oc` list as
-   written, whoever posted them: the booru rewrites each to
-   `<name>_(<the post's recorded creator>)` and declares it the same way, or
-   says why not (pre-existing images all use them). A qualifier naming anyone
-   else (`saber_(fate)`, `sample_(41chan)`, `oc_maple_(alice)` -- a name
-   ending in a creator in brackets is that creator's, oc_ prefix or not) is
-   an ordinary private prompt term (operator rulings 2026-10-11). A Discord post sends no `oc` list:
-   its legacy forms stay private prompt terms too.
+   The one exception is an ORIGINAL CHARACTER, whose tag is
+   `<name>_(<creator>)` (operator rulings 2026-10-11/12; the POSTER IS NOT
+   THE CREATOR: "Many of these characters belong to other creators, I'll just
+   be the first one to post them"). Everything the booru may declare goes in
+   the provenance partition's `oc` list -- never in the tag string the post is
+   created with -- and the booru puts each name it declares on the post
+   publicly and files it as a character. Three kinds go there:
+   the sender's OWN `<name>_(<localpart>)` (written `maple \(saber\)` in a
+   prompt by `@saber`), in `oc` alone, declared or refused by name;
+   a LEGACY form the earlier rule used -- `oc_<name>`, `character_oc_<name>`,
+   `<name>_oc`, `<name>_character_oc` -- in `oc` alone, as written, whoever
+   posted it, declared as itself (`oc_kayla`) or, once the operator has
+   aliased it to its creator's tag, as that tag (`kayla_(selphdestruct)`);
+   and every OTHER qualified name (`saber_(fate)`, `kayla_(selphdestruct)`
+   posted by saber, `sample_(41chan)`, `oc_maple_(alice)` -- a name ending in
+   a creator in brackets is read by that qualifier, oc_ prefix or not), which
+   stays a private prompt term AND is offered in `oc`: the booru declares it
+   only if it is already an established original character (or, by its own
+   record, the post creator's own name) and otherwise leaves it private
+   without a word, a post with no recorded creator included. Declaring confers no ownership. A
+   Discord author has no localpart here, so a Discord post sends only the
+   last two kinds.
 7. The tags are written into the room as a `net.41chan.media.tags` state
    event, keyed by the image's MXC URI, with the post id, rating, an
    `updated_by` of the bot's localpart, and a `sources` object naming which

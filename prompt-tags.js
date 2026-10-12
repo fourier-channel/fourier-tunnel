@@ -310,41 +310,56 @@ function normalizeTerm(raw) {
     .replace(/^[-~*@_]+|_+$/g, "");
 }
 
-// ORIGINAL CHARACTERS. Operator ruling 2026-10-11: an original character's
-// tag is <name>_(<creator>) -- the character's name, then in brackets the
-// Matrix localpart of the creator whose character it is. In a prompt it is
-// written the way any qualified name is, "maple \(saber\)" (or weighted,
-// emphasised, or unescaped after a name), and normalizeTerm makes all of them
-// maple_(saber). Such a term is the creator NAMING their own character only
-// when the qualifier is the POSTER's own localpart (`owner`, which the caller
-// knows from who sent the image). Then it is not a creator tag like the rest
-// of the prompt: it goes in its own list for the booru to put on the post
-// publicly and file as a character, and it never counts against `max`. A
-// qualifier naming anyone or anything else -- saber_(fate), hilda_(pokemon),
-// another member's character -- is an ordinary prompt term. The same shape as
-// chanbooru's FourierTagSource ORIGINAL_CHARACTER, which checks the qualifier
-// again against the post's RECORDED creator and names what it will not declare.
+// ORIGINAL CHARACTERS. An original character's tag is <name>_(<creator>) --
+// the character's name, then in brackets the creator whose character it is
+// (operator ruling 2026-10-11). In a prompt it is written the way any
+// qualified name is, "maple \(saber\)" (or weighted, emphasised, or unescaped
+// after a name), and normalizeTerm makes all of them maple_(saber).
 //
-// THE LEGACY FORMS. Operator, 2026-10-11: "I'll still need oc_<name> or
-// <name>_oc to be recognized as an alias since pre-existing images all use
-// it." Exactly the four shapes the 2026-09-19 rule accepted -- oc_<name>,
-// character_oc_<name>, <name>_oc, <name>_character_oc; measured in this
-// deployment's prompts, "(ariah_oc:0)" five times -- and the same pattern as
-// that rule's booru regex. A term in one goes in the oc list AS WRITTEN, for
-// ANY poster, owner or not: the booru is the ONE authority that rewrites it,
-// to <name>_(<the post's recorded creator>), or refuses it by name with its
-// remedy. The tunnel never rewrites; who the creator is, is the booru's
-// record, not this guess. Bare "oc" alone is nobody's name. A name that
-// already ends in a creator in brackets (oc_maple_(alice)) is that creator's,
-// whatever it starts with, and is read by its qualifier like any other --
-// the booru's reading too (FourierTagSource.legacy_original_character): sent
-// as a legacy form, someone else's would be refused and lost, not kept private.
+// THE POSTER IS NOT THE CREATOR (operator, 2026-10-12: "Many of these
+// characters belong to other creators, I'll just be the first one to post
+// them"). So every term is one of three kinds, and the hub's `oc` list --
+// `characters` here -- carries the first two alone and the third alongside
+// the private terms:
+//
+//   1. <name>_(<owner>), the qualifier the POSTER's own localpart (`owner`,
+//      which the caller knows from who sent the image): the poster naming
+//      their own character. In `characters` only, never against `max`; the
+//      booru declares it (puts it on the post publicly, files it as a
+//      character) or refuses it by name with its remedy.
+//   2. A LEGACY form, exactly the four shapes the 2026-09-19 rule accepted --
+//      oc_<name>, character_oc_<name>, <name>_oc, <name>_character_oc;
+//      measured in this deployment's prompts, "(ariah_oc:0)" five times.
+//      Operator 2026-10-12: "continue to accept the pre-existing format but
+//      prepare for them to be changed manually for the first few. so oc_kayla
+//      will, for example, become the kayla_(selphdestruct) tag itself". In
+//      `characters` only, AS WRITTEN, for ANY poster, never against `max`: the
+//      booru declares it as itself, or -- once the operator has aliased it to
+//      its creator's <name>_(<creator>) -- as that alias's consequent. Nothing
+//      here or there rewrites it by who posted it. Bare "oc" is nobody's name.
+//   3. Any OTHER qualified name -- saber_(fate), kayla_(selphdestruct) posted
+//      by saber, anything when there is no owner (a Discord author, a remote
+//      account, an unknown uploader): a private prompt term like the rest of
+//      the prompt, counted against `max`, AND in `characters`. The booru
+//      declares it only when it is already an established original character
+//      (a character tag implying original) or, by the booru's own record,
+//      the post's creator's own name, and otherwise leaves it a private
+//      creator term and says nothing (saber_(fate) is not an error), on a
+//      post with no recorded creator too. A name
+//      past `max` is in neither list: alone in `characters` it would read as
+//      the poster's declaration.
+//
+// A name that already ends in a creator in brackets (oc_maple_(alice)) is
+// that creator's, whatever it starts with, and is read by its qualifier --
+// the booru's reading too (FourierTagSource.legacy_original_character).
+// The same shape as chanbooru's FourierTagSource ORIGINAL_CHARACTER.
 const ORIGINAL_CHARACTER = /^([a-z0-9][^()]*)_\(([^()]+)\)$/;
 const LEGACY_ORIGINAL_CHARACTER = /^(?:(?:character_)?oc_[a-z0-9].*|.*[a-z0-9]_(?:character_)?oc)$/;
-function isOriginalCharacter(term, owner) {
+// "declared" (kinds 1 and 2), "offered" (kind 3), or null for any other term.
+function characterKind(term, owner) {
   const m = ORIGINAL_CHARACTER.exec(term);
-  if (!m) return LEGACY_ORIGINAL_CHARACTER.test(term);
-  return !!owner && m[2] === String(owner).toLowerCase();
+  if (!m) return LEGACY_ORIGINAL_CHARACTER.test(term) ? "declared" : null;
+  return owner && m[2] === String(owner).toLowerCase() ? "declared" : "offered";
 }
 
 // A PARENTHESISED TOKEN RUNS INTO THE WORDS AFTER IT. "(ariah_oc:0) white
@@ -385,12 +400,13 @@ function expandTerm(raw) {
 
 // Normalise a freeform prompt into Danbooru-style tags: comma-split, strip
 // weights/brackets/LoRA tokens, lowercase, spaces -> underscores, dedupe. Returns
-// { tags, meta, characters } -- content tags, quality/meta terms (kept,
-// de-emphasised), and original characters (<name>_(<owner>) and the legacy
-// forms, above).
+// { tags, meta, characters } -- private content terms, quality/meta terms
+// (kept, de-emphasised), and the hub's `oc` list (ORIGINAL CHARACTERS above:
+// a name only in `characters` is declared by the poster, a name in both
+// `characters` and `tags` is offered for the booru to recognise).
 // opts: { max, owner } -- owner is the poster's Matrix localpart on this
 // homeserver, or null when there is none (a Discord author, a remote account,
-// an unknown uploader), and then only a legacy form is an original character.
+// an unknown uploader), and then every qualified name is offered.
 function promptToTags(prompt, opts) {
   const max = (opts && opts.max) || 60;
   const owner = (opts && opts.owner) || null;
@@ -404,9 +420,13 @@ function promptToTags(prompt, opts) {
     if (/^[\d_.]+$/.test(t)) continue;
     if (seen.has(t)) continue;
     seen.add(t);
-    if (isOriginalCharacter(t, owner)) out.characters.push(t);
+    const kind = characterKind(t, owner);
+    if (kind === "declared") out.characters.push(t);
     else if (QUALITY_META.has(t)) out.meta.push(t);
-    else if (out.tags.length < max) out.tags.push(t);
+    else if (out.tags.length < max) {
+      out.tags.push(t);
+      if (kind === "offered") out.characters.push(t);
+    }
   }
   return out;
 }

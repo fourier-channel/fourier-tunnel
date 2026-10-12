@@ -38,15 +38,16 @@
 // recorded once when the tunnel made the post, and whoever they allow. The
 // post's 41chan_ tags are not consulted: any member can edit them.
 //
-// ORIGINAL CHARACTERS are read for the media's UPLOADER (operator ruling
-// 2026-10-11: <name>_(<creator>), the creator's own localpart in brackets).
-// With no event sender here, the uploader canon recorded from Synapse is the
-// best name the tunnel has; it only decides which terms are SENT in the `oc`
-// list. A LEGACY form (oc_<name>, <name>_oc; operator 2026-10-11) is sent
-// whoever the uploader is, unknown included: the booru rewrites it to
-// <name>_(<recorded creator>). The booru declares one only under the post's
-// recorded creator and names each it refuses, which the report carries.
-// Nothing is recorded.
+// ORIGINAL CHARACTERS are read for the media's UPLOADER (prompt-tags
+// ORIGINAL CHARACTERS; operator rulings 2026-10-11/12). With no event sender
+// here, the uploader canon recorded from Synapse is the best name the tunnel
+// has, and it decides only which <name>_(<localpart>) terms are sent as the
+// poster's own; every other qualified name is a private term offered in the
+// `oc` list too, for the booru to declare only if it is an established
+// original character. A LEGACY form (oc_<name>, <name>_oc) is sent whoever
+// the uploader is, unknown included: the booru declares it as itself or as
+// its alias's consequent. The booru names each declaration it refuses, which
+// the report carries. Nothing is recorded.
 //
 // EVERY DEPENDENCY IS INJECTED (see avatar.js for why): the DM command and
 // the rescan CLI hand this the same functions, and the tests hand it fakes.
@@ -178,9 +179,12 @@ async function rescan(target, deps) {
   const kind = (contentType || "").replace(/^image\//, "") || "?";
   const notDeclared = Object.values((recorded && recorded.original_characters_not_declared) || {});
   audit({ kind: "rescan", post_id: post.id, md5, content_type: contentType, creator: creatorTags.length, both: both.length, oc: ocTags.length, oc_not_declared: notDeclared.length, rows: recorded && recorded.recorded, generation: generation.state });
-  const ocNote = (ocTags.length ? ` Sent to the booru as original characters: ${ocTags.join(", ")}.` : "") +
+  const offered = ocTags.filter((x) => creatorSet.has(x));
+  const declared = ocTags.filter((x) => !creatorSet.has(x));
+  const ocNote = (declared.length ? ` Sent to the booru as original characters: ${declared.join(", ")}.` : "") +
+    (offered.length ? ` Offered to the booru, declared only if already an original character and private otherwise: ${offered.join(", ")}.` : "") +
     notDeclared.map((why) => ` Not declared: ${why}.`).join("") +
-    (owner ? "" : " No uploader on this homeserver is recorded for it, so no <name>_(<localpart>) term was read as the uploader's own character.");
+    (owner ? "" : " No uploader on this homeserver is recorded for it, so no <name>_(<localpart>) term was sent as the uploader's own character: each was offered like any other creator's name.");
   const report = (creatorTags.length || ocTags.length
     ? `Post #${post.id} (${kind}): read ${creatorTags.length} creator tag(s) from its metadata, ${both.length} of them also the autotagger's; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} provenance rows now on the post.${ocNote}`
     : `Post #${post.id} (${kind}): no prompt in these bytes. Its old creator rows, if any, are cleared; ${recorded && recorded.recorded != null ? recorded.recorded : "?"} rows remain.`) +

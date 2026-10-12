@@ -104,22 +104,24 @@ test("an image with no generation data: the raw md5 is not asked twice, no ai-ge
   assert.equal(plan.record, null);
 });
 
-// ORIGINAL CHARACTERS (operator ruling 2026-10-11): the poster is the
-// SENDER, and only a sender on this homeserver has a localpart to name. A
-// LEGACY form (oc_kayla) is sent for every sender, as written: the booru
-// rewrites it under the post's recorded creator, or refuses it by name.
-test("original characters: declared only under the sender's own localpart on this homeserver; legacy forms for anyone", async () => {
+// ORIGINAL CHARACTERS (operator rulings 2026-10-11/12): the poster is the
+// SENDER, and only a sender on this homeserver has a localpart to name. Their
+// own <name>_(<localpart>) and a LEGACY form (oc_kayla) go in `oc` alone; any
+// other qualified name stays a private prompt term and is offered in `oc` as
+// well, for the booru to declare only if it is an established original
+// character. The poster is never assumed to be the creator.
+test("original characters: declared under the sender's own localpart on this homeserver; legacy forms for anyone; other names private and offered", async () => {
   const removed = { "png:parameters": "1girl, (maple_\\(alice\\):1.2), maple_\\(bob\\), oc_kayla, saber_(fate)\nSteps: 20" };
   const deps = (over) => ({ ...rig().deps, strip: (buffer) => ({ buffer, removed, changed: false, confident: true }), creatorTags: extractCreatorTagsFromFields, domain: "41chan.net", ...over });
   const asAlice = await planImage({ buffer: RAW, contentType: "image/png", sender: ALICE }, deps());
-  assert.deepEqual(asAlice.scraped.characters, ["maple_(alice)", "oc_kayla"]);
+  assert.deepEqual(asAlice.scraped.characters, ["maple_(alice)", "maple_(bob)", "oc_kayla", "saber_(fate)"]);
   assert.deepEqual(asAlice.scraped.tags, ["1girl", "maple_(bob)", "saber_(fate)"]);
   const asBob = await planImage({ buffer: RAW, contentType: "image/png", sender: BOB }, deps());
-  assert.deepEqual(asBob.scraped.characters, ["maple_(bob)", "oc_kayla"]);
+  assert.deepEqual(asBob.scraped.tags, ["1girl", "maple_(alice)", "saber_(fate)"]);
   for (const [sender, over] of [["@alice:elsewhere.org", {}], ["discord:136983939662348288", {}], [ALICE, { domain: undefined }]]) {
     const plan = await planImage({ buffer: RAW, contentType: "image/png", sender }, deps(over));
-    assert.deepEqual(plan.scraped.characters, ["oc_kayla"], `${sender} ${JSON.stringify(over)}`);
-    assert.ok(plan.scraped.tags.includes("maple_(alice)"), "an undeclared name stays a private prompt term");
+    assert.deepEqual(plan.scraped.characters, ["maple_(alice)", "maple_(bob)", "oc_kayla", "saber_(fate)"], `${sender} ${JSON.stringify(over)}`);
+    assert.deepEqual(plan.scraped.tags, ["1girl", "maple_(alice)", "maple_(bob)", "saber_(fate)"], "nobody's own: every qualified name stays a private prompt term");
   }
 });
 

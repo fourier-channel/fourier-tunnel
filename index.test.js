@@ -427,51 +427,55 @@ test("the private creator tags come from what the strip TOOK -- never from the r
   assert.deepEqual(world.metadata, [], "and nothing was recorded privately");
 });
 
-// ORIGINAL CHARACTERS (operator ruling 2026-10-11): <name>_(<creator>), the
-// creator's own localpart in brackets, is sent in the hub's `oc` list and
-// NOT in the tag string the post is created with: the booru puts a name it
-// declares on the post itself, and refuses to re-file a general tag that
-// already has a post -- which a name in the creating tag string is, by the
-// time the hub reads `oc`. A LEGACY form (oc_<name>, <name>_oc and their
-// character_ variants; operator 2026-10-11, "pre-existing images all use it")
-// goes the same way, as written, for ANY sender: the booru alone rewrites it
-// to <name>_(<recorded creator>) or refuses it. A qualifier naming someone
-// else is a private creator tag.
-const OC_PARAMS = "masterpiece, oc_kayla, mahogany_oc, (maple_\\(saber\\):1.2), saber_(fate)\nSteps: 20, Sampler: Euler a";
+// ORIGINAL CHARACTERS (operator rulings 2026-10-11/12). Everything the booru
+// may declare goes in the hub's `oc` list and NOT in the tag string the post
+// is created with: the booru puts a name it declares on the post itself, and
+// refuses to re-file a general tag that already has a post -- which a name in
+// the creating tag string is, by the time the hub reads `oc`.
+//   - the poster's own <name>_(<localpart>): in `oc` alone, declared or refused
+//     by name;
+//   - a LEGACY form (oc_<name>, <name>_oc and their character_ variants): in
+//     `oc` alone, as written, for ANY sender -- the booru declares it as
+//     itself, or as its alias's consequent once the operator has mapped it;
+//   - any other qualified name ("Many of these characters belong to other
+//     creators, I'll just be the first one to post them"): a private creator
+//     term AND in `oc`, for the booru to declare only if it is an established
+//     original character and to leave private, silently, otherwise.
+const OC_PARAMS = "masterpiece, oc_kayla, (maple_\\(saber\\):1.2), kayla_\\(selphdestruct\\), saber_(fate)\nSteps: 20, Sampler: Euler a";
 const OC_PNG = Buffer.concat([...PNG_PARTS, chunk("tEXt", Buffer.from(`parameters\0${OC_PARAMS}`, "latin1")), IEND]);
 
-test("an original character: the poster's own <name>_(<localpart>) and the legacy forms are sent to be declared; someone else's qualifier stays private", async () => {
+test("an original character: the poster's own name and the legacy forms are sent to be declared; other creators' names are private and offered", async () => {
   const { outcome, lines } = await post("ocpic", OC_PNG, "image/png", "@saber:41chan.net");
   assert.equal(outcome, "posted", lines.join("\n"));
   const tags = world.created[0].post.tag_string.split(" ");
-  for (const name of ["maple_(saber)", "oc_kayla", "mahogany_oc", "saber_(fate)"]) {
+  for (const name of ["maple_(saber)", "oc_kayla", "kayla_(selphdestruct)", "saber_(fate)"]) {
     assert.ok(!tags.includes(name), `${name}: the booru puts a declared name on the post, and a private term stays private: ${tags.join(" ")}`);
   }
   const sent = world.tagSources[0];
-  assert.deepEqual(sent.oc, ["oc_kayla", "mahogany_oc", "maple_(saber)"]);
-  assert.deepEqual(sent.creator, ["saber_(fate)"]);
+  assert.deepEqual(sent.oc, ["oc_kayla", "maple_(saber)", "kayla_(selphdestruct)", "saber_(fate)"]);
+  assert.deepEqual(sent.creator, ["kayla_(selphdestruct)", "saber_(fate)"]);
   assert.deepEqual(sent.meta, ["masterpiece"]);
-  assert.ok(lines.some((l) => /3 oc\)/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /4 oc\)/.test(l)), lines.join("\n"));
 });
 
-test("the same picture from someone else: maple_(saber) is a private prompt term for alice, and the legacy forms still go to the booru to judge", async () => {
+test("the same picture from someone else: maple_(saber) is a private term for alice, offered like every other creator's name; the legacy form still goes to the booru", async () => {
   const { outcome, lines } = await post("ocpic2", OC_PNG, "image/png", ALICE);
   assert.equal(outcome, "posted", lines.join("\n"));
   const tags = world.created[0].post.tag_string.split(" ");
-  assert.ok(!tags.includes("maple_(saber)") && !tags.includes("oc_kayla") && !tags.includes("mahogany_oc"), tags.join(" "));
-  assert.deepEqual(world.tagSources[0].oc, ["oc_kayla", "mahogany_oc"]);
-  assert.deepEqual(world.tagSources[0].creator, ["maple_(saber)", "saber_(fate)"]);
+  assert.ok(!tags.includes("maple_(saber)") && !tags.includes("oc_kayla"), tags.join(" "));
+  assert.deepEqual(world.tagSources[0].oc, ["oc_kayla", "maple_(saber)", "kayla_(selphdestruct)", "saber_(fate)"]);
+  assert.deepEqual(world.tagSources[0].creator, ["maple_(saber)", "kayla_(selphdestruct)", "saber_(fate)"]);
 });
 
 test("an original character the booru would not declare is logged with the booru's reason", async () => {
   world.replies.tagSources = { original_characters_not_declared: {
     "maple_(saber)": "maple_(saber) is already a general tag on 3 posts, so it is not re-filed",
-    "oc_kayla": "oc_kayla was read as kayla_(saber), the poster's own name in brackets: kayla_(saber) is filed as copyright: ask an admin to re-file it as a character, then send the tags again",
+    "oc_kayla": "oc_kayla is filed as copyright: ask an admin to re-file it as a character, then send the tags again",
   } };
   const { outcome, lines } = await post("ocpic3", OC_PNG, "image/png", "@saber:41chan.net");
   assert.equal(outcome, "posted", lines.join("\n"));
   assert.ok(lines.some((l) => /^warn: \[tag-hub\] post #42: original character NOT declared: maple_\(saber\) is already a general tag on 3 posts/.test(l)), lines.join("\n"));
-  assert.ok(lines.some((l) => /^warn: \[tag-hub\] post #42: original character NOT declared: oc_kayla was read as kayla_\(saber\), the poster's own name in brackets: kayla_\(saber\) is filed as copyright/.test(l)), "a legacy name's refusal says what the booru read it as");
+  assert.ok(lines.some((l) => /^warn: \[tag-hub\] post #42: original character NOT declared: oc_kayla is filed as copyright/.test(l)), lines.join("\n"));
 });
 
 // --- THE HISTORY WALK, through backfillRoomNow ------------------------------------
