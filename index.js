@@ -16,6 +16,8 @@ const poster = require("./poster");
 const backfill = require("./backfill");
 const backfillState = require("./backfill-state");
 const { resolveHomeserverUrl } = require("./homeserver");
+const quarantineLib = require("./quarantine");
+const { statePath } = require("./state-dir");
 
 // PACING BETWEEN BACKFILLED IMAGES.
 //
@@ -79,6 +81,26 @@ function getCanon() {
 // Tests hand in a canon over an in-memory bucket.
 function setCanon(c) {
   canonInstance = c;
+}
+
+// THE BOORU'S QUARANTINE LIST (quarantine.js; operator rulings 2026-10-12):
+// flagged and banished tag names never enter a room's tag state. Polled from
+// the booru every 60 s once the bridge runs; the last good read is kept in the
+// state directory. Built on first use, like canon.
+let quarantineInstance = null;
+function getQuarantine() {
+  if (!quarantineInstance) {
+    // The bridge process alone writes the file and holds writes; a tool that
+    // requires this module (tools/catch-up-room.js) reads its own copy.
+    quarantineInstance = quarantineLib.createQuarantineWatch({
+      danbooru, file: () => statePath("quarantine.json"), log: console, service: require.main === module,
+    });
+  }
+  return quarantineInstance;
+}
+// Tests hand in a watch with their own clock and file.
+function setQuarantine(w) {
+  quarantineInstance = w;
 }
 
 // ONE SET OF RENDITIONS: every 15 minutes, move Synapse's renditions of images
@@ -488,6 +510,28 @@ async function tagStateIsCurrent(bridge, roomId, key, post, projection) {
     same(current.sources, projection.sources);
 }
 
+// A FALLBACK TAG LIST, checked against the booru's quarantine list before it
+// is written: the booru's tag_string, or the tags the tunnel posted with, used
+// when the booru's projection could not be had. Those are the tunnel's own
+// words, not the booru's stripped projection, so every flagged and banished
+// name is dropped here. While the list is not fresh (read in the last 5
+// minutes) it is read once, now; if that fails nothing can be checked, so
+// NOTHING is written: in the bridge the write is held (quarantine.js) and
+// made, stripped, on the next good read; in a tool it is left for a re-run.
+// Resolves { tags, sources }, or null when not written.
+async function checkedFallback({ roomId, mxcUrl, postId, rating, tags, sources }) {
+  const q = getQuarantine();
+  if (!q.isFresh()) await q.refresh();
+  if (!q.isFresh()) {
+    const held = q.hold({ roomId, mxcUrl, postId, rating, tags, sources });
+    console.warn(`[tag-state] post #${postId}: the booru's quarantine list is unread (${q.reason()}), so the fallback tags cannot be checked; not written -- ` +
+      (held ? "it is written, stripped, on the next good read of the list" : `run this again once the list is readable (or !backfill restart in ${roomId})`));
+    return null;
+  }
+  const names = quarantineLib.quarantinedNames(q.current());
+  return { tags: quarantineLib.stripNames(tags, names), sources: quarantineLib.stripSources(sources, names) };
+}
+
 // THE BOORU ALREADY HAS A POST FOR THESE BYTES: point this room's tag state
 // for this picture at it, and upload nothing. `via` says how it was found, for
 // the log line. Resolves "posted", or "tags-blocked" when the room refused
@@ -504,7 +548,8 @@ async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via }) {
   // Provenance was already recorded when this post was first created. Pull the
   // PUBLIC-SAFE projection so the new room's state matches and never carries
   // private creator tags. Fall back to tag_string for legacy posts with no
-  // recorded provenance.
+  // recorded provenance -- checked against the quarantine list, or not
+  // written at all (checkedFallback).
   let projection = null;
   try {
     projection = await danbooru.getTagProjection(existing.id);
@@ -512,11 +557,12 @@ async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via }) {
     console.warn(`[tag-hub] getTagProjection failed for post #${existing.id}: ${err.message}`);
   }
   if (!projection || projection.tags.length === 0) {
-    const tagString = existing.tag_string || "";
-    projection = {
-      tags: tagString.split(/\s+/).filter(Boolean),
+    projection = await checkedFallback({
+      roomId, mxcUrl, postId: existing.id, rating: existing.rating || config.bridge.default_rating,
+      tags: (existing.tag_string || "").split(/\s+/).filter(Boolean),
       sources: { creator: [], auto: [], both: [], meta: [] },
-    };
+    });
+    if (!projection) return "tags-blocked";
   }
   // A REPLAY (backfill, the sweep, !backfill restart) meets every picture it
   // already handled, and each write is a new state event in the room even
@@ -562,12 +608,38 @@ async function heldByTheBooru(bridge, { roomId, mxcUrl, md5, postId }) {
   if (visible) {
     return pointRoomAtPost(bridge, { roomId, mxcUrl, existing: visible, md5, via: "the booru's own md5 check at post time" });
   }
+  if (await parkIfFlagged({ roomId, mxcUrl, md5 })) return imagePlan.HELD_HIDDEN;
   console.log(
     `[skip] ${mxcUrl}: the booru already holds these bytes (md5 ${md5}) under post #${postId}, which this account ` +
     `cannot see -- deleted or jailed. Not reposted and no tag state written; nothing to retry. If it should be ` +
     `live, release it on the booru, then !backfill restart in ${roomId} writes the room's tags.`,
   );
   return imagePlan.HELD_HIDDEN;
+}
+
+// HELD HIDDEN BY A FLAGGED POST (review 2026-10-12). The booru hides a post
+// carrying a FLAGGED tag from every bot but its uploader, so a picture whose
+// bytes another bot posted is held-hidden here exactly like one held by a
+// deleted or jailed post -- but a flag is a review, and its release "restores
+// everything at once". When the quarantine list names these bytes as a
+// flagged (not banished) post, the picture is parked in quarantine.js and its
+// tag state written, stripped, once that post leaves the list. Resolves
+// whether it was parked; anything else stays the ordinary held-hidden.
+async function parkIfFlagged({ roomId, mxcUrl, md5 }) {
+  const q = getQuarantine();
+  if (!q.isFresh()) await q.refresh();
+  const doc = q.current();
+  const flagged = doc && doc.posts.find((p) => p.md5 === md5 && p.flagged && !p.banished);
+  if (!flagged) return false;
+  const parked = q.park({ roomId, mxcUrl, md5, postId: flagged.id, rating: config.bridge.default_rating });
+  console.log(
+    `[skip] ${mxcUrl}: the booru holds these bytes (md5 ${md5}) under post #${flagged.id}, which carries a FLAGGED tag ` +
+    "under review and was uploaded by another account, so this account cannot see it. Not reposted and no tag state written now; " +
+    (parked
+      ? "its tag state is written when the flag is released."
+      : `once the flag is released, run this again (or !backfill restart in ${roomId}).`),
+  );
+  return true;
 }
 
 async function handleImageEvent(bridge, event) {
@@ -727,6 +799,7 @@ async function handleImageEvent(bridge, event) {
     // 2026-10-02: 422, reason "unpostable", no post named. Final, like the
     // redirect form above it.
     if (err instanceof BooruRefusal && !(err instanceof BooruDuplicate) && err.status === 422 && err.reason === "unpostable") {
+      if (await parkIfFlagged({ roomId, mxcUrl, md5: plan.upload.md5 })) return imagePlan.HELD_HIDDEN;
       console.log(
         `[skip] ${mxcUrl}: the booru refuses these bytes (md5 ${plan.upload.md5}) as unpostable -- it holds them under ` +
         `a post this account cannot see, deleted or jailed. Not reposted and no tag state written; nothing to retry. ` +
@@ -783,18 +856,19 @@ async function handleImageEvent(bridge, event) {
     console.warn(`[tag-hub] recordTagSources failed for post #${post.id}: ${err.message}`);
   }
   // If the hub is unreachable, fall back to the booru's tag_string -- still
-  // public-safe, since creator-only tags were never written to it.
+  // public-safe, since creator-only tags were never written to it -- checked
+  // against the quarantine list, or not written at all (checkedFallback).
   if (!projection) {
+    let fallbackTags;
     try {
       const fullPost = await danbooru.getPost(post.id);
-      projection = {
-        tags: (fullPost.tag_string || "").split(/\s+/).filter(Boolean),
-        sources: { creator: [], auto: autoOnly, both, meta: metaTags },
-      };
+      fallbackTags = (fullPost.tag_string || "").split(/\s+/).filter(Boolean);
     } catch (err) {
       console.warn(`[tag-hub] could not read back post #${post.id}: ${err.message}`);
-      projection = { tags: publicTags, sources: { creator: [], auto: autoOnly, both, meta: metaTags } };
+      fallbackTags = publicTags;
     }
+    projection = await checkedFallback({ roomId, mxcUrl, postId: post.id, rating, tags: fallbackTags, sources: { creator: [], auto: autoOnly, both, meta: metaTags } });
+    if (!projection) return "tags-blocked";
   }
 
   const intent = bridge.getIntent();
@@ -1314,6 +1388,14 @@ new Cli({
     startThumbnailRetirement();
     // Resume every room whose history is not yet walked to its start.
     startBackfillSweep(bridge, `@${_reg.sender_localpart}:${config.homeserver.domain}`);
+    // The booru's quarantine list, every 60 s: on a flag or a release, every
+    // joined room's tag state for the posts it names is rewritten
+    // (quarantine.js). Denied rooms are passed by, as everywhere.
+    quarantineLib.startQuarantine(getQuarantine(), {
+      bridge, danbooru, stateType: TAG_STATE_TYPE, log: console,
+      roomIds: () => joinedRoomIds(`@${_reg.sender_localpart}:${config.homeserver.domain}`),
+      skipRoom: (roomId) => rooms.isDenied(roomId),
+    });
     // Tonneru-chan's second endpoint (operator, 2026-10-04): Discord, when
     // config.yaml carries a discord: block. Its loops fail on their own and
     // never take the Matrix bridge down with them (discordService.js).
@@ -1337,4 +1419,4 @@ new Cli({
 // writer. handleImageEvent takes anything with getIntent().sendStateEvent --
 // the real Bridge in the service, a thin stand-in in a tool -- because that is
 // the only thing it asks of it.
-module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, startCanonService, backfillRoomNow, backfillSweep };
+module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, setQuarantine, startCanonService, backfillRoomNow, backfillSweep };

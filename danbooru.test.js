@@ -126,12 +126,12 @@ async function booru(routes) {
   const seen = [];
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://stand-in");
-    seen.push({ method: req.method, path: url.pathname, query: url.search });
+    seen.push({ method: req.method, path: url.pathname, query: url.search, headers: req.headers });
     req.resume();
     req.on("end", () => {
-      const out = (routes[`${req.method} ${url.pathname}`] || (() => [599, {}]))(server);
+      const out = (routes[`${req.method} ${url.pathname}`] || (() => [599, {}]))(server, req, url);
       res.writeHead(out[0], { "content-type": "application/json", ...(out[2] || {}) });
-      res.end(JSON.stringify(out[1]));
+      res.end(out[0] === 304 ? undefined : JSON.stringify(out[1]));
     });
   });
   await new Promise((resolve) => { server.listen(0, "127.0.0.1", resolve); });
@@ -183,5 +183,141 @@ test("createPost: a made post comes back; any other answer is a BooruRefusal nam
       err.message === "POST /posts.json -> 422: Rating is not included in the list -- fix: send s, q or e");
   } finally {
     refused.close();
+  }
+});
+
+// --- THE QUARANTINE DOCUMENT (chanbooru GET /fourier_jail/release.json?quarantine=1) ---
+//
+// The booru's flagged and banished tags, and every post carrying one, read as
+// the tunnel's own account. A snapshot, paged by post id; every page carries
+// the whole set's generation, and a page whose generation differs means the
+// set moved under the read, which restarts from page 1 (at most 3 times).
+
+const { QuarantineUnreadable } = require("./danbooru");
+const GEN = "0123456789abcdef";
+const qpost = (id, extra = {}) => ({ id, md5: id.toString(16).padStart(32, "0"), mxc: `mxc://41chan.net/m${id}`, flagged: true, banished: false, ...extra });
+
+test("quarantine: one page read whole -- the names, the posts, the etag -- with the credentials in a header, never the URL", async () => {
+  const b = await booru({
+    "GET /fourier_jail/release.json": () => [200, { generation: GEN, flagged: ["secret_tag"], banished: ["gross"], posts: [qpost(1), qpost(2, { mxc: null })], next_after: null }, { etag: `"${GEN}-n"` }],
+  });
+  try {
+    const r = await b.c.getQuarantine();
+    assert.equal(r.status, "ok");
+    assert.equal(r.etag, `"${GEN}-n"`);
+    assert.deepEqual(r.doc, { generation: GEN, flagged: ["secret_tag"], banished: ["gross"], posts: [qpost(1), qpost(2, { mxc: null })] });
+    assert.equal(b.seen.length, 1);
+    assert.equal(b.seen[0].query, "?quarantine=1");
+    assert.ok(!/SECRETKEY|login|api_key/.test(b.seen[0].query), "no credentials in the URL");
+    assert.equal(b.seen[0].headers.authorization, `Basic ${Buffer.from("bot:SECRETKEY").toString("base64")}`);
+    assert.equal(b.seen[0].headers["if-none-match"], undefined, "nothing to match on a first read");
+  } finally {
+    b.close();
+  }
+});
+
+test("quarantine: pages are followed by next_after; a 304 to If-None-Match is not-modified, not an empty set", async () => {
+  const b = await booru({
+    "GET /fourier_jail/release.json": (s, req, url) => {
+      if (req.headers["if-none-match"] === `"${GEN}-n"`) return [304, null];
+      const after = url.searchParams.get("after");
+      if (!after) return [200, { generation: GEN, flagged: ["a"], banished: [], posts: [qpost(1), qpost(2)], next_after: 2 }, { etag: `"${GEN}-n"` }];
+      return [200, { generation: GEN, flagged: ["a"], banished: [], posts: [qpost(3)], next_after: null }, { etag: `"${GEN}-n"` }];
+    },
+  });
+  try {
+    const r = await b.c.getQuarantine();
+    assert.deepEqual(r.doc.posts.map((p) => p.id), [1, 2, 3]);
+    assert.deepEqual(b.seen.map((x) => x.query), ["?quarantine=1", "?quarantine=1&after=2"]);
+    const again = await b.c.getQuarantine({ ifNoneMatch: r.etag });
+    assert.deepEqual(again, { status: "not-modified" });
+  } finally {
+    b.close();
+  }
+});
+
+test("quarantine: a generation that moves between pages restarts from page 1, and after 3 restarts the read is UNREADABLE", async () => {
+  let n = 0;
+  const moving = await booru({
+    "GET /fourier_jail/release.json": (s, req, url) => {
+      n += 1;
+      const g = url.searchParams.get("after") ? "ffffffffffffffff" : GEN;
+      return [200, { generation: g, flagged: [], banished: ["a"], posts: [qpost(n)], next_after: url.searchParams.get("after") ? null : 99 }];
+    },
+  });
+  try {
+    await assert.rejects(moving.c.getQuarantine(), (err) => err instanceof QuarantineUnreadable && /changed while it was being read/.test(err.message));
+    assert.equal(moving.seen.filter((x) => x.query === "?quarantine=1").length, 4, "the first read and 3 restarts");
+  } finally {
+    moving.close();
+  }
+  let first = true;
+  const settles = await booru({
+    "GET /fourier_jail/release.json": (s, req, url) => {
+      if (!url.searchParams.get("after")) return [200, { generation: GEN, flagged: [], banished: ["a"], posts: [qpost(1)], next_after: 1 }];
+      if (first) { first = false; return [200, { generation: "ffffffffffffffff", flagged: [], banished: ["a"], posts: [qpost(2)], next_after: null }]; }
+      return [200, { generation: GEN, flagged: [], banished: ["a"], posts: [qpost(2)], next_after: null }];
+    },
+  });
+  try {
+    const r = await settles.c.getQuarantine();
+    assert.deepEqual(r.doc.posts.map((p) => p.id), [1, 2], "the restart read the set once, whole");
+  } finally {
+    settles.close();
+  }
+});
+
+test("quarantine: an older booru, a refused account, no names, or a broken page is UNREADABLE with its remedy -- never an empty set", async () => {
+  const cases = [
+    // An older booru answers the tunnel 403 (jail panel only), and sample the jail-events body.
+    [[200, { events: [], next_since: null }], /the booru is older than the quarantine build \(no generation\/posts in GET \/fourier_jail\/release\.json\?quarantine=1\) -- deploy chanbooru/],
+    [[200, "<html>a proxy page</html>"], /the booru is older than the quarantine build/],
+    [[403, { success: false, message: "the quarantine document is read by fourier_quarantine_reader_names alone" }], /-> 403: this account is not in Danbooru\.config\.fourier_quarantine_reader_names, or its api key is wrong/],
+    [[401, { success: false, message: "x" }], /-> 401: this account is not in Danbooru\.config\.fourier_quarantine_reader_names/],
+    // The booru's own sentence names the fix that applies: a listed reader still
+    // at Member is told to have it promoted (reader hardening, 2026-10-12).
+    [[403, { success: false, message: "tunnel is on fourier_quarantine_reader_names but is Member: an admin promotes it (Gold or above) at /admin/users/7/edit" }], /-> 403: .*the booru says: tunnel is on fourier_quarantine_reader_names but is Member.*\/admin\/users\/7\/edit/],
+    [[200, { generation: GEN, flagged: null, banished: null, posts: [], next_after: null }], /no names.*TagBanishment\.pipeline\?/],
+    [[200, { generation: GEN, flagged: [], banished: [], posts: [{ id: "x" }], next_after: null }], /a post the tunnel cannot read/],
+    [[500, { error: "boom" }], /-> 500/],
+  ];
+  for (const [reply, re] of cases) {
+    const b = await booru({ "GET /fourier_jail/release.json": () => reply });
+    try {
+      await assert.rejects(b.c.getQuarantine(), (err) => {
+        assert.ok(err instanceof QuarantineUnreadable, `${err && err.name}: ${err && err.message}`);
+        assert.match(err.message, re);
+        assert.ok(!/SECRETKEY/.test(err.message));
+        return true;
+      });
+    } finally {
+      b.close();
+    }
+  }
+});
+
+test("quarantine: a page that does not move forward is unreadable, not an endless loop", async () => {
+  const b = await booru({
+    "GET /fourier_jail/release.json": () => [200, { generation: GEN, flagged: [], banished: ["a"], posts: [qpost(5)], next_after: 5 }],
+  });
+  try {
+    await assert.rejects(b.c.getQuarantine(), (err) => err instanceof QuarantineUnreadable && /did not move forward/.test(err.message));
+  } finally {
+    b.close();
+  }
+});
+
+test("tag projection: the booru's projection; null when the booru answers 404 (hidden from this account); anything else THROWS", async () => {
+  const b = await booru({
+    "GET /posts/1/tag_sources.json": () => [200, { tags: ["a"], sources: { creator: [], auto: ["a"], both: [], meta: [] } }],
+    "GET /posts/2/tag_sources.json": () => [404, { success: false, message: "That record was not found." }],
+    "GET /posts/3/tag_sources.json": () => [500, { error: "boom" }],
+  });
+  try {
+    assert.deepEqual((await b.c.getTagProjection(1)).tags, ["a"]);
+    assert.equal(await b.c.getTagProjection(2), null);
+    await assert.rejects(b.c.getTagProjection(3), (err) => err instanceof BooruRefusal && err.status === 500);
+  } finally {
+    b.close();
   }
 });

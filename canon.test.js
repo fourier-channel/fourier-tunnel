@@ -179,6 +179,9 @@ test("not an image: indexed where it is, nothing moved, nothing written to media
   assert.equal(r.key, keys.source(ID));
   assert.ok(store.objects.has(keys.source(ID)));
   assert.equal(store.writes.filter((w) => w[1] && w[1].startsWith("media/")).length, 0);
+  // The md5 of its bytes, so the gate's Matrix door can refuse it when those
+  // bytes are a quarantined booru post (a 4chan webm re-posted in a room).
+  assert.equal(r.raw_md5, md5hex(Buffer.from("ciphertext")));
 });
 
 test("an image the stripper refuses is indexed as refused and its original stays put", async () => {

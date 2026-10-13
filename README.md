@@ -1,3 +1,4 @@
+<!-- phase:S-24b44c -->
 <!-- coherence:hydrated -- canon is fourier-basis/docs/repos/fourier-tunnel/README.md
      Edit canon and run `coherence hydrate`, never this delivered copy.
      An edit here is drift: hydration will refuse to overwrite it and the
@@ -76,6 +77,36 @@ first component.
    `updated_by` of the bot's localpart, and a `sources` object naming which
    tags came from the creator, the autotagger, both, or metadata.
 
+**Quarantined tags never reach a room** (operator rulings 2026-10-12). An admin
+can FLAG any tag on the booru for review, or BANISH it; either way its name
+disappears everywhere, and releasing a flag restores it at once. The bridge
+reads the booru's list -- every flagged and banished name and every post
+carrying one, `GET /fourier_jail/release.json?quarantine=1` as its own
+account -- every 60 seconds, and keeps the last good read in
+`quarantine.json` (the state directory). The tag projections the booru hands
+back are already stripped of those names; the bridge's two fallbacks (the
+booru's tag string, or the tags it posted with, used when the projection
+cannot be had) are stripped here. While the booru cannot be read the last
+good list keeps governing for a 30-minute grace (operator ruling 2026-10-12),
+logged at error level from the first failed read and again when the grace
+runs out; a tag flagged during an outage takes effect when the booru returns.
+A fallback that finds the list older than that reads it once on demand, and
+if that fails writes NOTHING: the write is held and made, stripped, on the
+next good read. When the list changes --
+a flag, a release, a banish -- every joined room's current tag state for each
+affected post (found by its mxc or its post id) is rewritten from the booru's
+projection, or from the room's own state minus the names when the booru hides
+the post from the bridge. Affected: every post in the old list or the new one
+when the NAMES changed; only the posts that joined or left when they did not
+(a post that stayed already carries its stripped state). A picture posted in a
+room while the booru holds its bytes under ANOTHER bot's flagged post is
+held-hidden like one held by a deleted post, but parked in `quarantine.json`:
+its tag state is written, stripped, once the flag is released. It is idempotent, logs
+`room n/N`, and a run that could not finish is retried 5 minutes later or on
+the next change. Room timeline HISTORY keeps the earlier state events; the
+current state is what is rewritten. A room that refuses the write is logged
+with its fix (`tools/grant-tag-write.sh`).
+
 The image bytes are stored by the homeserver; the booru is fed a copy for
 posting. The MXC URI is the link between the two systems. Access to the
 underlying media is always enforced by the homeserver's authenticated media
@@ -152,6 +183,13 @@ console:
     puts k.key
 
 Put the username and key into `config.yaml`.
+
+The account must also be one the booru treats as the pipeline (chanbooru
+`TagBanishment.pipeline?`) and be named in its
+`Danbooru.config.fourier_quarantine_reader_names`, or the quarantine list above
+cannot be read: the bridge then logs which of the two is wrong and holds every
+fallback tag write until it can. A scoped API key needs the
+`fourier_jail:index` permission for the same read.
 
 ### 3. The appservice registration
 

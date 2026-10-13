@@ -594,7 +594,11 @@ function createCanon({ store, mediaInfo, booru, log = () => {}, booruWaitMs = BO
     // image/jpeg must not get a .jpg key the booru never writes.
     const format = sniff(raw);
     if (!format) {
-      const idx = { kind: "source", key: keys.source(mediaId), media_type: info.media_type, at: now };
+      // raw_md5: the md5 of these bytes, which fourier-auth's Matrix door
+      // checks against the booru's quarantine (mediar2.js localMd5s) -- a
+      // file canon does not make canonical (a 4chan webm re-posted in a room)
+      // is still the same bytes as a booru post that may be flagged.
+      const idx = { kind: "source", key: keys.source(mediaId), media_type: info.media_type, raw_md5: md5hex(raw), at: now };
       if (!dry) await writeIndex(mediaId, idx);
       return idx;
     }

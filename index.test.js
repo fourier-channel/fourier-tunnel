@@ -108,6 +108,8 @@ function reset() {
     paged: [],           // { room, from, to } for every /messages call, in order
     events: {},          // event id -> event, for /rooms/:room/event/:id
     joined: [],          // what /joined_rooms answers
+    quarantine: null,    // the quarantine document GET /fourier_jail/release.json?quarantine=1
+                         // answers (null: 503), or a [status, body] to answer instead
     held: {},            // md5 -> { id, visible, ... }: a post the md5 lookup does NOT
                          // return -- deleted or jailed, as the booru hides them --
                          // which POST /posts.json answers with a 302 to it
@@ -198,9 +200,17 @@ const ROUTES = [
   }],
   ["POST", /^\/posts\/(\d+)\/tag_sources\.json$/, (req, m, body) => {
     world.tagSources.push({ postId: Number(m[1]), ...JSON.parse(body) });
+    if (world.replies.tagSourcesFail) return world.replies.tagSourcesFail;
     return [200, { post_id: Number(m[1]), recorded: 1, projection: { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }, ...(world.replies.tagSources || {}) }];
   }],
-  ["GET", /^\/posts\/(\d+)\/tag_sources\.json$/, () => [200, { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }]],
+  ["GET", /^\/posts\/(\d+)\/tag_sources\.json$/, () => world.replies.projection || [200, { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }]],
+  // chanbooru's quarantine document, as the tunnel's account reads it.
+  ["GET", /^\/fourier_jail\/release\.json$/, (req, m, body, url) => {
+    if (url.searchParams.get("quarantine") !== "1") return [403, { success: false }];
+    if (world.quarantine instanceof Array) return world.quarantine;
+    if (!world.quarantine) return [503, { error: "down" }];
+    return [200, { ...world.quarantine, next_after: null }, { etag: `"${world.quarantine.generation}-n"` }];
+  }],
   ["GET", /^\/tags\.json$/, () => [200, []]],
   // A post's page, as the tunnel's account sees it: a hidden post answers 404,
   // exactly as a missing one does (chanbooru Post#hidden_as_deleted?).
@@ -684,4 +694,194 @@ test("a backfill failure names the request that failed -- method and path, never
   assert.match(line, /: GET \/uploads\/1\.json: Request failed with status code 404; retried on the next run \(attempt 1 of 5\)$/);
   assert.doesNotMatch(line, /TESTKEY|api_key|127\.0\.0\.1|only=/);
   assert.match(backfillState()[room].failed[0].error, /^GET \/uploads\/1\.json: /, "and the saved failure says the same");
+});
+
+// --- THE BOORU'S QUARANTINE LIST IN THE FALLBACK WRITES -----------------------------
+//
+// Operator rulings 2026-10-12: a flagged or banished tag's name never enters a
+// room's tag state. The booru's projection is stripped by the booru; the two
+// FALLBACKS (the booru's tag_string, or the tags the tunnel posted with) are
+// the tunnel's own words and are stripped here -- and, when the list is not
+// fresh, not written at all but held until it is.
+
+const quarantineLib = require("./quarantine");
+let qclock = Date.now();
+function freshWatch() {
+  const file = path.join(dir, "quarantine-under-test.json");
+  fs.rmSync(file, { force: true });
+  const w = quarantineLib.createQuarantineWatch({
+    danbooru: new DanbooruClient(index.config.danbooru), file: () => file, now: () => qclock,
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+  });
+  index.setQuarantine(w);
+  return w;
+}
+const QDOC = { generation: "0123456789abcdef", flagged: ["secret_tag"], banished: ["gross"], posts: [] };
+
+test("a duplicate with no recorded provenance falls back to tag_string WITHOUT a flagged or banished name", async () => {
+  const w = freshWatch();
+  world.quarantine = QDOC;
+  assert.equal(await w.refresh(), "ok");
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl secret_tag gross hoodie", rating: "q" };
+  world.replies.projection = [200, { tags: [], sources: { creator: [], auto: [], both: [], meta: [] } }];
+  const { outcome, lines } = await post("legacydup", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.equal(world.state.length, 1);
+  assert.deepEqual(world.state[0].content.tags, ["1girl", "hoodie"]);
+});
+
+test("the same fallback while the list is unread writes NOTHING, says why, and the held write lands stripped on the next good read", async () => {
+  const w = freshWatch();
+  world.quarantine = null; // the booru cannot answer for it
+  await w.refresh();
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl secret_tag", rating: "q" };
+  world.replies.projection = [200, { tags: [], sources: { creator: [], auto: [], both: [], meta: [] } }];
+  const { outcome, lines } = await post("unreaddup", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "tags-blocked", lines.join("\n"));
+  assert.deepEqual(world.state, []);
+  assert.ok(lines.some((l) => /^warn: \[tag-state\] post #7: the booru's quarantine list is unread \(never read.*\), so the fallback tags cannot be checked; not written -- it is written, stripped, on the next good read of the list$/.test(l)), lines.join("\n"));
+
+  world.quarantine = QDOC;
+  const t = await quarantineLib.quarantineTick(w, { bridge, danbooru: new DanbooruClient(index.config.danbooru), stateType: index.TAG_STATE_TYPE, roomIds: async () => [], now: () => qclock, paceMs: 0, log: { log: () => {}, warn: () => {}, error: () => {} } });
+  assert.equal(t.heldWritten, 1);
+  assert.deepEqual(world.state.map((x) => [x.room, x.key, x.content.tags]), [["!room:41chan.net", "mxc://41chan.net/unreaddup", ["1girl"]]]);
+});
+
+test("a list never read is read ON DEMAND by the fallback, which then writes, stripped", async () => {
+  freshWatch();
+  world.quarantine = QDOC;
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl secret_tag", rating: "q" };
+  world.replies.projection = [200, { tags: [], sources: { creator: [], auto: [], both: [], meta: [] } }];
+  const { outcome, lines } = await post("ondemand", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.deepEqual(world.state[0].content.tags, ["1girl"]);
+});
+
+test("inside the 30-minute grace an unreadable booru leaves the last good list governing: the fallback is written, stripped by it", async () => {
+  const w = freshWatch();
+  world.quarantine = QDOC;
+  await w.refresh();
+  world.quarantine = null;
+  qclock += 25 * 60 * 1000;
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl secret_tag", rating: "q" };
+  world.replies.projection = [200, { tags: [], sources: { creator: [], auto: [], both: [], meta: [] } }];
+  const { outcome, lines } = await post("gracedup", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.deepEqual(world.state.map((x) => x.content.tags), [["1girl"]]);
+});
+
+test("a list read more than 30 minutes ago (the grace) that cannot be read again is not fresh: the fallback is held, not written", async () => {
+  const w = freshWatch();
+  world.quarantine = QDOC;
+  await w.refresh();
+  world.quarantine = null;
+  qclock += 30 * 60 * 1000;
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl", rating: "q" };
+  world.replies.projection = [200, { tags: [], sources: { creator: [], auto: [], both: [], meta: [] } }];
+  const { outcome, lines } = await post("staledup", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "tags-blocked", lines.join("\n"));
+  assert.deepEqual(world.state, []);
+  assert.ok(lines.some((l) => /quarantine list is unread \(last read 1800s ago: GET \/fourier_jail\/release\.json\?quarantine=1 -> 503/.test(l)), lines.join("\n"));
+});
+
+test("a new post whose tag hub fails falls back to the posted tags WITHOUT a flagged name; unread, the post stands and no state is written", async () => {
+  const w = freshWatch();
+  world.quarantine = { ...QDOC, flagged: ["1girl"] }; // spectrum's tag, so it is among the posted ones
+  await w.refresh();
+  world.replies.tagSourcesFail = [500, { error: "hub down" }];
+  const a = await post("hubdown", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(a.outcome, "posted", a.lines.join("\n"));
+  assert.ok(world.created[0].post.tag_string.split(" ").includes("1girl"), "the booru is still told, and hides the post itself");
+  assert.equal(world.state.length, 1);
+  assert.ok(!world.state[0].content.tags.includes("1girl"), world.state[0].content.tags.join(" "));
+  assert.ok(world.state[0].content.tags.includes("41chan_alice"));
+
+  reset();
+  freshWatch(); // never read
+  world.replies.tagSourcesFail = [500, { error: "hub down" }];
+  const b = await post("hubdown2", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(b.outcome, "tags-blocked", b.lines.join("\n"));
+  assert.equal(world.created.length, 1, "the post is made");
+  assert.deepEqual(world.state, []);
+});
+
+// --- A PICTURE HELD HIDDEN BY ANOTHER BOT'S FLAGGED POST -------------------------------
+//
+// Review 2026-10-12. A picture posted in a room while the booru holds its bytes
+// under a post this account may not see is "held-hidden": no post, no state,
+// never retried -- right for a deleted or jailed post. But a post hidden
+// because it carries a FLAGGED tag and another bot uploaded it comes back when
+// the flag is released ("Turning the flag off restores everything at once"),
+// and nothing ever revisited the room: its picture stayed without tag state
+// for good. It is parked now, and written when the post leaves the list.
+
+const releaseDeps = () => ({ bridge, danbooru: new DanbooruClient(index.config.danbooru), stateType: index.TAG_STATE_TYPE, roomIds: async () => [], now: () => qclock, paceMs: 0, log: { log: () => {}, warn: () => {}, error: () => {} } });
+
+test("held hidden by another bot's FLAGGED post: parked, and the room gets its tag state, stripped, when the flag is released", async () => {
+  const w = freshWatch();
+  const m = md5(PLAIN_PNG);
+  world.quarantine = { ...QDOC, posts: [{ id: 25, md5: m, mxc: null, flagged: true, banished: false }] };
+  await w.refresh();
+  world.held[m] = { id: 25, md5: m, visible: false, unpostable: true };
+  const { outcome, lines } = await post("flaggedrepost", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "held-hidden", lines.join("\n"));
+  assert.deepEqual(world.state, []);
+  assert.ok(lines.some((l) => /flaggedrepost.*FLAGGED.*written when the flag is released/.test(l)), lines.join("\n"));
+
+  // Still flagged: a tick writes nothing.
+  assert.equal((await quarantineLib.quarantineTick(w, releaseDeps())).parkedWritten, 0);
+  assert.deepEqual(world.state, []);
+
+  // Released: the post is visible again, and leaves the list.
+  world.quarantine = { ...QDOC, generation: "fedcba9876543210", posts: [] };
+  world.held[m].visible = true;
+  world.posts[m] = { id: 25, md5: m, tag_string: "1girl secret_tag", rating: "q" };
+  world.replies.projection = [200, { tags: ["1girl", "gross"], sources: { creator: [], auto: ["1girl", "gross"], both: [], meta: [] } }];
+  const t = await quarantineLib.quarantineTick(w, releaseDeps());
+  assert.equal(t.parkedWritten, 1);
+  assert.deepEqual(world.state.map((x) => [x.room, x.key, x.content.post_id, x.content.tags]), [["!room:41chan.net", "mxc://41chan.net/flaggedrepost", 25, ["1girl"]]]);
+  assert.deepEqual(w.parked(), [], "and it is parked no longer");
+});
+
+test("held hidden by a deleted or jailed post (not in the list): not parked, nothing written later", async () => {
+  const w = freshWatch();
+  world.quarantine = QDOC;
+  await w.refresh();
+  world.held[md5(PLAIN_PNG)] = { id: 25, md5: md5(PLAIN_PNG), visible: false };
+  const { outcome } = await post("jailedagain", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "held-hidden");
+  assert.deepEqual(w.parked(), []);
+});
+
+test("released from the flag but jailed meanwhile: the parked picture is let go, still held-hidden, and says so", async () => {
+  const w = freshWatch();
+  const m = md5(PLAIN_PNG);
+  world.quarantine = { ...QDOC, posts: [{ id: 25, md5: m, mxc: null, flagged: true, banished: false }] };
+  await w.refresh();
+  world.held[m] = { id: 25, md5: m, visible: false };
+  await post("flaggedthenjailed", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(w.parked().length, 1);
+  world.quarantine = { ...QDOC, generation: "fedcba9876543210", posts: [] };
+  const t = await quarantineLib.quarantineTick(w, releaseDeps());
+  assert.equal(t.parkedWritten, 0);
+  assert.deepEqual(world.state, []);
+  assert.deepEqual(w.parked(), []);
+});
+
+test("a parked picture whose post is then BANISHED is let go: the review ended, nothing comes back", async () => {
+  const w = freshWatch();
+  const m = md5(PLAIN_PNG);
+  world.quarantine = { ...QDOC, posts: [{ id: 25, md5: m, mxc: null, flagged: true, banished: false }] };
+  await w.refresh();
+  world.held[m] = { id: 25, md5: m, visible: false, unpostable: true };
+  await post("flaggedthenbanished", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(w.parked().length, 1);
+  world.quarantine = { ...QDOC, generation: "fedcba9876543210", posts: [{ id: 25, md5: m, mxc: null, flagged: false, banished: true }] };
+  // The pipeline sees a banished post; it still gets no tag state here.
+  world.held[m].visible = true;
+  world.held[m].tag_string = "1girl gross";
+  const t = await quarantineLib.quarantineTick(w, releaseDeps());
+  assert.equal(t.parkedWritten, 0);
+  assert.deepEqual(world.state, []);
+  assert.deepEqual(w.parked(), []);
 });

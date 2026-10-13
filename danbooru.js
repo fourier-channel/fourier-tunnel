@@ -211,14 +211,112 @@ class DanbooruClient {
   }
 
   // Fetch a post's PUBLIC-SAFE tag projection (used for a duplicate image whose
-  // provenance is already recorded). Never includes private creator tags.
+  // provenance is already recorded). Never includes private creator tags, and
+  // never a flagged or banished name: the booru strips those for every caller
+  // (chanbooru FourierTagSource.matrix_projection). null when the booru
+  // answers 404 -- no such post, or one hidden from this account (deleted,
+  // jailed, or flagged and uploaded by another bot), answered identically on
+  // purpose. Anything else throws, so a caller can tell "hidden" from "could
+  // not find out".
   async getTagProjection(postId) {
     const resp = await this._client().get(`/posts/${postId}/tag_sources.json`, {
       params: { scope: "public" },
       validateStatus: () => true,
     });
     if (resp.status === 200 && resp.data && Array.isArray(resp.data.tags)) return resp.data;
-    return null;
+    if (resp.status === 404) return null;
+    throw refusal(`GET /posts/${postId}/tag_sources.json`, resp);
+  }
+
+  // THE QUARANTINE DOCUMENT: the booru's flagged and banished tag names and
+  // every post carrying one (chanbooru GET /fourier_jail/release.json
+  // ?quarantine=1, read by the accounts in Danbooru.config
+  // .fourier_quarantine_reader_names). The tunnel must never write one of
+  // those names into a room's tag state (operator rulings 2026-10-12).
+  //
+  // Resolves { status: "ok", doc: { generation, flagged, banished, posts },
+  // etag } or, when `ifNoneMatch` is the etag of the set the booru still has,
+  // { status: "not-modified" }. Throws QuarantineUnreadable for every way of
+  // not finding out -- never an empty document, which would read as "nothing
+  // is quarantined". A snapshot, paged by post id: a page whose generation
+  // differs from page 1's means the set moved under the read, which restarts
+  // from page 1, at most QUARANTINE_RESTARTS times.
+  //
+  // The credentials go in an Authorization header, not the query string the
+  // rest of this client uses, so no URL here ever carries the api key.
+  async getQuarantine({ ifNoneMatch } = {}) {
+    for (let attempt = 0; attempt <= QUARANTINE_RESTARTS; attempt += 1) {
+      const first = await this._quarantinePage(null, ifNoneMatch);
+      if (first === NOT_MODIFIED) return { status: "not-modified" };
+      const { generation, flagged, banished } = first.body;
+      const posts = [...first.body.posts];
+      let next = first.body.next_after;
+      let moved = false;
+      while (next != null) {
+        const last = posts.length ? posts[posts.length - 1].id : 0;
+        if (!Number.isInteger(next) || next < last) {
+          throw new QuarantineUnreadable(`${QUARANTINE_WHAT}: the paging did not move forward (next_after ${JSON.stringify(next)} after post #${last}); the booru's document is broken -- check chanbooru TagQuarantine.document`);
+        }
+        const page = await this._quarantinePage(next, undefined);
+        if (page === NOT_MODIFIED || page.body.generation !== generation) { moved = true; break; }
+        if (page.body.posts.length && page.body.posts[0].id <= last) {
+          throw new QuarantineUnreadable(`${QUARANTINE_WHAT}: the paging did not move forward (page after #${next} began at #${page.body.posts[0].id}); the booru's document is broken -- check chanbooru TagQuarantine.document`);
+        }
+        posts.push(...page.body.posts);
+        next = page.body.next_after;
+      }
+      if (!moved) return { status: "ok", etag: first.etag, doc: { generation, flagged, banished, posts } };
+    }
+    throw new QuarantineUnreadable(`${QUARANTINE_WHAT}: the quarantine set changed while it was being read, ${QUARANTINE_RESTARTS + 1} times running; the next poll reads it again`);
+  }
+
+  async _quarantinePage(after, ifNoneMatch) {
+    let resp;
+    try {
+      resp = await this._raw().get("/fourier_jail/release.json", {
+        params: after == null ? { quarantine: 1 } : { quarantine: 1, after },
+        headers: ifNoneMatch ? { "If-None-Match": ifNoneMatch } : {},
+        maxRedirects: 0,
+        validateStatus: () => true,
+      });
+    } catch (err) {
+      throw new QuarantineUnreadable(`${QUARANTINE_WHAT}: the booru did not answer (${err.code || err.message})`);
+    }
+    if (resp.status === 304) return NOT_MODIFIED;
+    if (resp.status === 401 || resp.status === 403) {
+      // The booru's own sentence names the fix that applies (a listed reader
+      // still at Member is told to have it promoted); ours lists the usual ones.
+      const said = resp.data && typeof resp.data.message === "string" && resp.data.message ? `; the booru says: ${resp.data.message}` : "";
+      throw new QuarantineUnreadable(`${QUARANTINE_WHAT} -> ${resp.status}: this account is not in Danbooru.config.fourier_quarantine_reader_names, or its api key is wrong${said}`);
+    }
+    if (resp.status !== 200) throw new QuarantineUnreadable(refusal(QUARANTINE_WHAT, resp).message);
+    const body = resp.data;
+    if (!body || typeof body !== "object" || typeof body.generation !== "string" || !Array.isArray(body.posts)) {
+      throw new QuarantineUnreadable(`the booru is older than the quarantine build (no generation/posts in ${QUARANTINE_WHAT}) -- deploy chanbooru`);
+    }
+    // The names reach a pipeline account alone. The tunnel strips them, so
+    // without them it cannot do its job, and says so.
+    if (!Array.isArray(body.flagged) || !Array.isArray(body.banished) || ![...body.flagged, ...body.banished].every((n) => typeof n === "string")) {
+      throw new QuarantineUnreadable(`${QUARANTINE_WHAT}: the booru sent this account no names (flagged/banished not lists), so it does not count it as a pipeline account (chanbooru TagBanishment.pipeline?) and the tunnel cannot strip quarantined names -- the tunnel's booru account must be one of the pipeline accounts`);
+    }
+    const bad = body.posts.find((p) => !p || !Number.isInteger(p.id) || !(p.mxc === null || typeof p.mxc === "string"));
+    if (bad !== undefined) {
+      throw new QuarantineUnreadable(`${QUARANTINE_WHAT}: a post the tunnel cannot read (${JSON.stringify(bad).slice(0, 120)}); the booru's document is broken -- check chanbooru TagQuarantine.document`);
+    }
+    if (!(body.next_after === null || body.next_after === undefined || Number.isInteger(body.next_after))) {
+      throw new QuarantineUnreadable(`${QUARANTINE_WHAT}: next_after is ${JSON.stringify(body.next_after)}, not a post id or null`);
+    }
+    const etag = resp.headers && (typeof resp.headers.get === "function" ? resp.headers.get("etag") : resp.headers.etag);
+    return { body: { ...body, next_after: body.next_after ?? null }, etag: typeof etag === "string" ? etag : null };
+  }
+
+  // The booru with the credentials in a Basic header and none in the URL.
+  _raw() {
+    return axios.create({
+      baseURL: this.baseUrl,
+      auth: { username: this.username, password: this.apiKey },
+      timeout: 30000,
+    });
   }
 
   // Find a tag by exact name. undefined when it does not exist yet.
@@ -257,6 +355,20 @@ class DanbooruClient {
       },
     });
     return resp.data;
+  }
+}
+
+const QUARANTINE_WHAT = "GET /fourier_jail/release.json?quarantine=1";
+const QUARANTINE_RESTARTS = 3;
+const NOT_MODIFIED = Symbol("not-modified");
+
+// The quarantine document could not be read: the booru is down, older than the
+// quarantine build, refuses this account, or sent something that is not the
+// document. The message is the reason and its remedy.
+class QuarantineUnreadable extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "QuarantineUnreadable";
   }
 }
 
@@ -307,4 +419,4 @@ function refusal(what, resp) {
   return new BooruRefusal(`${what} -> ${resp.status}${reason}${why ? `: ${why}` : ": the booru gave no reason"}`, resp.status, body);
 }
 
-module.exports = { DanbooruClient, BooruRefusal, BooruDuplicate, sleep };
+module.exports = { DanbooruClient, BooruRefusal, BooruDuplicate, QuarantineUnreadable, sleep };
