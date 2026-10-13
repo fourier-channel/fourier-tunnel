@@ -1,3 +1,4 @@
+<!-- phase:S-6396f1 -->
 <!-- coherence:hydrated -- canon is fourier-basis/docs/repos/fourier-tunnel/DEVLOG.md
      Edit canon and run `coherence hydrate`, never this delivered copy.
      An edit here is drift: hydration will refuse to overwrite it and the
