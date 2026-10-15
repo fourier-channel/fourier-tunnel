@@ -144,10 +144,34 @@ class DanbooruClient {
   // Record the per-tag provenance partition on the booru (the single write path
   // for the tag hub). The booru stores it, marks creator-only tags private, and
   // returns the PUBLIC-SAFE projection to write into Matrix state.
-  // partition = { creator, auto, both, meta } (arrays of tag strings).
+  // partition = { creator, auto, both, meta } (arrays of tag strings), plus
+  // `mxc` when the caller reports the image's address with it (gate 3,
+  // gate3-aliases.js): the booru then answers that too, as `mxc`.
+  // Basic auth, never the key in the URL: gate 3's contract B says so for
+  // this call, and the key in a query string is the key in every access log
+  // between here and the booru.
   async recordTagSources(postId, partition) {
-    const resp = await this._client().post(`/posts/${postId}/tag_sources.json`, partition);
-    return resp.data; // { post_id, recorded, projection: { tags, sources } }
+    const resp = await this._raw().post(`/posts/${postId}/tag_sources.json`, partition);
+    return resp.data; // { post_id, recorded, projection: { tags, sources }, mxc? }
+  }
+
+  // GATE 3: report that `mxc` is another address of post `postId`'s image -- a
+  // re-upload of the same bytes the tunnel mapped to the post by md5
+  // (GATE3_CONTRACTS B). A body carrying ONLY {mxc}: no partition, no tag
+  // change. Resolves the booru's verdict { accepted, reason? }. Throws a
+  // BooruRefusal (with .status) for any answer that is not one -- an older
+  // booru's 200 without it included -- and a plain Error naming the call when
+  // the booru did not answer. Errors name the path, never the URL.
+  async reportMxcAlias(postId, mxc) {
+    const what = `POST /posts/${postId}/tag_sources.json (mxc)`;
+    let resp;
+    try {
+      resp = await this._raw().post(`/posts/${postId}/tag_sources.json`, { mxc }, { maxRedirects: 0, validateStatus: () => true });
+    } catch (err) {
+      throw new Error(`${what}: the booru did not answer (${err.code || "no response"})`);
+    }
+    if (resp.status !== 200) throw refusal(what, resp);
+    return mxcVerdict(what, resp.data);
   }
 
   // Hand the booru the generation data strip-generation.js took out of an
@@ -203,8 +227,13 @@ class DanbooruClient {
   // The booru md5 of the post whose generation record was filed from these RAW
   // bytes, or null. This is how a re-post is recognised after the strip rules
   // change: md5(strip(raw)) moves with the rules, md5(raw) does not.
+  // Basic auth, never the key in the URL: this lookup runs for every image
+  // whose stripped md5 is not a post -- in the bridge and once per canonical
+  // image in tools/report-mxc-aliases.js -- and a key in a query string is the
+  // key in every access log between here and the booru (gate 3 review,
+  // 2026-10-15; contract B says the same of the report it leads to).
   async findGenerationByRawMd5(rawMd5) {
-    const resp = await this._client().get(`/fourier/generation_metadata/raw/${rawMd5}.json`, { validateStatus: () => true });
+    const resp = await this._raw().get(`/fourier/generation_metadata/raw/${rawMd5}.json`, { validateStatus: () => true });
     if (resp.status === 404) return null;
     if (resp.status === 200 && resp.data && typeof resp.data.md5 === "string" && /^[0-9a-f]{32}$/.test(resp.data.md5)) return resp.data.md5;
     throw refusal("generation_metadata/raw", resp);
@@ -412,6 +441,22 @@ function postIdFromLocation(headers) {
   return m ? Number(m[1]) : null;
 }
 
+// The booru's gate 3 verdict on one mxc, from a tag_sources answer:
+// {"mxc":{"accepted":true}} or {"mxc":{"accepted":false,"reason":"<token>"}}.
+// An answer without one is a booru older than gate 3 -- never read as
+// accepted, which would drop a report nobody recorded.
+function mxcVerdict(what, data) {
+  const v = data && typeof data === "object" ? data.mxc : undefined;
+  if (v && typeof v === "object" && v.accepted === true) return { accepted: true };
+  if (v && typeof v === "object" && v.accepted === false && typeof v.reason === "string" && /^[a-z0-9_]{1,64}$/.test(v.reason)) {
+    return { accepted: false, reason: v.reason };
+  }
+  throw new BooruRefusal(
+    `${what} -> 200 but the answer carries no mxc verdict: chanbooru predates gate 3's mxc receiver -- deploy chanbooru (GATE3_CONTRACTS B/D)`,
+    200, { reason: "no_mxc_verdict" },
+  );
+}
+
 function refusal(what, resp) {
   const body = resp.data && typeof resp.data === "object" ? resp.data : {};
   const why = [body.error, body.fix && `fix: ${body.fix}`].filter(Boolean).join(" -- ");
@@ -419,4 +464,4 @@ function refusal(what, resp) {
   return new BooruRefusal(`${what} -> ${resp.status}${reason}${why ? `: ${why}` : ": the booru gave no reason"}`, resp.status, body);
 }
 
-module.exports = { DanbooruClient, BooruRefusal, BooruDuplicate, QuarantineUnreadable, sleep };
+module.exports = { DanbooruClient, BooruRefusal, BooruDuplicate, QuarantineUnreadable, mxcVerdict, sleep };

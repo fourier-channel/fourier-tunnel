@@ -47,6 +47,9 @@ const NODE_GLOBALS = {
   FormData: "readonly",
   Blob: "readonly",
   structuredClone: "readonly",
+  // gate3-aliases.js waits for its lock file synchronously with Atomics.wait.
+  Atomics: "readonly",
+  SharedArrayBuffer: "readonly",
   globalThis: "readonly",
 };
 

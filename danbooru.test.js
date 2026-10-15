@@ -14,10 +14,14 @@ function client(reply) {
   const c = new DanbooruClient({ url: "http://booru.invalid/", username: "bot", api_key: "SECRETKEY" });
   const sent = [];
   const answer = async (method, url, body, opts) => { sent.push({ method, url, body, opts }); return typeof reply === "function" ? reply(url) : reply; };
-  c._client = () => ({
-    post: (url, body, opts) => answer("POST", url, body, opts),
-    get: (url, opts) => answer("GET", url, undefined, opts),
+  const stub = (auth) => () => ({
+    post: (url, body, opts) => answer("POST", url, body, { ...opts, auth }),
+    get: (url, opts) => answer("GET", url, undefined, { ...opts, auth }),
   });
+  // Which door a call used is recorded: "key" puts the api_key in the query
+  // string, "basic" carries it in a header.
+  c._client = stub("key");
+  c._raw = stub("basic");
   return { c, sent };
 }
 const FIELDS = { "png:parameters": "1girl\nSteps: 20, Sampler: Euler a", "png:workflow": "{\"nodes\":[]}" };
@@ -317,6 +321,85 @@ test("tag projection: the booru's projection; null when the booru answers 404 (h
     assert.deepEqual((await b.c.getTagProjection(1)).tags, ["a"]);
     assert.equal(await b.c.getTagProjection(2), null);
     await assert.rejects(b.c.getTagProjection(3), (err) => err instanceof BooruRefusal && err.status === 500);
+  } finally {
+    b.close();
+  }
+});
+
+// --- GATE 3: THE MXC REPORT (GATE3_CONTRACTS B) ------------------------------------
+//
+// POST /posts/:id/tag_sources.json with a body carrying ONLY {"mxc": ...};
+// the booru answers {"mxc":{"accepted":bool,"reason"?}}. A Basic header, never
+// the key in the URL, and an error names the path, never the URL.
+
+test("mxc report: the body carries ONLY the mxc, the key rides in a Basic header and nowhere in the URL; the verdict comes back", async () => {
+  const bodies = [];
+  const b = await booru({
+    "POST /posts/7/tag_sources.json": () => [200, { mxc: { accepted: true } }],
+    "POST /posts/8/tag_sources.json": () => [200, { mxc: { accepted: false, reason: "mxc_mapped_elsewhere" } }],
+  });
+  const raw = b.c._raw.bind(b.c);
+  b.c._raw = () => { const ax = raw(); const post = ax.post.bind(ax); ax.post = (u, body, o) => { bodies.push(body); return post(u, body, o); }; return ax; };
+  try {
+    assert.deepEqual(await b.c.reportMxcAlias(7, "mxc://41chan.net/a"), { accepted: true });
+    assert.deepEqual(await b.c.reportMxcAlias(8, "mxc://41chan.net/b"), { accepted: false, reason: "mxc_mapped_elsewhere" });
+    assert.deepEqual(bodies, [{ mxc: "mxc://41chan.net/a" }, { mxc: "mxc://41chan.net/b" }]);
+    for (const r of b.seen) {
+      assert.equal(r.query, "", "no query string at all");
+      assert.equal(r.headers.authorization, `Basic ${Buffer.from("bot:SECRETKEY").toString("base64")}`);
+    }
+  } finally {
+    b.close();
+  }
+});
+
+test("mxc report: an answer that is not a verdict THROWS -- an older booru's 200, a 404, a 5xx -- naming the path, never the URL or the key", async () => {
+  const b = await booru({
+    "POST /posts/1/tag_sources.json": () => [200, { post_id: 1, recorded: 0, projection: { tags: [] } }],
+    "POST /posts/2/tag_sources.json": () => [404, { success: false, message: "That record was not found." }],
+    "POST /posts/3/tag_sources.json": () => [503, { error: "down", fix: "wait" }],
+    "POST /posts/4/tag_sources.json": () => [200, { mxc: { accepted: false } }],
+  });
+  try {
+    await assert.rejects(b.c.reportMxcAlias(1, "mxc://41chan.net/a"), (err) => err instanceof BooruRefusal && err.status === 200 && err.reason === "no_mxc_verdict" &&
+      /^POST \/posts\/1\/tag_sources\.json \(mxc\) -> 200 but the answer carries no mxc verdict: .*deploy chanbooru/.test(err.message));
+    await assert.rejects(b.c.reportMxcAlias(2, "mxc://41chan.net/a"), (err) => err instanceof BooruRefusal && err.status === 404);
+    await assert.rejects(b.c.reportMxcAlias(3, "mxc://41chan.net/a"), (err) => err instanceof BooruRefusal && err.status === 503 && err.message === "POST /posts/3/tag_sources.json (mxc) -> 503: down -- fix: wait");
+    await assert.rejects(b.c.reportMxcAlias(4, "mxc://41chan.net/a"), (err) => err.reason === "no_mxc_verdict", "a refusal with no reason is not a verdict");
+  } finally {
+    b.close();
+  }
+  // Nobody answering: the path and the code, never the host and port.
+  const gone = new DanbooruClient({ url: "http://127.0.0.1:9", username: "bot", api_key: "SECRETKEY" });
+  await assert.rejects(gone.reportMxcAlias(5, "mxc://41chan.net/a"), (err) =>
+    /^POST \/posts\/5\/tag_sources\.json \(mxc\): the booru did not answer \(E[A-Z]+\)$/.test(err.message) && !/SECRETKEY|127\.0\.0\.1/.test(err.message));
+});
+
+test("the raw-md5 lookup: Basic header, no key in the URL -- it runs once per image in the backfill tool, and the bridge's duplicate check makes it too", async () => {
+  const b = await booru({
+    [`GET /fourier/generation_metadata/raw/${RAW}.json`]: () => [200, { md5: MD5 }],
+    [`GET /fourier/generation_metadata/raw/${MD5}.json`]: () => [404, { error: "no record", fix: "none" }],
+  });
+  try {
+    assert.equal(await b.c.findGenerationByRawMd5(RAW), MD5);
+    assert.equal(await b.c.findGenerationByRawMd5(MD5), null);
+    assert.equal(b.seen.length, 2);
+    for (const r of b.seen) {
+      assert.equal(r.query, "", "no query string at all");
+      assert.equal(r.headers.authorization, `Basic ${Buffer.from("bot:SECRETKEY").toString("base64")}`);
+    }
+  } finally {
+    b.close();
+  }
+});
+
+test("the create path's tag_sources write: Basic header, no key in the URL, and the mxc it carries comes back as the booru's verdict", async () => {
+  const b = await booru({ "POST /posts/42/tag_sources.json": () => [200, { post_id: 42, recorded: 1, projection: { tags: [] }, mxc: { accepted: true } }] });
+  try {
+    const out = await b.c.recordTagSources(42, { creator: [], auto: [], both: [], meta: [], mxc: "mxc://41chan.net/a" });
+    assert.deepEqual(out.mxc, { accepted: true });
+    assert.equal(b.seen[0].query, "");
+    assert.equal(b.seen[0].headers.authorization, `Basic ${Buffer.from("bot:SECRETKEY").toString("base64")}`);
   } finally {
     b.close();
   }

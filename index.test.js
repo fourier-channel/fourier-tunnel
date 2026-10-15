@@ -24,6 +24,7 @@ const { stripGeneration, crc32 } = require("./strip-generation");
 const { extractCreatorTags } = require("./prompt-tags");
 const { createCanon, keys } = require("./canon");
 const { DanbooruClient } = require("./danbooru");
+const { createAliasOutbox } = require("./gate3-aliases");
 
 const md5 = (b) => crypto.createHash("md5").update(b).digest("hex");
 const ALICE = "@alice:41chan.net";
@@ -88,6 +89,7 @@ const AVIF_WITH_EXIF = Buffer.concat([
 // --- the world the handler talks to ----------------------------------------------
 
 let world;
+let dir;
 function reset() {
   world = {
     media: {},           // media id -> { bytes, type }
@@ -113,7 +115,25 @@ function reset() {
     held: {},            // md5 -> { id, visible, ... }: a post the md5 lookup does NOT
                          // return -- deleted or jailed, as the booru hides them --
                          // which POST /posts.json answers with a 302 to it
+    aliases: new Map(),  // gate 3: the booru's mxc -> post id record, UNIQUE(mxc)
+    aliasAuth: [],       // { query, authorization } of every POST /posts/:id/tag_sources.json
+    rawAuth: [],         // { query, authorization } of every raw-md5 lookup
+    hangJoined: false,   // /joined_rooms never answers: a room walk that does not end
+    hung: [],            // the responses held open by it
+    noSuchPost: new Set(), // post ids the booru answers no_such_post for
   };
+  // The alias outbox lives in the state directory; a test starts with none.
+  if (dir) fs.rmSync(path.join(dir, "gate3-aliases.json"), { force: true });
+}
+
+// The booru's gate 3 verdict for one mxc (contract B): UNIQUE(mxc), so the
+// same (post, mxc) again is accepted and changes nothing.
+function aliasVerdict(postId, mxc) {
+  if (world.noSuchPost.has(postId)) return { accepted: false, reason: "no_such_post" };
+  const had = world.aliases.get(mxc);
+  if (had !== undefined && had !== postId) return { accepted: false, reason: "mxc_mapped_elsewhere" };
+  world.aliases.set(mxc, postId);
+  return { accepted: true };
 }
 
 // R2 for canon.js, over world.bucket. Real canon, real strip, real booru client
@@ -149,7 +169,7 @@ const ROUTES = [
     const e = world.events[decodeURIComponent(m[2])];
     return e ? [200, e] : [404, { errcode: "M_NOT_FOUND" }];
   }],
-  ["GET", /^\/_matrix\/client\/v3\/joined_rooms$/, () => [200, { joined_rooms: world.joined }]],
+  ["GET", /^\/_matrix\/client\/v3\/joined_rooms$/, () => (world.hangJoined ? { hang: true } : [200, { joined_rooms: world.joined }])],
   ["GET", /^\/_matrix\/client\/v1\/media\/download\/[^/]+\/(.+)$/, (req, m) => {
     if (req.headers.authorization !== "Bearer TESTTOKEN") return [401, { errcode: "M_UNAUTHORIZED" }];
     const media = world.media[m[1]];
@@ -159,9 +179,10 @@ const ROUTES = [
     const post = world.posts[(url.searchParams.get("tags") || "").replace(/^md5:/, "")];
     return [200, post ? [post] : []];
   }],
-  ["GET", /^\/fourier\/generation_metadata\/raw\/([0-9a-f]{32})\.json$/, (req, m) => (
-    world.rawRecords[m[1]] ? [200, { md5: world.rawRecords[m[1]] }] : [404, { error: "no record", fix: "none" }]
-  )],
+  ["GET", /^\/fourier\/generation_metadata\/raw\/([0-9a-f]{32})\.json$/, (req, m, body, url) => {
+    world.rawAuth.push({ query: url.search, authorization: req.headers.authorization });
+    return world.rawRecords[m[1]] ? [200, { md5: world.rawRecords[m[1]] }] : [404, { error: "no record", fix: "none" }];
+  }],
   ["POST", /^\/uploads\.json$/, (req, m, body) => {
     // replies.upload: answered ONCE instead, then the booru takes uploads again.
     if (world.replies.upload) { const r = world.replies.upload; delete world.replies.upload; return r; }
@@ -198,10 +219,19 @@ const ROUTES = [
     world.metadata.push(sent);
     return world.replies.generation || [200, { md5: sent.md5, stored: Object.keys(sent.fields).length }];
   }],
-  ["POST", /^\/posts\/(\d+)\/tag_sources\.json$/, (req, m, body) => {
-    world.tagSources.push({ postId: Number(m[1]), ...JSON.parse(body) });
+  ["POST", /^\/posts\/(\d+)\/tag_sources\.json$/, (req, m, body, url) => {
+    const sent = JSON.parse(body);
+    world.tagSources.push({ postId: Number(m[1]), ...sent });
+    world.aliasAuth.push({ query: url.search, authorization: req.headers.authorization });
     if (world.replies.tagSourcesFail) return world.replies.tagSourcesFail;
-    return [200, { post_id: Number(m[1]), recorded: 1, projection: { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }, ...(world.replies.tagSources || {}) }];
+    // A body carrying ONLY mxc is gate 3's alias report: no partition.
+    if (Object.keys(sent).length === 1 && "mxc" in sent) {
+      if (world.replies.alias) return world.replies.alias;
+      return [200, { mxc: aliasVerdict(Number(m[1]), sent.mxc) }];
+    }
+    // replies.noMxcVerdict: a booru older than gate 3, which ignores the key.
+    const verdict = "mxc" in sent && !world.replies.noMxcVerdict ? { mxc: aliasVerdict(Number(m[1]), sent.mxc) } : {};
+    return [200, { post_id: Number(m[1]), recorded: 1, projection: { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }, ...verdict, ...(world.replies.tagSources || {}) }];
   }],
   ["GET", /^\/posts\/(\d+)\/tag_sources\.json$/, () => world.replies.projection || [200, { tags: ["1girl"], sources: { creator: [], auto: ["1girl"], both: [], meta: [] } }]],
   // chanbooru's quarantine document, as the tunnel's account reads it.
@@ -232,6 +262,7 @@ function handle(req, res) {
       const m = re.exec(url.pathname);
       if (req.method !== method || !m) continue;
       const out = fn(req, m, body, url);
+      if (out.hang) { world.hung.push(res); return; }
       if (out.raw) { res.writeHead(200, { "content-type": out.type }); res.end(out.raw); return; }
       res.writeHead(out[0], { "content-type": "application/json", ...(out[2] || {}) });
       res.end(JSON.stringify(out[1]));
@@ -244,7 +275,7 @@ function handle(req, res) {
 
 const bridge = { getIntent: () => ({ sendStateEvent: async (room, type, key, content) => { world.state.push({ room, type, key, content }); } }) };
 
-let server, dir, index;
+let server, index;
 before(async () => {
   server = http.createServer(handle);
   await new Promise((resolve) => { server.listen(0, "127.0.0.1", resolve); });
@@ -287,6 +318,9 @@ async function post(id, bytes, type, sender) {
     const outcome = await index.handleImageEvent(bridge, {
       room_id: "!room:41chan.net", sender, content: { url: `mxc://41chan.net/${id}`, body: `${id}.png`, msgtype: "m.image" },
     });
+    // The alias flush is not awaited by the handler (contract B); a test
+    // waits for it, so no report lands in the next test's world.
+    await index.getAliasOutbox().idle();
     return { outcome, lines };
   } finally {
     Object.assign(console, saved);
@@ -504,7 +538,9 @@ async function quietly(fn) {
   const saved = { log: console.log, warn: console.warn, error: console.error };
   for (const k of Object.keys(saved)) console[k] = (...a) => lines.push(`${k}: ${a.join(" ")}`);
   try {
-    return { value: await fn(), lines };
+    const value = await fn();
+    await index.getAliasOutbox().idle();
+    return { value, lines };
   } finally {
     Object.assign(console, saved);
   }
@@ -637,7 +673,8 @@ test("a picture whose booru post was deleted or jailed: not posted, no state, no
   assert.equal(world.created.length, 1, "the booru was asked once, and refused");
   assert.deepEqual(world.state, [], "no tag state for a picture the booru withholds");
   assert.deepEqual(world.creators, [], "no creator recorded on somebody else's post");
-  assert.deepEqual(world.tagSources, [], "nothing hung on a post that was not made");
+  assert.deepEqual(world.tagSources, [{ postId: 25, mxc: "mxc://41chan.net/jailedpic" }],
+    "nothing hung on a post that was not made -- but its mxc is reported as that post's image (gate 3), alone");
   assert.equal(at("GET /posts/25"), -1, "the 302 was not followed");
   assert.ok(at("GET /posts/25.json") > at("POST /posts.json"), "the post it named was looked up as this account sees it");
   assert.ok(lines.some((l) => /\[skip\] mxc:\/\/41chan\.net\/jailedpic: the booru already holds these bytes .* under post #25, which this account cannot see -- deleted or jailed\..*nothing to retry/.test(l)), lines.join("\n"));
@@ -884,4 +921,268 @@ test("a parked picture whose post is then BANISHED is let go: the review ended, 
   assert.equal(t.parkedWritten, 0);
   assert.deepEqual(world.state, []);
   assert.deepEqual(w.parked(), []);
+});
+
+// --- GATE 3: THE OTHER ADDRESSES OF A POST'S IMAGE --------------------------------------
+//
+// Operator rulings 2026-10-14/15 (GATE3_MATRIX_POSTS.md; contract B in
+// GATE3_CONTRACTS.md): a Matrix post is visible to exactly the viewers its
+// image is. A re-upload of the same bytes is a NEW mxc that only the tunnel
+// can map to the post (by md5), so it reports (post_id, mxc) -- with the
+// partition on create, as a body carrying ONLY mxc on a duplicate and on a
+// held-hidden post -- through a durable outbox, and never rooms.
+
+const outboxFile = () => path.join(dir, "gate3-aliases.json");
+const outbox = () => (fs.existsSync(outboxFile()) ? JSON.parse(fs.readFileSync(outboxFile(), "utf8")) : {});
+const aliasBodies = () => world.tagSources.filter((t) => Object.keys(t).length === 2 && "mxc" in t);
+// Time passes: every kept entry's backoff runs out. The outbox re-reads its
+// file on every use, so this is what the sweep would find ten minutes on.
+const makeDue = () => {
+  const o = outbox();
+  for (const e of Object.values(o)) e.next_try_at = 0;
+  fs.writeFileSync(outboxFile(), JSON.stringify(o));
+};
+
+test("gate 3: a new post's own mxc rides in the create request it already makes; accepted, nothing owed, no second request", async () => {
+  const { outcome, lines } = await post("g3new", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.equal(world.tagSources.length, 1, "one tag_sources request: the create path's own");
+  assert.equal(world.tagSources[0].mxc, "mxc://41chan.net/g3new");
+  assert.ok(Array.isArray(world.tagSources[0].creator), "beside the partition, not instead of it");
+  assert.equal(world.aliases.get("mxc://41chan.net/g3new"), POST_ID);
+  assert.deepEqual(outbox(), {}, "acknowledged, so the outbox owes nothing");
+});
+
+test("gate 3: the other duplicate paths report the mxc ALONE too -- the raw-md5 record, the race at post time, a hidden post -- and never rooms", async () => {
+  // Posted under older strip rules, found through the booru's raw-md5 record.
+  const older = "0123456789abcdef0123456789abcdef";
+  world.rawRecords[md5(A1111_PNG)] = older;
+  world.posts[older] = { id: 8, md5: older, tag_string: "1girl", rating: "q" };
+  assert.equal((await post("g3dupb", A1111_PNG, "image/png", BOB)).outcome, "posted");
+  const b = aliasBodies();
+  // Appeared between the lookup and the post: the booru's redirect names it, visible.
+  reset();
+  world.held[md5(PLAIN_PNG)] = { id: 9, md5: md5(PLAIN_PNG), visible: true, tag_string: "1girl", rating: "q" };
+  assert.equal((await post("g3race", PLAIN_PNG, "image/png", ALICE)).outcome, "posted");
+  const c = aliasBodies();
+  // Held hidden: deleted or jailed, named by the redirect, never visible.
+  reset();
+  world.held[md5(PLAIN_PNG)] = { id: 25, md5: md5(PLAIN_PNG), visible: false };
+  assert.equal((await post("g3hidden", PLAIN_PNG, "image/png", ALICE)).outcome, "held-hidden");
+  const d = aliasBodies();
+
+  assert.deepEqual(b, [{ postId: 8, mxc: "mxc://41chan.net/g3dupb" }]);
+  assert.deepEqual(c, [{ postId: 9, mxc: "mxc://41chan.net/g3race" }], "once, though the race path passes through the duplicate path");
+  assert.deepEqual(d, [{ postId: 25, mxc: "mxc://41chan.net/g3hidden" }]);
+  assert.deepEqual(world.tagSources, d, "no partition, no tag change: the body carries ONLY mxc");
+  assert.deepEqual(outbox(), {});
+});
+
+test("gate 3: the first duplicate path (stripped md5) reports too", async () => {
+  const stripped = stripGeneration(A1111_PNG, "image/png").buffer;
+  world.posts[md5(stripped)] = { id: 7, md5: md5(stripped), tag_string: "1girl", rating: "q" };
+  assert.equal((await post("g3dupa", A1111_PNG, "image/png", BOB)).outcome, "posted");
+  assert.deepEqual(aliasBodies(), [{ postId: 7, mxc: "mxc://41chan.net/g3dupa" }]);
+  assert.deepEqual(world.tagSources, aliasBodies());
+});
+
+test("gate 3: a REPLAY whose room already carries the tags still reports -- and a resend has no second effect", async () => {
+  await post("g3replay", PLAIN_PNG, "image/png", ALICE);
+  const written = world.state[0];
+  const ev = { room_id: "!room:41chan.net", sender: ALICE, content: { url: "mxc://41chan.net/g3replay", body: "g3replay.png", msgtype: "m.image" } };
+  const sent = [];
+  const reading = { getIntent: () => ({ getStateEvent: async () => written.content, sendStateEvent: async (r, t, k, c) => { sent.push(c); } }) };
+  const first = await quietly(() => index.handleImageEvent(reading, ev));
+  assert.equal(first.value, "posted");
+  assert.deepEqual(sent, [], "the replay wrote no state");
+  assert.ok(first.lines.some((l) => /already carries its tags/.test(l)), first.lines.join("\n"));
+  const second = await quietly(() => index.handleImageEvent(reading, ev));
+  assert.equal(second.value, "posted");
+  assert.deepEqual(aliasBodies(), [{ postId: POST_ID, mxc: "mxc://41chan.net/g3replay" }, { postId: POST_ID, mxc: "mxc://41chan.net/g3replay" }],
+    "each replay reports the mxc, before the early return");
+  assert.equal(world.aliases.size, 1, "the booru's record holds it once");
+  assert.equal(world.aliases.get("mxc://41chan.net/g3replay"), POST_ID);
+  assert.deepEqual(outbox(), {});
+});
+
+test("gate 3: a duplicate whose fallback is held (list unread) still reports the alias -- the report is about the image, not the room's tags", async () => {
+  freshWatch(); // never read, and the booru cannot answer for it
+  world.quarantine = null;
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl", rating: "q" };
+  world.replies.projection = [200, { tags: [], sources: { creator: [], auto: [], both: [], meta: [] } }];
+  const { outcome } = await post("g3held", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "tags-blocked");
+  assert.deepEqual(aliasBodies(), [{ postId: 7, mxc: "mxc://41chan.net/g3held" }]);
+});
+
+test("gate 3: NO report for a strip refusal, the booru's unpostable, media from another server, or an encrypted event", async () => {
+  assert.equal((await post("g3avif", AVIF_WITH_EXIF, "image/avif", ALICE)).outcome, "strip-refused");
+  world.held[md5(PLAIN_PNG)] = { id: 25, md5: md5(PLAIN_PNG), visible: false, unpostable: true };
+  assert.equal((await post("g3unpostable", PLAIN_PNG, "image/png", ALICE)).outcome, "held-hidden");
+  const remote = await quietly(() => index.handleImageEvent(bridge, { room_id: "!room:41chan.net", sender: ALICE, content: { url: "mxc://elsewhere.org/abc", msgtype: "m.image" } }));
+  assert.equal(remote.value, "not-local");
+  // An encrypted attachment carries `file`, not `url`: the tunnel has no crypto
+  // and cannot read it, so it is never posted and never reported.
+  const enc = await quietly(() => index.handleImageEvent(bridge, { room_id: "!room:41chan.net", sender: ALICE, content: { file: { url: "mxc://41chan.net/encrypted1", key: {} }, msgtype: "m.image" } }));
+  assert.equal(enc.value, undefined);
+  assert.deepEqual(aliasBodies(), []);
+  assert.deepEqual(world.tagSources, []);
+  assert.deepEqual(outbox(), {});
+});
+
+test("gate 3: a booru failure KEEPS the outbox entry, the picture still reports posted, and the sweep's flush delivers it", async () => {
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl", rating: "q" };
+  world.replies.alias = [503, { error: "down", fix: "wait" }];
+  const { outcome, lines } = await post("g3down", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  const owed = outbox()["7\nmxc://41chan.net/g3down"];
+  assert.ok(owed, JSON.stringify(outbox()));
+  assert.equal(owed.attempts, 1);
+  assert.match(owed.last_error, /^POST \/posts\/7\/tag_sources\.json \(mxc\) -> 503: down -- fix: wait$/);
+  assert.ok(lines.some((l) => /^error: \[gate3\] 1 alias report\(s\) kept in the outbox: the booru did not answer, or answered 5xx/.test(l)), lines.join("\n"));
+
+  delete world.replies.alias;
+  const early = await quietly(() => index.flushAliases());
+  assert.equal(early.value.sent, 0, "not due again until its backoff (10 minutes)");
+  makeDue();
+  const swept = await quietly(() => index.flushAliases());
+  assert.equal(swept.value.accepted, 1, swept.lines.join("\n"));
+  assert.equal(swept.value.depth, 0);
+  assert.deepEqual(outbox(), {});
+  assert.equal(world.aliases.get("mxc://41chan.net/g3down"), 7);
+});
+
+test("gate 3: on create, a failed tag hub keeps the post's mxc owed; the sweep sends it alone and it lands", async () => {
+  freshWatch();
+  world.quarantine = QDOC;
+  world.replies.tagSourcesFail = [500, { error: "hub down" }];
+  const { outcome, lines } = await post("g3hub", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.equal(outbox()[`${POST_ID}\nmxc://41chan.net/g3hub`].attempts, 1);
+  delete world.replies.tagSourcesFail;
+  world.tagSources = [];
+  makeDue();
+  const swept = await quietly(() => index.flushAliases());
+  assert.equal(swept.value.accepted, 1, swept.lines.join("\n"));
+  assert.deepEqual(world.tagSources, [{ postId: POST_ID, mxc: "mxc://41chan.net/g3hub" }], "the retry carries only the mxc: the partition is not the outbox's to resend");
+  assert.deepEqual(outbox(), {});
+});
+
+test("gate 3: a booru older than the contract (no mxc verdict) is not an acknowledgement -- the entry is kept, and the fix named", async () => {
+  world.replies.noMxcVerdict = true;
+  const { outcome, lines } = await post("g3old", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.ok(outbox()[`${POST_ID}\nmxc://41chan.net/g3old`], "kept");
+  assert.ok(lines.some((l) => /kept in the outbox: the booru's answer is not gate 3's mxc verdict.*deploy chanbooru/.test(l)), lines.join("\n"));
+});
+
+test("gate 3: 404 and 403 are kept and said ONCE per flush with the fix; no_such_post and mxc_mapped_elsewhere are dropped, loudly", async () => {
+  const o = index.getAliasOutbox();
+  for (const n of [1, 2, 3]) o.add(100 + n, `mxc://41chan.net/g3nf${n}`);
+  world.replies.alias = [404, { success: false, message: "That record was not found." }];
+  const nf = await quietly(() => index.flushAliases());
+  assert.equal(nf.value.kept, 3);
+  assert.equal(nf.lines.filter((l) => /\[gate3\] .*kept in the outbox/.test(l)).length, 1, nf.lines.join("\n"));
+  assert.match(nf.lines.find((l) => /kept in the outbox/.test(l)), /^error: \[gate3\] 3 alias report\(s\) kept in the outbox: the booru answered 404: .*deploy chanbooru/);
+  world.replies.alias = [403, { success: false, message: "Access denied" }];
+  makeDue();
+  const fb = await quietly(() => index.flushAliases());
+  assert.equal(fb.lines.filter((l) => /kept in the outbox/.test(l)).length, 1, fb.lines.join("\n"));
+  assert.match(fb.lines.find((l) => /kept in the outbox/.test(l)), /3 alias report\(s\) kept in the outbox: the booru refused the tunnel's account: .*Builder/);
+  assert.equal(Object.values(outbox()).every((e) => e.attempts === 2), true, JSON.stringify(outbox()));
+
+  delete world.replies.alias;
+  world.noSuchPost.add(101);
+  world.aliases.set("mxc://41chan.net/g3nf2", 999);
+  makeDue();
+  const settled = await quietly(() => index.flushAliases());
+  assert.deepEqual([settled.value.accepted, settled.value.dropped, settled.value.depth], [1, 2, 0], settled.lines.join("\n"));
+  assert.ok(settled.lines.some((l) => /^error: \[gate3\] alias DROPPED: post #101 <- mxc:\/\/41chan\.net\/g3nf1: .*no_such_post/.test(l)), settled.lines.join("\n"));
+  assert.ok(settled.lines.some((l) => /^error: \[gate3\] alias DROPPED: post #102 <- mxc:\/\/41chan\.net\/g3nf2: .*mxc_mapped_elsewhere/.test(l)), settled.lines.join("\n"));
+  assert.equal(world.aliases.get("mxc://41chan.net/g3nf2"), 999, "the booru's mapping stands");
+});
+
+test("gate 3: every alias request carries the key in a Basic header, NEVER in the URL", async () => {
+  await post("g3keya", PLAIN_PNG, "image/png", ALICE);
+  world.posts[md5(A1111_PNG)] = { id: 7, md5: md5(A1111_PNG), tag_string: "1girl", rating: "q" };
+  world.rawRecords[md5(A1111_PNG)] = md5(A1111_PNG);
+  await post("g3keyb", A1111_PNG, "image/png", ALICE);
+  assert.equal(world.aliasAuth.length, 2, JSON.stringify(world.tagSources));
+  // The raw-md5 lookup that found g3keyb's post runs once per such image: it
+  // too carries the key in a header, never the URL.
+  assert.ok(world.rawAuth.length >= 1, "the raw-md5 lookup ran");
+  for (const a of [...world.aliasAuth, ...world.rawAuth]) {
+    assert.equal(a.query, "", "no query string at all");
+    assert.equal(a.authorization, `Basic ${Buffer.from("tunnel:TESTKEY").toString("base64")}`);
+  }
+});
+
+test("gate 3: an outbox that is not JSON is never written over -- the picture is posted, and the error names the fix", async () => {
+  fs.writeFileSync(outboxFile(), "{ half a file");
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl", rating: "q" };
+  const { outcome, lines } = await post("g3corrupt", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.equal(fs.readFileSync(outboxFile(), "utf8"), "{ half a file", "left exactly as it was");
+  assert.ok(lines.some((l) => /^error: \[gate3\] post #7 <- mxc:\/\/41chan\.net\/g3corrupt: the alias was NOT queued \(.*is not a JSON object.*rename it to .*superseded/.test(l)), lines.join("\n"));
+});
+
+test("gate 3: the race path reports its mxc ONCE -- the held-hidden report covers the duplicate path it hands over to (`aliased`)", async () => {
+  // An outbox whose booru answers at once, so the first report is settled
+  // and gone before the redirect's post is looked up: a second report from
+  // pointRoomAtPost would be a second request, not one absorbed in flight.
+  const calls = [];
+  index.setAliasOutbox(createAliasOutbox({
+    danbooru: { reportMxcAlias: async (postId, mxc) => { calls.push([postId, mxc]); return { accepted: true }; } },
+    file: outboxFile, log: console,
+  }));
+  try {
+    world.held[md5(PLAIN_PNG)] = { id: 9, md5: md5(PLAIN_PNG), visible: true, tag_string: "1girl", rating: "q" };
+    const { outcome, lines } = await post("g3raceonce", PLAIN_PNG, "image/png", ALICE);
+    assert.equal(outcome, "posted", lines.join("\n"));
+    assert.deepEqual(calls, [[9, "mxc://41chan.net/g3raceonce"]]);
+  } finally {
+    index.setAliasOutbox(null);
+  }
+});
+
+test("gate 3: the 10-minute sweep retries owed reports on its OWN timer -- delivered while a room walk that never ends holds the walk's timer", async () => {
+  world.hangJoined = true; // the walk's first step never answers
+  const o = index.getAliasOutbox();
+  o.add(7, "mxc://41chan.net/g3tickA");
+  const lines = [];
+  const saved = { log: console.log, warn: console.warn, error: console.error };
+  for (const k of Object.keys(saved)) console[k] = (...a) => lines.push(`${k}: ${a.join(" ")}`);
+  const sweep = index.startBackfillSweep(bridge, "@tunnel:41chan.net", { intervalMs: 20, firstMs: 1, aliasIntervalMs: 20, aliasFirstMs: 5 });
+  const until = async (what, ok) => {
+    const deadline = Date.now() + 3000;
+    while (!ok()) {
+      if (Date.now() > deadline) throw new Error(`${what} never happened:\n${lines.join("\n")}`);
+      await new Promise((r) => { setTimeout(r, 10); });
+    }
+  };
+  try {
+    await until("the walk to start", () => world.hung.length > 0);
+    await until("report A to land", () => world.aliases.get("mxc://41chan.net/g3tickA") === 7);
+    // Added after the walk is stuck: only a later tick of a timer the walk
+    // does not hold can deliver it.
+    o.add(7, "mxc://41chan.net/g3tickB");
+    await until("report B to land", () => world.aliases.get("mxc://41chan.net/g3tickB") === 7);
+    assert.equal(world.hung.length, 1, "the walk is still the first one, still stuck");
+  } finally {
+    sweep.stop();
+    await index.getAliasOutbox().idle();
+    for (const res of world.hung) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ joined_rooms: [] })); }
+    Object.assign(console, saved);
+  }
+  assert.deepEqual(outbox(), {});
+});
+
+test("gate 3: a new duplicate costs ONE request however much is owed -- the image path sends its own report, never the backlog", async () => {
+  const o = index.getAliasOutbox();
+  for (const n of [1, 2, 3]) o.add(200 + n, `mxc://41chan.net/g3owed${n}`); // owed, and due
+  world.posts[md5(PLAIN_PNG)] = { id: 7, md5: md5(PLAIN_PNG), tag_string: "1girl", rating: "q" };
+  const { outcome, lines } = await post("g3onecost", PLAIN_PNG, "image/png", ALICE);
+  assert.equal(outcome, "posted", lines.join("\n"));
+  assert.deepEqual(aliasBodies(), [{ postId: 7, mxc: "mxc://41chan.net/g3onecost" }]);
+  assert.equal(Object.keys(outbox()).length, 3, "the backlog waits for the sweep");
 });

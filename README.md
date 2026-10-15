@@ -107,6 +107,35 @@ the next change. Room timeline HISTORY keeps the earlier state events; the
 current state is what is rewritten. A room that refuses the write is logged
 with its fix (`tools/grant-tag-write.sh`).
 
+**Gate 3: every address of a post's image is reported** (operator rulings
+2026-10-14/15; fourier-basis `docs/design/GATE3_CONTRACTS.md` B). A Matrix
+post is shown to exactly the rooms its image is in, and the booru learns the
+rooms per mxc from fourier-auth -- but a re-upload of the same bytes is a new
+mxc that only the bridge can tie to the post (by md5). So the bridge reports
+`(post_id, mxc)`, never rooms, on the `POST /posts/:id/tag_sources` it already
+makes: `mxc` rides beside the partition on a new post, and on every duplicate
+(replays included) and every post the booru names as already holding the
+bytes, hidden from the bridge or not, it sends a body carrying ONLY
+`{"mxc": ...}`. Basic auth, never the key in a URL. Each report
+is written to `gate3-aliases.json` (the state directory) before it is sent
+and leaves it only when the booru answers `accepted`, or refuses it for good
+(`no_such_post`, `mxc_mapped_elsewhere`, logged at error level). Anything
+else -- the booru down, a 404 or 403, an answer with no verdict -- keeps it,
+said once per pass with the fix. An image sends only its own report, never
+the backlog; the retry is the 10-minute sweep's, on a timer of its own (a long
+room walk never holds it back), and only for entries that are due -- 10
+minutes after a failure, doubling to 2 hours. A pass sends at most 200,
+paced, and stops after 5 unanswered in a row. The outbox holds at most 5000
+entries; past that a report is refused at error level, and
+`tools/report-mxc-aliases.js --apply` reports it again once the booru
+answers. The bridge has no health route, so while anything is owed each sweep
+logs the depth against the cap, what is due, what was never tried, the kept
+entries by class and how many are over an hour and a day old -- at error
+level once one is a day old or the depth nears the cap. Nothing is reported for an image
+that is refused, unpostable (the booru names no post), not local, or
+encrypted (the bridge cannot read it). `tools/report-mxc-aliases.js` reports the images handled before gate
+3, from canon's index; it is a dry run unless given `--apply`.
+
 The image bytes are stored by the homeserver; the booru is fed a copy for
 posting. The MXC URI is the link between the two systems. Access to the
 underlying media is always enforced by the homeserver's authenticated media
@@ -169,8 +198,10 @@ the newest message with `!backfill restart`.
 `docker-compose.yaml` needs a `.env` and bind-mounts `config.yaml` and
 `onboarding-state/`, mounted at `/state` (`ONBOARDING_STATE_DIR`). Everything
 the bridge must keep across a rebuild lives there: the invite-strike ledger,
-the audit log, the denied-room list and each room's backfill progress
-(`backfill-state.json`). The directory keeps its old name.
+the audit log, the denied-room list, each room's backfill progress
+(`backfill-state.json`), the quarantine list (`quarantine.json`) and gate 3's
+unacknowledged alias reports (`gate3-aliases.json`). The directory keeps its
+old name.
 
 ### 2. Create a booru bot account
 

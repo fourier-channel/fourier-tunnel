@@ -103,6 +103,63 @@ function setQuarantine(w) {
   quarantineInstance = w;
 }
 
+// GATE 3: THE OTHER ADDRESSES OF A POST'S IMAGE (gate3-aliases.js; operator
+// rulings 2026-10-14/15, GATE3_CONTRACTS B). Every (post, mxc) the tunnel
+// learns -- a new post's own mxc, a re-upload mapped to a post by md5 -- is
+// reported to the booru through a durable outbox in the state directory, so
+// the post can be shown to exactly the rooms its image is in. Built on first
+// use, like canon and the quarantine watch.
+const aliasesLib = require("./gate3-aliases");
+let aliasInstance = null;
+function getAliasOutbox() {
+  if (!aliasInstance) {
+    aliasInstance = aliasesLib.createAliasOutbox({ danbooru, file: () => statePath("gate3-aliases.json"), log: console });
+  }
+  return aliasInstance;
+}
+// Tests hand in their own.
+function setAliasOutbox(o) {
+  aliasInstance = o;
+}
+
+// Queue a report that `mxcUrl` is post `postId`'s image, and send THAT
+// report at once without waiting -- unless `send` is false, when the caller's
+// own request carries it (the create path), which claims it until its answer
+// settles it. Only this one report: the backlog is the sweep's, so a stuck
+// backlog never makes a new image cost more than its own request. Never
+// throws into the image path: the picture's fate does not depend on this, but
+// a report that could not even be queued NARROWS -- that room's members never
+// see the post -- so it is said at error level, with the way to make it again.
+function reportAlias(postId, mxcUrl, { send = true } = {}) {
+  try {
+    getAliasOutbox().add(postId, mxcUrl, { claim: !send });
+  } catch (err) {
+    console.error(`[gate3] post #${postId} <- ${mxcUrl}: the alias was NOT queued (${err.message}); the post stays hidden from this room's members until it is -- once the outbox is fixed, !backfill restart in the room reports it again`);
+    return false;
+  }
+  if (send) getAliasOutbox().send(postId, mxcUrl);
+  return true;
+}
+
+// One sweep pass over the unacked reports that are due, and the outbox's
+// status line -- the tunnel has no health route and gate 3 adds none, so what
+// is owed is said here, in the bridge's log, every pass while anything is
+// owed: by class and by age, at error level once it is not draining
+// (gate3-aliases.js statusLine). Never throws.
+async function flushAliases() {
+  try {
+    const t = await getAliasOutbox().flush();
+    if (t.sent) console.log(`[gate3] alias sweep: ${t.sent} sent, ${t.accepted} accepted, ${t.dropped} dropped, ${t.kept} kept, ${t.deferred} due left for the next pass`);
+    const s = getAliasOutbox().status();
+    const said = aliasesLib.statusLine(s);
+    if (said) console[said.level](said.line);
+    return { ...t, depth: s.depth, oldest_age_ms: s.oldest_age_ms };
+  } catch (err) {
+    console.error(`[gate3] alias outbox not flushed: ${err.message}`);
+    return { error: err.message };
+  }
+}
+
 // ONE SET OF RENDITIONS: every 15 minutes, move Synapse's renditions of images
 // the booru now holds to superseded/ (canon.retireSweep; the booru's variants
 // are the renditions -- fourier-auth mediar2.js serves them). Each sweep lists
@@ -468,7 +525,8 @@ async function backfillSweep(bridge, botUserId, { now = Date.now } = {}) {
 }
 
 // A periodic job that never overlaps itself: a tick that arrives while the
-// last one is still running is dropped, not queued.
+// last one is still running is dropped, not queued. The timer's stop() clears
+// both the first tick and the interval.
 function everyInterval(job, intervalMs, firstMs = intervalMs) {
   let current = null;
   const tick = () => {
@@ -479,11 +537,22 @@ function everyInterval(job, intervalMs, firstMs = intervalMs) {
   const timer = setInterval(tick, intervalMs);
   if (first.unref) first.unref();
   if (timer.unref) timer.unref();
+  timer.stop = () => { clearTimeout(first); clearInterval(timer); };
   return timer;
 }
 
-function startBackfillSweep(bridge, botUserId) {
-  return everyInterval(async () => {
+// The 10-minute sweep: the room walk, and beside it -- on its OWN timer --
+// gate 3's retry of unacked alias reports (contract B: "retried on the
+// tunnel's existing 10-minute sweep"). Not in the walk's job: everyInterval
+// drops every tick while a job runs, and one deep room walk outlasts ten
+// minutes, so reports chained before or after it would wait out the whole
+// walk -- and a slow alias pass chained before it would starve the walk.
+// The timings are passed in only by the test that runs real ticks.
+function startBackfillSweep(bridge, botUserId, {
+  intervalMs = BACKFILL_SWEEP_MS, firstMs = BACKFILL_SWEEP_FIRST_MS,
+  aliasIntervalMs = BACKFILL_SWEEP_MS, aliasFirstMs = BACKFILL_SWEEP_FIRST_MS,
+} = {}) {
+  const walk = everyInterval(async () => {
     try {
       const walked = await backfillSweep(bridge, botUserId);
       const ran = walked.filter((r) => r && !r.skipped);
@@ -491,7 +560,9 @@ function startBackfillSweep(bridge, botUserId) {
     } catch (err) {
       console.error(`[backfill] sweep failed: ${err.message}; the next sweep tries again`);
     }
-  }, BACKFILL_SWEEP_MS, BACKFILL_SWEEP_FIRST_MS);
+  }, intervalMs, firstMs);
+  const aliases = everyInterval(flushAliases, aliasIntervalMs, aliasFirstMs);
+  return { walk, aliases, stop: () => { walk.stop(); aliases.stop(); } };
 }
 
 // Does the room's tag state for this picture already say exactly this?
@@ -536,7 +607,14 @@ async function checkedFallback({ roomId, mxcUrl, postId, rating, tags, sources }
 // for this picture at it, and upload nothing. `via` says how it was found, for
 // the log line. Resolves "posted", or "tags-blocked" when the room refused
 // the state write.
-async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via }) {
+//
+// GATE 3, FIRST (contract B): this mxc is another address of the post's
+// image, reported before anything below can return early -- a replay whose
+// room already carries the tags, a fallback that is held. The report is
+// about the IMAGE, not this room's tag state, and a replay that skipped it
+// would leave an earlier lost report lost. `aliased`: the caller reported it.
+async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via, aliased = false }) {
+  if (!aliased) reportAlias(existing.id, mxcUrl);
   // Before the state write, which can return early: the private record does
   // not depend on this room's power levels. The poster is THIS sender, and no
   // creator is recorded from here: the booru keeps an existing record from
@@ -603,10 +681,17 @@ async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via }) {
 // apart by the backfill and not retried. Until 2026-10-02 the redirect that
 // says this was followed, the post's page answered 404, and three such
 // pictures failed every sweep as "Request failed with status code 404".
+//
+// GATE 3: the booru named the post holding these bytes, so this mxc is that
+// post's image whether or not this account may see it -- reported first
+// (contract B), before the lookup below can throw. A post hidden as FLAGGED
+// from this account answers the report 404, which keeps it in the outbox
+// until the flag is released.
 async function heldByTheBooru(bridge, { roomId, mxcUrl, md5, postId }) {
+  reportAlias(postId, mxcUrl);
   const visible = await danbooru.findVisiblePost(postId);
   if (visible) {
-    return pointRoomAtPost(bridge, { roomId, mxcUrl, existing: visible, md5, via: "the booru's own md5 check at post time" });
+    return pointRoomAtPost(bridge, { roomId, mxcUrl, existing: visible, md5, via: "the booru's own md5 check at post time", aliased: true });
   }
   if (await parkIfFlagged({ roomId, mxcUrl, md5 })) return imagePlan.HELD_HIDDEN;
   console.log(
@@ -843,17 +928,31 @@ async function handleImageEvent(bridge, event) {
   // reported each tag and draws a dot per tag from it. The tunnel has only
   // ever called spectrum, so everything the autotagger returned -- the
   // auto-only tags AND the ones the prompt also named -- is spectrum's.
-  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, oc: ocTags, spectrum: [...autoOnly, ...both, ...metaTags] };
+  // GATE 3 (contract B): the post's own mxc rides in this same request, queued
+  // in the outbox FIRST so a request that never answers leaves it owed, and
+  // settled from this answer -- the sweep resends what was not acknowledged.
+  const partition = { creator: creatorOnly, auto: autoOnly, both, meta: metaTags, oc: ocTags, spectrum: [...autoOnly, ...both, ...metaTags], mxc: mxcUrl };
+  const aliasQueued = reportAlias(post.id, mxcUrl, { send: false });
   let projection = null;
+  let recorded = null;
+  let hubError = null;
   try {
-    const recorded = await danbooru.recordTagSources(post.id, partition);
+    recorded = await danbooru.recordTagSources(post.id, partition);
     projection = recorded && recorded.projection;
     // The booru names each original character it would not declare, and why.
     for (const why of Object.values((recorded && recorded.original_characters_not_declared) || {})) {
       console.warn(`[tag-hub] post #${post.id}: original character NOT declared: ${why}`);
     }
   } catch (err) {
+    hubError = err;
     console.warn(`[tag-hub] recordTagSources failed for post #${post.id}: ${err.message}`);
+  }
+  if (aliasQueued) {
+    try {
+      getAliasOutbox().settleAnswer(post.id, mxcUrl, { answer: recorded, error: hubError });
+    } catch (err) {
+      console.error(`[gate3] post #${post.id} <- ${mxcUrl}: answered, but the outbox could not record it (${err.message}); the entry stays owed and the sweep sends it again`);
+    }
   }
   // If the hub is unreachable, fall back to the booru's tag_string -- still
   // public-safe, since creator-only tags were never written to it -- checked
@@ -1419,4 +1518,4 @@ new Cli({
 // writer. handleImageEvent takes anything with getIntent().sendStateEvent --
 // the real Bridge in the service, a thin stand-in in a tool -- because that is
 // the only thing it asks of it.
-module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, setQuarantine, startCanonService, backfillRoomNow, backfillSweep };
+module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, setQuarantine, startCanonService, backfillRoomNow, backfillSweep, startBackfillSweep, getAliasOutbox, setAliasOutbox, flushAliases };
