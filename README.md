@@ -136,6 +136,23 @@ that is refused, unpostable (the booru names no post), not local, or
 encrypted (the bridge cannot read it). `tools/report-mxc-aliases.js` reports the images handled before gate
 3, from canon's index; it is a dry run unless given `--apply`.
 
+**Merged duplicate posts: rooms follow the survivor** (operator ruling
+2026-10-16). When the booru merges two posts of one picture, one SURVIVES and
+the other is RETIRED, its Matrix image becoming an mxc alias of the survivor;
+the booru side is chanbooru's. `tools/repoint-merged.js --pair
+<retired>:<survivor>` (repeatable, or `--pairs-file` holding
+`[{"retired": id, "survivor": id}]`) walks every joined room the way the
+quarantine re-projection does (`tag-state-walk.js`: denied rooms untouched,
+one state read per room, `room n/N`, an unreadable room counted and passed)
+and lists every tag-state event still naming a retired post. It is a dry run,
+asking the booru nothing, unless given `--apply`; then each event is
+re-pointed through the same code that points a room at an existing post for a
+duplicate image -- the survivor's public projection, the quarantine-checked
+`tag_string` fallback, no write when the room already says it, and no second
+alias report. A survivor missing or hidden from the bridge's account is not
+written for and is reported with its fix; every failure is listed with its
+fix and makes the exit code 1. A re-run after success writes nothing.
+
 The image bytes are stored by the homeserver; the booru is fed a copy for
 posting. The MXC URI is the link between the two systems. Access to the
 underlying media is always enforced by the homeserver's authenticated media

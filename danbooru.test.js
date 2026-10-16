@@ -326,6 +326,25 @@ test("tag projection: the booru's projection; null when the booru answers 404 (h
   }
 });
 
+test("the post and projection reads carry the key in a Basic header, never in the URL -- the merge re-point and the quarantine walk ask them once per picture", async () => {
+  const b = await booru({
+    "GET /posts/1.json": () => [200, { id: 1 }],
+    "GET /posts/1/tag_sources.json": () => [200, { tags: ["a"], sources: { creator: [], auto: ["a"], both: [], meta: [] } }],
+  });
+  try {
+    assert.equal((await b.c.findVisiblePost(1)).id, 1);
+    assert.deepEqual((await b.c.getTagProjection(1)).tags, ["a"]);
+    assert.equal(b.seen.length, 2);
+    for (const r of b.seen) {
+      assert.ok(!/SECRETKEY|login|api_key/.test(r.query), `no credentials in ${r.path}${r.query}`);
+      assert.equal(r.headers.authorization, `Basic ${Buffer.from("bot:SECRETKEY").toString("base64")}`);
+    }
+    assert.equal(b.seen[1].query, "?scope=public");
+  } finally {
+    b.close();
+  }
+});
+
 // --- GATE 3: THE MXC REPORT (GATE3_CONTRACTS B) ------------------------------------
 //
 // POST /posts/:id/tag_sources.json with a body carrying ONLY {"mxc": ...};

@@ -134,8 +134,10 @@ class DanbooruClient {
     return list.map((e) => String(e.prefix));
   }
 
+  // Basic auth, never the key in the URL, for the reason getTagProjection
+  // gives: it is asked once per picture by the same walks.
   async findVisiblePost(postId) {
-    const resp = await this._client().get(`/posts/${postId}.json`, { validateStatus: () => true });
+    const resp = await this._raw().get(`/posts/${postId}.json`, { validateStatus: () => true });
     if (resp.status === 404) return null;
     if (resp.status === 200 && resp.data && typeof resp.data === "object" && resp.data.id != null) return resp.data;
     throw refusal(`GET /posts/${postId}.json`, resp);
@@ -246,9 +248,12 @@ class DanbooruClient {
   // answers 404 -- no such post, or one hidden from this account (deleted,
   // jailed, or flagged and uploaded by another bot), answered identically on
   // purpose. Anything else throws, so a caller can tell "hidden" from "could
-  // not find out".
+  // not find out". Basic auth, never the key in the URL: this runs once per
+  // duplicate image, per quarantine re-projection and per merged post
+  // re-pointed (tools/repoint-merged.js), so a key in its query string would
+  // be in the booru's access log once per picture.
   async getTagProjection(postId) {
-    const resp = await this._client().get(`/posts/${postId}/tag_sources.json`, {
+    const resp = await this._raw().get(`/posts/${postId}/tag_sources.json`, {
       params: { scope: "public" },
       validateStatus: () => true,
     });

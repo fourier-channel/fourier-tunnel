@@ -56,6 +56,7 @@
 // generation moves and the re-projection rewrites the rooms.
 
 const fs = require("fs");
+const { walkTagState } = require("./tag-state-walk");
 
 const QUARANTINE_POLL_MS = 60 * 1000;
 const QUARANTINE_FRESH_MS = 30 * 60 * 1000;
@@ -302,6 +303,10 @@ function affectedPosts(prevDoc, nextDoc) {
  *
  * deps: { stateType, roomIds: async () => [roomId], skipRoom(roomId), now,
  *         paceMs, log, sleep }
+ *
+ * The room walk itself (room list once, denied rooms unread, one state read
+ * per room, an unreadable room counted and passed) is tag-state-walk.js,
+ * shared with tools/repoint-merged.js.
  */
 async function reprojectQuarantine(bridge, danbooru, prevDoc, nextDoc, deps) {
   const { stateType, roomIds, skipRoom = () => false, now = Date.now, paceMs = QUARANTINE_PACE_MS, log = console } = deps;
@@ -314,8 +319,6 @@ async function reprojectQuarantine(bridge, danbooru, prevDoc, nextDoc, deps) {
   const tally = { rooms: 0, events: 0, written: 0, current: 0, refused: 0, failed: 0, complete: false };
   if (!ids.size) { tally.complete = true; return tally; }
 
-  const rooms = (await roomIds()).filter((r) => !skipRoom(r));
-  tally.rooms = rooms.length;
   const projections = new Map(); // post id -> { projection } | { hidden } | { error }
   const projectionFor = async (postId) => {
     if (!projections.has(postId)) {
@@ -339,69 +342,71 @@ async function reprojectQuarantine(bridge, danbooru, prevDoc, nextDoc, deps) {
   };
 
   let wrote = false;
-  for (const [i, roomId] of rooms.entries()) {
-    let events;
-    try {
-      events = (await bridge.getIntent().roomState(roomId))
-        .filter((e) => e.type === stateType && e.content && Array.isArray(e.content.tags) &&
-          (postByMxc.has(e.state_key) || ids.has(e.content.post_id)));
-    } catch (err) {
+  tally.rooms = await walkTagState({
+    bridge, stateType, roomIds, skipRoom,
+    select: (e) => postByMxc.has(e.state_key) || ids.has(e.content.post_id),
+    onUnreadable: (roomId, err, i, n) => {
       tally.failed += 1;
-      log.warn(`[quarantine] room ${i + 1}/${rooms.length} ${roomId}: its state could not be read (${err.message}); retried on a later run`);
-      continue;
-    }
-    let roomWritten = 0;
-    for (const ev of events) {
-      tally.events += 1;
-      const current = ev.content;
-      const postId = Number.isInteger(current.post_id) ? current.post_id : postByMxc.get(ev.state_key);
-      const got = await projectionFor(postId);
-      let tags, sources;
-      if (got.projection) {
-        tags = stripNames(got.projection.tags, names);
-        sources = stripSources(got.projection.sources, names);
-      } else if (got.legacy) {
-        tags = stripNames(got.legacy, names);
-        sources = stripSources(current.sources, names);
-      } else if (got.hidden) {
-        // Hidden from the tunnel (flagged, uploaded by another bot): what
-        // the room already says, minus the names.
-        tags = stripNames(current.tags, names);
-        sources = stripSources(current.sources, names);
-      } else {
-        tally.failed += 1;
-        if (!carriesAny(current, names)) {
-          log.warn(`[quarantine] post #${postId} in ${roomId}: the booru did not answer for it (${got.error.message}); left as it is, retried on a later run`);
-          continue;
-        }
-        // The name goes NOW; whatever a release owes it waits for the booru.
-        log.warn(`[quarantine] post #${postId} in ${roomId}: the booru did not answer for it (${got.error.message}); its quarantined names are stripped from the room's own state, and the rest is retried on a later run`);
-        tags = stripNames(current.tags, names);
-        sources = stripSources(current.sources, names);
-      }
-      const next = { post_id: postId, tags, rating: current.rating, sources };
-      if (sameState({ post_id: current.post_id, tags: current.tags, rating: current.rating, sources: current.sources }, next)) {
-        tally.current += 1;
-        continue;
-      }
-      if (wrote && paceMs) await pause(paceMs);
-      wrote = true;
-      try {
-        await bridge.getIntent().sendStateEvent(roomId, stateType, ev.state_key, { ...next, updated_by: "tunnel", updated_at: now() });
-        tally.written += 1;
-        roomWritten += 1;
-      } catch (err) {
-        if (errcodeOf(err) === "M_FORBIDDEN") {
-          tally.refused += 1;
-          log.error(`[quarantine] post #${postId} in ${roomId}: the room refused the tag-state rewrite (${err.message}), so its state may still carry a quarantined name; fix: run tools/grant-tag-write.sh for ${roomId}, then the next change of the list rewrites it (or !backfill restart there)`);
+      log.warn(`[quarantine] room ${i + 1}/${n} ${roomId}: its state could not be read (${err.message}); retried on a later run`);
+    },
+    onRoom: async (roomId, events, i, n) => {
+      let roomWritten = 0;
+      for (const ev of events) {
+        tally.events += 1;
+        const current = ev.content;
+        const postId = Number.isInteger(current.post_id) ? current.post_id : postByMxc.get(ev.state_key);
+        const got = await projectionFor(postId);
+        let tags, sources;
+        if (got.projection) {
+          tags = stripNames(got.projection.tags, names);
+          sources = stripSources(got.projection.sources, names);
+        } else if (got.legacy) {
+          tags = stripNames(got.legacy, names);
+          sources = stripSources(current.sources, names);
+        } else if (got.hidden) {
+          // Hidden from the tunnel (flagged, uploaded by another bot): what
+          // the room already says, minus the names.
+          tags = stripNames(current.tags, names);
+          sources = stripSources(current.sources, names);
         } else {
           tally.failed += 1;
-          log.warn(`[quarantine] post #${postId} in ${roomId}: the tag-state rewrite failed (${err.message}); retried on a later run`);
+          if (!carriesAny(current, names)) {
+            log.warn(`[quarantine] post #${postId} in ${roomId}: the booru did not answer for it (${got.error.message}); left as it is, retried on a later run`);
+            continue;
+          }
+          // The name goes NOW; whatever a release owes it waits for the booru.
+          log.warn(`[quarantine] post #${postId} in ${roomId}: the booru did not answer for it (${got.error.message}); its quarantined names are stripped from the room's own state, and the rest is retried on a later run`);
+          tags = stripNames(current.tags, names);
+          sources = stripSources(current.sources, names);
+        }
+        const next = { post_id: postId, tags, rating: current.rating, sources };
+        if (sameState({ post_id: current.post_id, tags: current.tags, rating: current.rating, sources: current.sources }, next)) {
+          tally.current += 1;
+          continue;
+        }
+        // Set before the pause, not after it: the flag is read across rooms
+        // from inside this callback, and an assignment after an await is the
+        // race the linter names.
+        const due = wrote && paceMs;
+        wrote = true;
+        if (due) await pause(paceMs);
+        try {
+          await bridge.getIntent().sendStateEvent(roomId, stateType, ev.state_key, { ...next, updated_by: "tunnel", updated_at: now() });
+          tally.written += 1;
+          roomWritten += 1;
+        } catch (err) {
+          if (errcodeOf(err) === "M_FORBIDDEN") {
+            tally.refused += 1;
+            log.error(`[quarantine] post #${postId} in ${roomId}: the room refused the tag-state rewrite (${err.message}), so its state may still carry a quarantined name; fix: run tools/grant-tag-write.sh for ${roomId}, then the next change of the list rewrites it (or !backfill restart there)`);
+          } else {
+            tally.failed += 1;
+            log.warn(`[quarantine] post #${postId} in ${roomId}: the tag-state rewrite failed (${err.message}); retried on a later run`);
+          }
         }
       }
-    }
-    log.log(`[quarantine] room ${i + 1}/${rooms.length} ${roomId}: ${events.length} affected picture(s), ${roomWritten} rewritten`);
-  }
+      log.log(`[quarantine] room ${i + 1}/${n} ${roomId}: ${events.length} affected picture(s), ${roomWritten} rewritten`);
+    },
+  });
   tally.complete = tally.failed === 0;
   return tally;
 }

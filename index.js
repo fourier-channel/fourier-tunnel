@@ -262,6 +262,8 @@ async function ensureBotUser(config, reg) {
 
 const _reg = yaml.load(fs.readFileSync(REGISTRATION_PATH, "utf8"));
 const AS_TOKEN = _reg.as_token;
+// The bridge's own user, as the service addresses it (joined_rooms, the sweep).
+const BOT_USER_ID = `@${_reg.sender_localpart}:${config.homeserver.domain}`;
 
 const TAG_STATE_TYPE = "net.41chan.media.tags";
 
@@ -613,7 +615,12 @@ async function checkedFallback({ roomId, mxcUrl, postId, rating, tags, sources }
 // room already carries the tags, a fallback that is held. The report is
 // about the IMAGE, not this room's tag state, and a replay that skipped it
 // would leave an earlier lost report lost. `aliased`: the caller reported it.
-async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via, aliased = false }) {
+//
+// `projection`: the post's public projection when the caller already read it
+// (tools/repoint-merged.js, once per survivor for many rooms) -- null for a
+// clean "none recorded", which takes the fallback below. Left undefined, it
+// is read here, and a read that fails takes the fallback too.
+async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via, aliased = false, projection: given }) {
   if (!aliased) reportAlias(existing.id, mxcUrl);
   // Before the state write, which can return early: the private record does
   // not depend on this room's power levels. The poster is THIS sender, and no
@@ -628,11 +635,13 @@ async function pointRoomAtPost(bridge, { roomId, mxcUrl, existing, md5, via, ali
   // private creator tags. Fall back to tag_string for legacy posts with no
   // recorded provenance -- checked against the quarantine list, or not
   // written at all (checkedFallback).
-  let projection = null;
-  try {
-    projection = await danbooru.getTagProjection(existing.id);
-  } catch (err) {
-    console.warn(`[tag-hub] getTagProjection failed for post #${existing.id}: ${err.message}`);
+  let projection = given === undefined ? null : given;
+  if (given === undefined) {
+    try {
+      projection = await danbooru.getTagProjection(existing.id);
+    } catch (err) {
+      console.warn(`[tag-hub] getTagProjection failed for post #${existing.id}: ${err.message}`);
+    }
   }
   if (!projection || projection.tags.length === 0) {
     projection = await checkedFallback({
@@ -1518,4 +1527,9 @@ new Cli({
 // writer. handleImageEvent takes anything with getIntent().sendStateEvent --
 // the real Bridge in the service, a thin stand-in in a tool -- because that is
 // the only thing it asks of it.
-module.exports = { handleImageEvent, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, setQuarantine, startCanonService, backfillRoomNow, backfillSweep, startBackfillSweep, getAliasOutbox, setAliasOutbox, flushAliases };
+//
+// pointRoomAtPost and joinedRoomIds are for tools/repoint-merged.js, which
+// re-points every room's tag state from a retired (merged) post to its
+// survivor exactly as a duplicate image is pointed at its post here, over the
+// rooms the bridge itself walks.
+module.exports = { handleImageEvent, pointRoomAtPost, joinedRoomIds, BOT_USER_ID, TAG_STATE_TYPE, AS_TOKEN, config, setCanon, setQuarantine, startCanonService, backfillRoomNow, backfillSweep, startBackfillSweep, getAliasOutbox, setAliasOutbox, flushAliases };
