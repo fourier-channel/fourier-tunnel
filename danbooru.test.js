@@ -443,3 +443,17 @@ test("replacePost: Basic auth, the post's replacements route, the upload media a
   assert.equal(sent[0].opts.auth, "basic");
   assert.deepEqual(sent[0].body, { post_replacement: { upload_media_asset_id: 55, final_source: "mxc://41chan.net/NEW", on_behalf_of: "@ann:41chan.net", old_file_retention: "keep", expected_md5: "oldmd5" } });
 });
+
+test("editPostTags: reads the post's tag_string, sends the delta as old/new with the rating, Basic auth; a refusal throws", async () => {
+  const c = new DanbooruClient({ url: "http://booru.invalid/", username: "bot", api_key: "SECRETKEY" });
+  const sent = [];
+  c._raw = () => ({
+    get: async (url, opts) => { sent.push(["GET", url, opts.params]); return { status: 200, data: { id: 9, tag_string: "solo old_auto mine" } }; },
+    put: async (url, body) => { sent.push(["PUT", url, body]); return { status: 200, data: {} }; },
+  });
+  await c.editPostTags(9, { add: ["new_auto", "solo"], remove: ["old_auto"], rating: "e" });
+  assert.equal(sent[0][1], "/posts/9.json");
+  assert.deepEqual(sent[1][2], { post: { tag_string: "solo mine new_auto", old_tag_string: "solo old_auto mine", rating: "e" } });
+  c._raw = () => ({ get: async () => ({ status: 200, data: { tag_string: "a" } }), put: async () => ({ status: 422, data: { message: "no" } }) });
+  await assert.rejects(() => c.editPostTags(9, { add: ["b"] }), /answered 422/);
+});

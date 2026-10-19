@@ -414,6 +414,27 @@ class DanbooruClient {
     return { status: resp.status, data: resp.data };
   }
 
+  // A replaced picture's tags and rating, through the post-edit door every
+  // tag edit uses (capabilities/replace.js). The delta rides as old/new
+  // tag_string, so the booru applies only this change to whatever the post
+  // says now; the booru's own checks run on the save. Basic auth.
+  async editPostTags(postId, { add = [], remove = [], rating = null }) {
+    const read = await this._raw().get(`/posts/${postId}.json`, { params: { only: "id,tag_string" }, validateStatus: () => true });
+    if (read.status !== 200 || !read.data || typeof read.data.tag_string !== "string") {
+      throw new BooruRefusal(`GET /posts/${postId}.json answered ${read.status}`, read.status, read.data);
+    }
+    const old = read.data.tag_string;
+    const tags = new Set(old.split(/\s+/).filter(Boolean));
+    for (const t of remove) tags.delete(t);
+    for (const t of add) tags.add(t);
+    const post = { tag_string: [...tags].join(" "), old_tag_string: old };
+    if (rating) post.rating = rating;
+    const resp = await this._raw().put(`/posts/${postId}.json`, { post }, { validateStatus: () => true });
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new BooruRefusal(`PUT /posts/${postId}.json answered ${resp.status}`, resp.status, resp.data);
+    }
+  }
+
   async updateTags(postId, newTagString, oldTagString = "") {
     const resp = await this._client().put(`/posts/${postId}.json`, {
       post: {

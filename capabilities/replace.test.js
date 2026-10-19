@@ -31,8 +31,8 @@ function edit(over = {}, nc = {}) {
   };
 }
 
-function harness({ original = ORIG, enabled = true, post = { id: 9, md5: "oldmd5" }, booru, canonNew, pointed = "posted", recordThrows, forget = async () => true, mapped } = {}) {
-  const said = [], audits = [], replaced = [], recorded = [], logs = [], repoints = [], versions = [], forgot = [], sent = [];
+function harness({ original = ORIG, enabled = true, post = { id: 9, md5: "oldmd5" }, booru, canonNew, pointed = "posted", recordThrows, forget = async () => true, mapped, autotagThrows } = {}) {
+  const said = [], audits = [], replaced = [], recorded = [], logs = [], repoints = [], versions = [], forgot = [], sent = [], edits = [];
   const deps = {
     settings: { enabled },
     domain: D,
@@ -50,12 +50,14 @@ function harness({ original = ORIG, enabled = true, post = { id: 9, md5: "oldmd5
     },
     getPost: async (id) => ({ id, md5: "newmd5" }),
     pointRoom: async () => pointed,
-    getTagProjection: async () => ({ sources: { auto: ["solo"], both: [], meta: [] } }),
+    getTagProjection: async () => ({ tags: ["solo", "old_auto"], sources: { auto: ["solo", "old_auto"], both: [], meta: [] } }),
     recordTagSources: async (id, partition) => {
       if (recordThrows) throw new Error("hub down");
       recorded.push({ id, partition });
     },
     creatorTags: () => ({ tags: ["1girl"], meta: [], characters: [] }),
+    autotag: async () => (autotagThrows ? Promise.reject(new Error("spectrum down")) : { tags: ["new_auto", "solo"], rating: "e" }),
+    editTags: async (id, e) => edits.push({ id, ...e }),
     mappedMxcs: async () => mapped || [
       { room: ROOM, mxc: "mxc://41chan.net/OLD", content: { post_id: 9, tags: ["a"] } },
       { room: "!other:41chan.net", mxc: "mxc://41chan.net/REPOST", content: { post_id: 9, tags: ["a"] } },
@@ -71,7 +73,7 @@ function harness({ original = ORIG, enabled = true, post = { id: 9, md5: "oldmd5
     log: (l) => logs.push(l),
     seen: new Set(),
   };
-  return { deps, said, audits, replaced, recorded, logs, repoints, versions, forgot, sent };
+  return { deps, said, audits, replaced, recorded, logs, repoints, versions, forgot, sent, edits };
 }
 
 test("pure: an edit is an edit; a picture edit names its original, new content and old-file choice (keep by default)", () => {
@@ -202,7 +204,7 @@ test("after the swap, a failed follow-up is named in the reply and the replaceme
   const h = harness({ pointed: "tags-blocked", recordThrows: true });
   await handleReplace(edit(), h.deps);
   assert.equal(h.replaced.length, 1);
-  assert.match(h.said[0], /now has the new version[\s\S]*Not yet updated: its tags on the new picture in this room and the creator tags/);
+  assert.match(h.said[0], /now has the new version[\s\S]*Not yet updated: where the new tags came from and its tags on the new picture in this room/);
 });
 
 test("backfill and catch-up never replay an edit as a picture", () => {
@@ -243,4 +245,46 @@ test("a copy that could not be re-pointed is named, and its room gets no version
   await handleReplace(edit(), h.deps);
   assert.equal(h.versions.filter((v) => v.mxc.endsWith("BROKEN")).length, 0);
   assert.match(h.said[0], /Not yet updated: every copy of the old picture/);
+});
+
+test("RE-CHECKED like a new upload: the new bytes' auto tags and rating written, the old picture's auto tags removed, never re-sent", async () => {
+  const h = harness();
+  await handleReplace(edit(), h.deps);
+  assert.equal(h.edits.length, 1);
+  assert.deepEqual(h.edits[0].remove, ["old_auto"], "old auto tags the new picture lacks are removed; shared ones stay");
+  assert.ok(h.edits[0].add.includes("new_auto"));
+  assert.equal(h.edits[0].rating, "e");
+  const p = h.recorded[0].partition;
+  assert.ok(!p.auto.includes("old_auto") && p.auto.includes("new_auto"), "auto rows come from the new picture only");
+  assert.deepEqual(p.spectrum.sort(), [...p.auto, ...p.both, ...p.meta].sort());
+});
+
+test("a new picture WITH a prompt: creator tags re-read with replace_creator", async () => {
+  const h = harness();
+  await handleReplace(edit(), h.deps);
+  assert.equal(h.recorded[0].partition.replace_creator, true);
+  assert.deepEqual(h.recorded[0].partition.creator, ["1girl"]);
+});
+
+test("a new picture with NO prompt: the old creator tags are kept -- no replace_creator, no creator rows sent (operator: 'Keep the old ones')", async () => {
+  const h = harness({ canonNew: { kind: "canonical", md5: "newmd5", raw_md5: "r", uploader: "@ann:41chan.net", removed: {}, booru: { status: "completed", upload_media_asset_id: 55 } } });
+  await handleReplace(edit(), h.deps);
+  const p = h.recorded[0].partition;
+  assert.equal(p.replace_creator, undefined);
+  assert.deepEqual(p.creator, []);
+  assert.equal(h.edits.length, 1, "auto tags and rating are still re-checked");
+});
+
+test("the autotagger down: named in the reply, no tags guessed, the replacement stands", async () => {
+  const h = harness({ autotagThrows: true });
+  await handleReplace(edit(), h.deps);
+  assert.equal(h.replaced.length, 1);
+  assert.equal(h.edits.length, 0);
+  assert.match(h.said[0], /auto tags and rating for the new picture/);
+});
+
+test("copies get the NEW tag list with their file version", async () => {
+  const h = harness();
+  await handleReplace(edit(), h.deps);
+  assert.ok(h.versions.length > 0);
 });

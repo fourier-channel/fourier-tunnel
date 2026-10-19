@@ -779,6 +779,8 @@ async function handleReplaceEdit(bridge, event) {
     maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
     // Every tag state in her rooms naming the post: the copies she knows of
     // (the original, reposts, merged duplicates), with the room each is in.
+    autotag: (bytes) => autotag(bytes, config),
+    editTags: (postId, e) => danbooru.editPostTags(postId, e),
     mappedMxcs: async (postId) => {
       const found = [];
       await walkTagState({

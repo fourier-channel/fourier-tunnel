@@ -100,6 +100,8 @@ function dims(w, h) {
  * @param {(removed: object, opts: object) => object} deps.creatorTags
  * @param {number} [deps.maxCreatorTags]
  * @param {(room: string, content: object) => Promise<void>} deps.sendMessage
+ * @param {(bytes: Buffer) => Promise<{tags: string[], rating?: string}>} deps.autotag   the NEW bytes
+ * @param {(postId: number, e: {add: string[], remove: string[], rating: string|null}) => Promise<void>} deps.editTags
  * @param {(postId: number) => Promise<Array<{room: string, mxc: string, content: object}>>} deps.mappedMxcs
  *        every tag state in her rooms naming the post
  * @param {(a: object) => Promise<{media_ids: string[], failed: object[]}>} deps.repoint   canon.js repoint
@@ -267,16 +269,95 @@ async function handleReplace(event, deps) {
   }
   record("replace_done", { post: postId, old_md5: data && data.old_md5, md5: data && data.md5, old_file: ask.oldFile });
 
-  // 5. EVERYWHERE (operator, 2026-10-19: a repost of the same picture "gets
-  // replaced everywhere"). Every media id that carried the old file -- this
-  // message's original, other people's reposts, merged duplicates -- is
-  // re-pointed at the new file (canon.js repoint), which also leaves the
-  // record the booru's collector reads. Then the gate forgets what it cached
-  // about them, and only THEN do the rooms' tag states get the file version
-  // Technetium reloads by: a version written before the gate forgot would be
-  // fetched as the old bytes and kept under the new URL for a year.
   const missing = [];
   const newMd5 = canonical.md5;
+
+  // 5. RE-CHECKED LIKE A NEW UPLOAD (operator, 2026-10-19: "Autotag right
+  // after"), with no hidden hold: the post stays up while this runs.
+  //   - The autotagger reads the NEW bytes; its tags and rating replace the
+  //     old picture's through the existing post-edit door, so the booru's own
+  //     checks (gate 1, quarantine) see the new picture. The old picture's
+  //     auto rows are never re-sent.
+  //   - Creator tags are re-read ONLY when the new picture carries a prompt.
+  //     A picture with no generation data leaves the old creator tags in
+  //     place until a new prompt replaces them (operator: "Keep the old
+  //     ones"); replace_creator would otherwise delete every creator row.
+  let before = null;
+  try {
+    before = await deps.getTagProjection(postId);
+  } catch (err) {
+    log(`[replace] post #${postId}: the old picture's tag rows were unreadable, so none of its auto tags are removed: ${err && err.message}`);
+  }
+  const hasPrompt = Object.keys(canonical.removed || {}).length > 0;
+  const owner = /^@([^:]+):/.exec(event.sender);
+  let scraped = { tags: [], meta: [], characters: [] };
+  if (hasPrompt) {
+    try {
+      scraped = deps.creatorTags(canonical.removed, { max: deps.maxCreatorTags, owner: owner ? owner[1] : null }) || scraped;
+    } catch (err) {
+      log(`[replace] post #${postId}: the new prompt could not be read: ${err && err.message}`);
+      missing.push("the creator tags from the new picture's prompt");
+    }
+  }
+  let derived = null;
+  try {
+    derived = await deps.autotag(canonical.bytes);
+  } catch (err) {
+    log(`[replace] post #${postId}: the autotagger did not read the new picture: ${err && err.message}`);
+    missing.push("auto tags and rating for the new picture");
+  }
+  if (derived) {
+    const newAuto = derived.tags || [];
+    const oldSrc = (before && before.sources) || {};
+    const oldAuto = [...new Set([...(oldSrc.auto || []), ...(oldSrc.both || [])])];
+    const keepAuto = new Set(newAuto);
+    try {
+      await deps.editTags(postId, {
+        add: [...new Set([...newAuto, ...(scraped.meta || []), ...(canonical.confident ? ["ai-generated"] : [])])],
+        remove: oldAuto.filter((t) => !keepAuto.has(t)),
+        rating: derived.rating || null,
+      });
+    } catch (err) {
+      log(`[replace] post #${postId}: tags and rating not written: ${err && err.message}`);
+      missing.push("auto tags and rating for the new picture");
+    }
+    try {
+      const { partition } = creatorPartition(scraped, { sources: { auto: newAuto } });
+      if (!hasPrompt) {
+        delete partition.replace_creator;
+        partition.creator = [];
+      }
+      partition.spectrum = [...partition.auto, ...partition.both, ...partition.meta];
+      await deps.recordTagSources(postId, partition);
+    } catch (err) {
+      log(`[replace] post #${postId}: tag sources not recorded: ${err && err.message}`);
+      missing.push("where the new tags came from");
+    }
+  } else if (hasPrompt) {
+    // No autotagger: the creator re-read still stands on its own.
+    try {
+      await deps.recordTagSources(postId, creatorPartition(scraped, before).partition);
+    } catch (err) {
+      log(`[replace] post #${postId}: creator tags not re-read: ${err && err.message}`);
+      missing.push("the creator tags from the new picture's prompt");
+    }
+  }
+  let after = null;
+  try {
+    after = await deps.getTagProjection(postId);
+  } catch (err) {
+    log(`[replace] post #${postId}: the new tag rows were unreadable; copies keep their old tag lists until next written: ${err && err.message}`);
+  }
+
+  // 6. EVERYWHERE (operator, 2026-10-19: a repost of the same picture "gets
+  // replaced everywhere"). Every media id that carried the old file -- this
+  // message's original, other people's reposts -- is re-pointed at the new
+  // file (canon.js repoint, which re-points only ids that really serve the
+  // old bytes and leaves the record the booru's collector reads). Then the
+  // gate forgets what it cached about them, and only THEN do the rooms' tag
+  // states get the file version Technetium reloads by: a version written
+  // before the gate forgot would be fetched as the old bytes and kept under
+  // the new URL for a year.
   let everywhere = { repointed: 0, failed: 0, versioned: 0, forgotten: false };
   try {
     const mapped = (await deps.mappedMxcs(postId)) || [];
@@ -296,10 +377,11 @@ async function handleReplace(event, deps) {
     }
     if (everywhere.forgotten) {
       const done = new Set(rec.media_ids);
+      const fresh = after ? { tags: after.tags, sources: after.sources, ...(derived && derived.rating ? { rating: derived.rating } : {}) } : {};
       for (const m of mapped) {
         if (!done.has(localMediaId(m.mxc, domain))) continue;
         try {
-          await deps.writeFileVersion(m.room, m.mxc, m.content, newMd5);
+          await deps.writeFileVersion(m.room, m.mxc, { ...m.content, ...fresh }, newMd5);
           everywhere.versioned++;
         } catch (err) {
           log(`[replace] post #${postId}: file version not written for ${m.mxc} in ${m.room}: ${err && err.message}`);
@@ -313,6 +395,7 @@ async function handleReplace(event, deps) {
   if (everywhere.failed !== 0) missing.push("every copy of the old picture");
   else if (!everywhere.forgotten && everywhere.repointed > 0) missing.push("other copies, which switch within a day");
 
+  // 7. The new message's own picture gets the post's tag state and alias.
   try {
     const post = await deps.getPost(postId);
     const pointed = await deps.pointRoom(room, ask.newContent.url, post);
@@ -320,20 +403,6 @@ async function handleReplace(event, deps) {
   } catch (err) {
     log(`[replace] post #${postId}: room not pointed at the new picture: ${err && err.message}`);
     missing.push("its tags on the new picture in this room");
-  }
-  try {
-    const owner = /^@([^:]+):/.exec(event.sender);
-    const scraped = deps.creatorTags(canonical.removed || {}, { max: deps.maxCreatorTags, owner: owner ? owner[1] : null }) || {};
-    let projection = null;
-    try {
-      projection = await deps.getTagProjection(postId);
-    } catch (err) {
-      log(`[replace] post #${postId}: projection unread, creator tags rebuilt without the autotagger's rows: ${err && err.message}`);
-    }
-    await deps.recordTagSources(postId, creatorPartition(scraped, projection).partition);
-  } catch (err) {
-    log(`[replace] post #${postId}: creator tags not re-read from the new picture: ${err && err.message}`);
-    missing.push("the creator tags from the new picture's prompt");
   }
 
   const was = dims(data && data.old_image_width, data && data.old_image_height);
