@@ -97,7 +97,10 @@ function imagesIn(chunk) {
         e.content &&
         e.content.msgtype === "m.image" &&
         typeof e.content.url === "string" &&
-        e.content.url.startsWith("mxc://"),
+        e.content.url.startsWith("mxc://") &&
+        // An edit is not a picture of its own: a picture edit is a creator's
+        // replacement (capabilities/replace.js), handled live only.
+        !(e.content["m.relates_to"] && e.content["m.relates_to"].rel_type === "m.replace"),
     )
     .reverse(); // dir=b hands back newest-first; post them in the order they were sent
 }

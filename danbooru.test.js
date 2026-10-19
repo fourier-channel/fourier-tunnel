@@ -434,3 +434,12 @@ test("createBulkUpdateRequest: Basic auth, the BUR body nested as Rails expects,
   assert.deepEqual(sent[0].body, { bulk_update_request: { script: "alias a -> b", title: "t", reason: "r" } });
   assert.equal(sent[0].opts.validateStatus(500), true);
 });
+
+test("replacePost: Basic auth, the post's replacements route, the upload media asset and the creator, every status returned", async () => {
+  const { c, sent } = client({ status: 403, data: { error: "not the creator", fix: "x" } });
+  const out = await c.replacePost(9, { uploadMediaAssetId: 55, finalSource: "mxc://41chan.net/NEW", onBehalfOf: "@ann:41chan.net", oldFile: "keep" });
+  assert.equal(out.status, 403);
+  assert.equal(sent[0].url, "/posts/9/replacements.json");
+  assert.equal(sent[0].opts.auth, "basic");
+  assert.deepEqual(sent[0].body, { post_replacement: { upload_media_asset_id: 55, final_source: "mxc://41chan.net/NEW", on_behalf_of: "@ann:41chan.net", old_file_retention: "keep" } });
+});

@@ -12,6 +12,7 @@ const avatarCapability = require("./capabilities/avatar");
 const rooms = require("./rooms");
 const rescanCapability = require("./capabilities/rescan");
 const burCapability = require("./capabilities/bur");
+const replaceCapability = require("./capabilities/replace");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
@@ -737,10 +738,54 @@ async function parkIfFlagged({ roomId, mxcUrl, md5 }) {
   return true;
 }
 
+// The booru's upload media asset for a canonical image: canon's own upload
+// record when it completed, else an upload of exactly those bytes, which lands
+// on the same media/<md5> key. One implementation for posting and replacing.
+async function uploadMediaAssetFor(canonical, filename, bytes = canonical.bytes) {
+  const fromCanon = canonical.booru && canonical.booru.status === "completed" && canonical.booru.upload_media_asset_id;
+  if (fromCanon) return fromCanon;
+  const upload = await danbooru.createUploadFromBytes(bytes, filename, canonical.media_type);
+  const completed = await danbooru.waitForUpload(upload.id);
+  const uma = completed.upload_media_assets && completed.upload_media_assets[0];
+  if (!uma || !uma.id) throw new Error(`No upload media asset produced for upload ${upload.id}`);
+  return uma.id;
+}
+
+// A creator editing their picture message to carry a new file
+// (capabilities/replace.js). Every edit is consumed here, before anything
+// else sees it: an edit is never a command and never a new post.
+const replaceSeen = new Set();
+async function handleReplaceEdit(bridge, event) {
+  const intent = bridge.getIntent();
+  return replaceCapability.handleReplace(event, {
+    settings: config.bridge.replace,
+    domain: config.homeserver.domain,
+    botUserId: `@${_reg.sender_localpart}:${config.homeserver.domain}`,
+    readEvent: (room, id) => intent.getEvent(room, id),
+    canonicalize: (mediaId, opts) => getCanon().canonicalize(mediaId, opts),
+    uploadMediaAssetFor: (canonical, filename) => uploadMediaAssetFor(canonical, filename),
+    findPost: (c) => imagePlan.findPostForBytes(c, (md5) => danbooru.findPostByMd5(md5), (raw) => danbooru.findGenerationByRawMd5(raw)),
+    replacePost: (postId, body) => danbooru.replacePost(postId, body),
+    getPost: (id) => danbooru.getPost(id),
+    pointRoom: (room, mxcUrl, post) => pointRoomAtPost(bridge, { roomId: room, mxcUrl, existing: post, md5: post.md5, via: "replacement" }),
+    getTagProjection: (id) => danbooru.getTagProjection(id),
+    recordTagSources: (id, partition) => danbooru.recordTagSources(id, partition),
+    creatorTags: extractCreatorTagsFromFields,
+    maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
+    sendMessage: (room, content) => intent.sendMessage(room, content),
+    audit: invites.audit,
+    seen: replaceSeen,
+  });
+}
+
 async function handleImageEvent(bridge, event) {
   const roomId = event.room_id;
   const mxcUrl = event.content && event.content.url;
   if (!mxcUrl) return;
+  // An edit is never a new post. A picture edit is its creator replacing the
+  // file (capabilities/replace.js), and its fallback content carries the new
+  // url, which would otherwise be posted here as a picture of its own.
+  if (replaceCapability.isEdit(event.content)) return "edit";
   if (isRoomDisabled(roomId)) {
     console.log(`[skip] tagging disabled for room ${roomId}`);
     return;
@@ -813,15 +858,7 @@ async function handleImageEvent(bridge, event) {
   // record (canon.js ensureBooruRecord) -- and the post is made from THAT
   // upload, so one image is one upload row. Only when canon's record is not
   // complete (the booru was busy) does the post path upload for itself.
-  const fromCanon = canonical.booru && canonical.booru.status === "completed" && canonical.booru.upload_media_asset_id;
-  let uploadMediaAssetId = fromCanon || null;
-  if (!uploadMediaAssetId) {
-    const upload = await danbooru.createUploadFromBytes(plan.upload.buffer, filename, contentType);
-    const completed = await danbooru.waitForUpload(upload.id);
-    const uma = completed.upload_media_assets && completed.upload_media_assets[0];
-    uploadMediaAssetId = uma && uma.id;
-    if (!uploadMediaAssetId) throw new Error(`No upload media asset produced for upload ${upload.id}`);
-  }
+  const uploadMediaAssetId = await uploadMediaAssetFor(canonical, filename, plan.upload.buffer);
 
   // Two tag sources, both fail-soft:
   //   AUTO    -- fourier-spectrum (WD ViT v3), on the bytes the booru holds.
@@ -1475,6 +1512,8 @@ new Cli({
             }
 
             if (event.type === "m.room.message" && event.content) {
+              // Edits first: an edit is never a command or a new picture.
+              if (await handleReplaceEdit(bridge, event)) return;
               // Admin reset command (DM only)
               if (await handleResetCommand(bridge, event)) return;
               if (await handleRoomDenyCommands(bridge, event)) return;

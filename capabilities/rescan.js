@@ -84,6 +84,34 @@ const USAGE = "Usage: !rescan <mxc://server/media-id | md5>";
  * @param {(record: object) => void} deps.audit
  * @returns {Promise<{ok: boolean, report: string, postId?: number, partition?: object, generation?: string}>}
  */
+/**
+ * A post's provenance partition rebuilt around a fresh read of its prompt:
+ * creator tags from `scraped` (prompt-tags' {tags, meta, characters}), the
+ * autotagger's rows kept from the booru's public `projection`, and
+ * replace_creator so the booru drops the previous read's creator rows. One
+ * implementation for every re-read -- !rescan and !replace both send it.
+ */
+function creatorPartition(scraped, projection) {
+  const creatorTags = (scraped && scraped.tags) || [];
+  const scrapedMeta = (scraped && scraped.meta) || [];
+  const ocTags = (scraped && scraped.characters) || [];
+  const src = (projection && projection.sources) || {};
+  const autoTags = [...new Set([...(src.auto || []), ...(src.both || [])])];
+  const metaTags = [...new Set([...(src.meta || []), ...scrapedMeta])];
+  const creatorSet = new Set(creatorTags);
+  const autoSet = new Set(autoTags);
+  const both = autoTags.filter((x) => creatorSet.has(x));
+  const partition = {
+    creator: creatorTags.filter((x) => !autoSet.has(x)),
+    auto: autoTags.filter((x) => !creatorSet.has(x)),
+    both,
+    meta: metaTags,
+    oc: ocTags,
+    replace_creator: true,
+  };
+  return { partition, creatorTags, both, ocTags, creatorSet };
+}
+
 async function rescan(target, deps) {
   const { download, findPostByMd5, findByRawMd5, getTagProjection, recordTagSources, recordGenerationMetadata, extract, strip, audit } = deps;
   const tagsFromRemoved = deps.creatorTags;
@@ -142,29 +170,11 @@ async function rescan(target, deps) {
   const owner = localpartIfLocal(uploader, deps.domain);
   const opts = { max: deps.maxCreatorTags, owner };
   const scraped = (stripped ? tagsFromRemoved(stripped.removed, opts) : extract(buffer, contentType, opts)) || {};
-  const creatorTags = scraped.tags || [];
-  const scrapedMeta = scraped.meta || [];
-  const ocTags = scraped.characters || [];
-
   // The autotagger's rows, from the booru's public projection: auto and both
   // are both the autotagger's, and both is where a creator name meets one.
   let projection = null;
   try { projection = await getTagProjection(post.id); } catch { projection = null; }
-  const src = (projection && projection.sources) || {};
-  const autoTags = [...new Set([...(src.auto || []), ...(src.both || [])])];
-  const metaTags = [...new Set([...(src.meta || []), ...scrapedMeta])];
-
-  const creatorSet = new Set(creatorTags);
-  const autoSet = new Set(autoTags);
-  const both = autoTags.filter((x) => creatorSet.has(x));
-  const partition = {
-    creator: creatorTags.filter((x) => !autoSet.has(x)),
-    auto: autoTags.filter((x) => !creatorSet.has(x)),
-    both,
-    meta: metaTags,
-    oc: ocTags,
-    replace_creator: true,
-  };
+  const { partition, creatorTags, both, ocTags, creatorSet } = creatorPartition(scraped, projection);
 
   let recorded;
   try {
@@ -245,4 +255,4 @@ async function handleRescanCommand(event, deps) {
   return true;
 }
 
-module.exports = { rescan, handleRescanCommand, USAGE };
+module.exports = { rescan, handleRescanCommand, creatorPartition, USAGE };

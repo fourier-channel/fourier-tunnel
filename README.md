@@ -373,6 +373,21 @@ the grant, and taking it away revokes it.
   (`capabilities/bur.js`). Absent `bridge.bur.room` the command says it is
   switched off.
 
+### Replacing a picture
+
+A picture edit is the gesture, not a command: the creator edits their own
+picture message (Matrix `m.replace`) so it carries a new file. The message
+itself then names the new file, so every client reloads it. Neru-chan makes the
+new picture canonical (one stripped file, its generation data filed under its
+own md5) and asks the booru to point the post at that file's upload, on the
+creator's behalf. The booru checks the creator against its record, and keeps
+the original's md5, size, dimensions and source on its replacement record.
+The creator's choice for the old file rides on the edit as
+`net.41chan.replace.old_file`, `keep` (the default) or `expire`. Off until
+`bridge.replace.enabled` is true. Every edit is consumed before anything else
+sees it, so an edit is never a command and never a new post, live or in a
+backfill (`capabilities/replace.js`).
+
 ---
 
 ## Tests
