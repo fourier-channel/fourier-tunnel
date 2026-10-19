@@ -32,6 +32,10 @@ const { statePath } = require("./state-dir");
 // starts refusing them, which is why some images lost their tag state on runs
 // that otherwise worked.
 const BACKFILL_PACE_MS = 750;
+// fourier-auth's internal door, over the docker networks the two share
+// (never published). Its canon-forget is how a re-pointed picture stops being
+// answered from the gate's cache.
+const FOURIER_AUTH_INTERNAL = "http://fourier-auth:8012";
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // WHERE THE CONFIG AND THE REGISTRATION ARE READ FROM. Beside this file, as
@@ -789,10 +793,25 @@ async function handleReplaceEdit(bridge, event) {
       return found;
     },
     repoint: (args) => getCanon().repoint(args),
-    // forget: NOT WIRED. The gate's forget door (fourier-auth 9fd3fb3, port
-    // 8012) is a new route and waits for the operator's ruling (2026-10-19).
-    // Without it no file version is written, so nothing can pin old bytes
-    // under a new URL; other copies switch when the gate's cache expires.
+    // The gate's forget door (fourier-auth 9fd3fb3; the operator approved the
+    // route 2026-10-19: "a fairly handy tool for forcing a refresh on any
+    // given link"). True only when it forgot every id asked: anything less
+    // and no file version is written, so nothing can pin old bytes under a
+    // new URL.
+    forget: async (mediaIds) => {
+      const res = await fetch(`${FOURIER_AUTH_INTERNAL}/internal/canon/forget`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ media_ids: mediaIds }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) {
+        console.warn(`[replace] the gate refused to forget ${mediaIds.length} media id(s) (${res.status})`);
+        return false;
+      }
+      const body = await res.json().catch(() => ({}));
+      return body.forgotten === mediaIds.length;
+    },
     writeFileVersion: async (room, mxc, content, md5) => {
       await bridge.getIntent().sendStateEvent(room, TAG_STATE_TYPE, mxc, { ...content, file_md5: md5, updated_by: "tunnel", updated_at: Date.now() });
       await sleep(BACKFILL_PACE_MS);
