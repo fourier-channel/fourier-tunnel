@@ -383,7 +383,18 @@ own md5) and asks the booru to point the post at that file's upload, on the
 creator's behalf. The booru checks the creator against its record, and keeps
 the original's md5, size, dimensions and source on its replacement record.
 The creator's choice for the old file rides on the edit as
-`net.41chan.replace.old_file`, `keep` (the default) or `expire`. Off until
+`net.41chan.replace.old_file`, `keep` or `expire`.
+
+A repost of the same picture is the same picture, so it is replaced everywhere.
+Every media id that carried the old file is re-pointed at the new one with
+`canon.js` `repoint`: the creator's original, other people's reposts and merged
+duplicates. The copies come from her rooms' tag state and the booru's list.
+The re-point leaves `index/replaced/<old md5>.json` in R2, the record the
+booru's collector reads before it may schedule the old file for deletion. Each
+room's tag state then gets `file_md5`, the version Technetium reloads by, but
+only after the gate has forgotten its cached index; otherwise the old bytes
+would be fetched and kept under the new URL. Her reply carries
+`net.41chan.replacement`, a pointer to the booru's replacement record. Off until
 `bridge.replace.enabled` is true. Every edit is consumed before anything else
 sees it, so an edit is never a command and never a new post, live or in a
 backfill (`capabilities/replace.js`).

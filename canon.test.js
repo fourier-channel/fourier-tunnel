@@ -649,3 +649,56 @@ test("an upload record with NO post retires Synapse's renditions like a post doe
   assert.equal(r.status, "retired");
   assert.equal(r.variantsUnder, THIRD);
 });
+
+test("repoint: every media id that carried the old file now serves the new one; the record names them; nothing is deleted", async () => {
+  const OLD = "a".repeat(32), NEW = "b".repeat(32);
+  const idx = (md5, extra = {}) => ({ body: Buffer.from(JSON.stringify({ kind: "canonical", key: `media/${md5}.png`, md5, raw_md5: md5, media_type: "image/png", uploader: "@x:41chan.net", ...extra })), type: "application/json" });
+  const store = fakeStore({
+    [keys.index("origAAAA")]: idx(OLD, { uploader: "@ann:41chan.net" }),
+    [keys.index("repostBB")]: idx(OLD, { uploader: "@bob:41chan.net" }),
+    [keys.index("refusedC")]: { body: Buffer.from(JSON.stringify({ kind: "refused", reason: "x" })), type: "application/json" },
+    [`media/${OLD}.png`]: { body: Buffer.from("old"), type: "image/png" },
+  });
+  const canon = createCanon({ store, mediaInfo: async () => null, booru: fakeBooru() });
+  const to = { kind: "canonical", key: `media/${NEW}.png`, md5: NEW, raw_md5: NEW, media_type: "image/png", record: "filed", bytes: Buffer.from("new"), removed: { parameters: "p" } };
+  const rec = await canon.repoint({ mediaIds: ["origAAAA", "repostBB", "refusedC", "newpicDD", "../x"], to, toMediaId: "newpicDD", postId: 9, oldMd5: OLD, at: "2026-10-19T00:00:00.000Z" });
+
+  assert.deepEqual(rec.media_ids, ["origAAAA", "repostBB"]);
+  assert.deepEqual(rec.failed, []);
+  assert.deepEqual(rec.skipped.map((s) => s.id).sort(), ["../x", "refusedC"]);
+  const orig = await canon.readIndex("origAAAA");
+  assert.equal(orig.key, `media/${NEW}.png`);
+  assert.equal(orig.md5, NEW);
+  assert.equal(orig.uploader, "@ann:41chan.net", "who uploaded THAT message is kept");
+  assert.deepEqual(orig.replaced, { from_md5: OLD, from_key: `media/${OLD}.png`, by_media_id: "newpicDD", post_id: 9, at: "2026-10-19T00:00:00.000Z" });
+  assert.equal(orig.bytes, undefined, "no per-call extras are written into an index");
+  assert.equal((await canon.readIndex("repostBB")).key, `media/${NEW}.png`);
+  const stored = JSON.parse((await store.get(keys.replaced(OLD))).toString());
+  assert.equal(stored.new_key, `media/${NEW}.png`);
+  assert.deepEqual(stored.failed, []);
+  assert.ok(store.objects.has(`media/${OLD}.png`), "the old file is still there");
+  assert.equal(store.writes.filter((w) => w[0] === "remove").length, 0);
+});
+
+test("repoint: a failure is named and keeps the record from saying safe", async () => {
+  const OLD = "c".repeat(32), NEW = "d".repeat(32);
+  const store = fakeStore({ [keys.index("brokenXX")]: { body: Buffer.from("{not json"), type: "application/json" } });
+  const canon = createCanon({ store, mediaInfo: async () => null, booru: fakeBooru() });
+  const rec = await canon.repoint({ mediaIds: ["brokenXX"], to: { kind: "canonical", key: `media/${NEW}.png`, md5: NEW }, toMediaId: "newpicEE", postId: 1, oldMd5: OLD });
+  assert.equal(rec.failed.length, 1);
+  assert.equal(JSON.parse((await store.get(keys.replaced(OLD))).toString()).failed.length, 1);
+});
+
+test("a re-pointed media id reads its prompt from the picture that replaced it, never from the version it replaced", async () => {
+  const NEW = "e".repeat(32);
+  const store = fakeStore({
+    [keys.index("repostFF")]: { body: Buffer.from(JSON.stringify({ kind: "canonical", key: `media/${NEW}.png`, md5: NEW, raw_md5: NEW, media_type: "image/png", record: "filed", booru: { status: "completed" }, replaced: { from_md5: "f".repeat(32), from_key: "media/old.png", by_media_id: "newpicGG", post_id: 3, at: "x" } })), type: "application/json" },
+    [`media/${NEW}.png`]: { body: png(null), type: "image/png" },
+    [keys.superseded("repostFF")]: { body: png("old prompt, 1boy"), type: "image/png" },
+    [keys.superseded("newpicGG")]: { body: png(PROMPT), type: "image/png" },
+  });
+  const canon = createCanon({ store, mediaInfo: async () => null, booru: fakeBooru() });
+  const out = await canon.canonicalize("repostFF", { withBytes: true });
+  assert.match(JSON.stringify(out.removed), /1girl/);
+  assert.doesNotMatch(JSON.stringify(out.removed), /1boy/);
+});

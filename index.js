@@ -19,6 +19,7 @@ const backfill = require("./backfill");
 const backfillState = require("./backfill-state");
 const { resolveHomeserverUrl } = require("./homeserver");
 const quarantineLib = require("./quarantine");
+const { walkTagState } = require("./tag-state-walk");
 const { statePath } = require("./state-dir");
 
 // PACING BETWEEN BACKFILLED IMAGES.
@@ -772,6 +773,30 @@ async function handleReplaceEdit(bridge, event) {
     recordTagSources: (id, partition) => danbooru.recordTagSources(id, partition),
     creatorTags: extractCreatorTagsFromFields,
     maxCreatorTags: config.autotagger && config.autotagger.max_creator_tags,
+    // Every tag state in her rooms naming the post: the copies she knows of
+    // (the original, reposts, merged duplicates), with the room each is in.
+    mappedMxcs: async (postId) => {
+      const found = [];
+      await walkTagState({
+        bridge,
+        stateType: TAG_STATE_TYPE,
+        roomIds: () => joinedRoomIds(`@${_reg.sender_localpart}:${config.homeserver.domain}`),
+        skipRoom: (roomId) => rooms.isDenied(roomId),
+        select: (e) => e.content.post_id === postId,
+        onUnreadable: (roomId, err) => console.warn(`[replace] ${roomId}: tag state unread (${err.message}); copies there are not re-pointed`),
+        onRoom: (roomId, events) => { for (const e of events) found.push({ room: roomId, mxc: e.state_key, content: e.content }); },
+      });
+      return found;
+    },
+    repoint: (args) => getCanon().repoint(args),
+    // forget: NOT WIRED. The gate's forget door (fourier-auth 9fd3fb3, port
+    // 8012) is a new route and waits for the operator's ruling (2026-10-19).
+    // Without it no file version is written, so nothing can pin old bytes
+    // under a new URL; other copies switch when the gate's cache expires.
+    writeFileVersion: async (room, mxc, content, md5) => {
+      await bridge.getIntent().sendStateEvent(room, TAG_STATE_TYPE, mxc, { ...content, file_md5: md5, updated_by: "tunnel", updated_at: Date.now() });
+      await sleep(BACKFILL_PACE_MS);
+    },
     sendMessage: (room, content) => intent.sendMessage(room, content),
     audit: invites.audit,
     seen: replaceSeen,

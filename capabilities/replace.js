@@ -45,6 +45,9 @@ const { refusalReasons } = require("./bur");
 const { creatorPartition } = require("./rescan");
 
 const CHOICE_KEY = "net.41chan.replace";
+// On her reply: a pointer to the booru's replacement record, which Technetium
+// draws as a card where the creator can still change their mind.
+const REPLACEMENT_KEY = "net.41chan.replacement";
 const OLD_FILE_CHOICES = ["keep", "expire"];
 
 /** Is this event content an edit (m.replace) of another event? Pure. */
@@ -97,6 +100,11 @@ function dims(w, h) {
  * @param {(removed: object, opts: object) => object} deps.creatorTags
  * @param {number} [deps.maxCreatorTags]
  * @param {(room: string, content: object) => Promise<void>} deps.sendMessage
+ * @param {(postId: number) => Promise<Array<{room: string, mxc: string, content: object}>>} deps.mappedMxcs
+ *        every tag state in her rooms naming the post
+ * @param {(a: object) => Promise<{media_ids: string[], failed: object[]}>} deps.repoint   canon.js repoint
+ * @param {(mediaIds: string[]) => Promise<boolean>} [deps.forget]   the gate forgets; absent, nothing is versioned
+ * @param {(room: string, mxc: string, content: object, md5: string) => Promise<void>} deps.writeFileVersion
  * @param {(record: object) => void} deps.audit
  * @param {(line: string) => void} [deps.log]
  * @param {Set<string>} deps.seen
@@ -120,7 +128,7 @@ async function handleReplace(event, deps) {
   }
 
   const room = event.room_id;
-  const say = (body) => deps.sendMessage(room, { msgtype: "m.notice", body });
+  const say = (body, extra) => deps.sendMessage(room, { msgtype: "m.notice", body, ...(extra || {}) });
   const record = (kind, extra) => audit({ kind, sender: event.sender, room, event: event.event_id, ...(extra || {}) });
 
   // 1. The original.
@@ -239,9 +247,52 @@ async function handleReplace(event, deps) {
   }
   record("replace_done", { post: postId, old_md5: data && data.old_md5, md5: data && data.md5, old_file: ask.oldFile });
 
-  // 5. The new address and the new prompt. The replacement stands whatever
-  // happens here; each step is logged and the reply says what is missing.
+  // 5. EVERYWHERE (operator, 2026-10-19: a repost of the same picture "gets
+  // replaced everywhere"). Every media id that carried the old file -- this
+  // message's original, other people's reposts, merged duplicates -- is
+  // re-pointed at the new file (canon.js repoint), which also leaves the
+  // record the booru's collector reads. Then the gate forgets what it cached
+  // about them, and only THEN do the rooms' tag states get the file version
+  // Technetium reloads by: a version written before the gate forgot would be
+  // fetched as the old bytes and kept under the new URL for a year.
   const missing = [];
+  const newMd5 = canonical.md5;
+  let everywhere = { repointed: 0, failed: 0, versioned: 0, forgotten: false };
+  try {
+    const mapped = (await deps.mappedMxcs(postId)) || [];
+    const fromBooru = Array.isArray(data && data.mxcs) ? data.mxcs : [];
+    const ids = [originalMedia, ...mapped.map((m) => localMediaId(m.mxc, domain)), ...fromBooru.map((u) => localMediaId(u, domain))]
+      .filter((id) => id && id !== newMedia);
+    const rec = await deps.repoint({ mediaIds: ids, to: canonical, toMediaId: newMedia, postId, oldMd5: (data && data.old_md5) || found.post.md5 });
+    everywhere.repointed = rec.media_ids.length;
+    everywhere.failed = rec.failed.length;
+    if (rec.failed.length) log(`[replace] post #${postId}: ${rec.failed.length} media id(s) not re-pointed: ${JSON.stringify(rec.failed)}`);
+    if (typeof deps.forget === "function" && rec.media_ids.length) {
+      try {
+        everywhere.forgotten = (await deps.forget(rec.media_ids)) === true;
+      } catch (err) {
+        log(`[replace] post #${postId}: the gate did not forget the re-pointed ids: ${err && err.message}`);
+      }
+    }
+    if (everywhere.forgotten) {
+      const done = new Set(rec.media_ids);
+      for (const m of mapped) {
+        if (!done.has(localMediaId(m.mxc, domain))) continue;
+        try {
+          await deps.writeFileVersion(m.room, m.mxc, m.content, newMd5);
+          everywhere.versioned++;
+        } catch (err) {
+          log(`[replace] post #${postId}: file version not written for ${m.mxc} in ${m.room}: ${err && err.message}`);
+        }
+      }
+    }
+  } catch (err) {
+    log(`[replace] post #${postId}: copies not re-pointed: ${err && err.message}`);
+    everywhere.failed = -1;
+  }
+  if (everywhere.failed !== 0) missing.push("every copy of the old picture");
+  else if (!everywhere.forgotten && everywhere.repointed > 0) missing.push("other copies, which switch within a day");
+
   try {
     const post = await deps.getPost(postId);
     const pointed = await deps.pointRoom(room, ask.newContent.url, post);
@@ -270,11 +321,13 @@ async function handleReplace(event, deps) {
   const kept = ask.oldFile === "expire"
     ? "The old version will expire and be collected for deletion."
     : "The old version is kept on record.";
+  const copies = everywhere.repointed > 1 ? ` All ${everywhere.repointed} copies of it now show the new version.` : "";
   await say(
-    `Booru post #${postId} now has the new version (${was} -> ${now}). ${kept}` +
+    `Booru post #${postId} now has the new version (${was} -> ${now}).${copies} ${kept}` +
       (missing.length ? ` Not yet updated: ${missing.join(" and ")}; an admin can run !rescan on the new picture.` : ""),
+    Number.isInteger(data && data.id) ? { [REPLACEMENT_KEY]: { id: data.id, post_id: postId } } : undefined,
   );
   return true;
 }
 
-module.exports = { handleReplace, isEdit, pictureEdit, localMediaId, CHOICE_KEY, OLD_FILE_CHOICES };
+module.exports = { handleReplace, isEdit, pictureEdit, localMediaId, CHOICE_KEY, REPLACEMENT_KEY, OLD_FILE_CHOICES };

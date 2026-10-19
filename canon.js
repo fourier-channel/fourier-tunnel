@@ -98,6 +98,7 @@ const keys = {
   index: (mediaId) => `index/local/${mediaId}.json`,
   byMd5: (md5) => `index/md5/${md5}.json`,
   byRaw: (rawMd5) => `index/raw/${rawMd5}.json`,
+  replaced: (oldMd5) => `index/replaced/${oldMd5}.json`,
   canonical: (md5, ext) => `media/${md5}.${ext}`,
 };
 
@@ -523,8 +524,12 @@ function createCanon({ store, mediaInfo, booru, log = () => {}, booruWaitMs = BO
     const dry = !!opts.dryRun;
     let read = null;
     let record = existing.record;
+    // A RE-POINTED media id (repoint below) serves another picture's file, so
+    // that picture's original is where its prompt is -- never this id's own,
+    // which is the version it replaced.
+    const promptFrom = (existing.replaced && existing.replaced.by_media_id) || mediaId;
     if (!dry && existing.kind === "canonical" && existing.record === "pending") {
-      read = await rawAndRemoved(mediaId, existing.media_type);
+      read = await rawAndRemoved(promptFrom, existing.media_type);
       if (read.raw && Object.keys(read.removed).length) {
         const outcome = await file(mediaId, existing.md5, existing.raw_md5, opts.poster || existing.uploader || null, read.removed);
         if (outcome !== "pending") {
@@ -550,7 +555,7 @@ function createCanon({ store, mediaInfo, booru, log = () => {}, booruWaitMs = BO
     }
     // The removed text, for creator tags, comes from the raw original while it
     // still exists (superseded/ until the operator deletes it).
-    const r = read || (await rawAndRemoved(mediaId, idx.media_type));
+    const r = read || (await rawAndRemoved(promptFrom, idx.media_type));
     return { ...idx, bytes, removed: r.removed, raw: r.raw, confident: r.confident === null ? idx.confident === true : r.confident };
   }
 
@@ -881,7 +886,57 @@ function createCanon({ store, mediaInfo, booru, log = () => {}, booruWaitMs = BO
     return { tried, tally };
   }
 
-  return { canonicalize: canonicalizeOnce, readIndex, moveSource, retireSynapseThumbnails, retireSweep, booruRecord, booruSweep, keys };
+  /**
+   * A CREATOR REPLACED A PICTURE (operator, 2026-10-19: a repost of the same
+   * picture "gets replaced everywhere"). Point every media id that carried the
+   * old file at the new picture's one file, and leave the record the booru's
+   * collector reads before it may schedule the old file for deletion.
+   *
+   * `to` is the new picture's index (canonicalize's result) and `toMediaId`
+   * its media id. Each re-pointed index is the new picture's, plus `replaced`:
+   * what it served before, which picture replaced it, for which post, when.
+   * An id with no canonical index (never served, refused, not an image) is
+   * skipped and named; one that fails is named in `failed`, and the record
+   * says so -- the collector schedules only when `failed` is empty.
+   *
+   * Nothing is deleted or moved: the old file stays where it is until the
+   * booru's collector schedules it and the operator's deletion runs.
+   */
+  async function repoint({ mediaIds, to, toMediaId, postId, oldMd5, at = new Date().toISOString() }) {
+    if (!to || to.kind !== "canonical" || !to.key || !to.md5) {
+      throw new CanonError("repoint needs the new picture's canonical index (kind, key, md5).", { retryable: false });
+    }
+    if (!/^[0-9a-f]{32}$/.test(String(oldMd5 || ""))) {
+      throw new CanonError(`repoint needs the old file's md5, not ${JSON.stringify(oldMd5)}.`, { retryable: false });
+    }
+    // eslint-disable-next-line no-unused-vars -- the per-call extras are not an index
+    const { bytes, removed, raw, moved, thumbnails, ...target } = to;
+    const done = [], skipped = [], failed = [];
+    for (const id of [...new Set(mediaIds)]) {
+      if (id === toMediaId) continue;
+      if (!MEDIA_ID.test(id || "")) { skipped.push({ id: String(id), why: "not a media id" }); continue; }
+      try {
+        const idx = await readIndex(id);
+        if (!idx || idx.kind !== "canonical") { skipped.push({ id, why: idx ? idx.kind : "no index" }); continue; }
+        if (idx.key !== target.key) {
+          await writeIndex(id, {
+            ...target,
+            uploader: idx.uploader || null,
+            replaced: { from_md5: idx.md5, from_key: idx.key, by_media_id: toMediaId, post_id: postId, at },
+          });
+        }
+        done.push(id);
+      } catch (err) {
+        failed.push({ id, error: String(err && err.message).slice(0, 300) });
+      }
+    }
+    const record = { post_id: postId, old_md5: oldMd5, new_md5: target.md5, new_key: target.key, by_media_id: toMediaId, media_ids: done, skipped, failed, repointed_at: at };
+    await store.put(keys.replaced(oldMd5), Buffer.from(JSON.stringify(record)), "application/json");
+    log(`[canon] post #${postId}: ${done.length} media id(s) now serve ${target.key}${skipped.length ? `, ${skipped.length} skipped` : ""}${failed.length ? `, ${failed.length} FAILED` : ""}`);
+    return record;
+  }
+
+  return { canonicalize: canonicalizeOnce, readIndex, repoint, moveSource, retireSynapseThumbnails, retireSweep, booruRecord, booruSweep, keys };
 }
 
 // The uploader and type of a local media id, from Synapse's admin API

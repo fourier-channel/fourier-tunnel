@@ -31,8 +31,8 @@ function edit(over = {}, nc = {}) {
   };
 }
 
-function harness({ original = ORIG, enabled = true, post = { id: 9, md5: "oldmd5" }, booru, canonNew, pointed = "posted", recordThrows } = {}) {
-  const said = [], audits = [], replaced = [], recorded = [], logs = [];
+function harness({ original = ORIG, enabled = true, post = { id: 9, md5: "oldmd5" }, booru, canonNew, pointed = "posted", recordThrows, forget = async () => true, mapped } = {}) {
+  const said = [], audits = [], replaced = [], recorded = [], logs = [], repoints = [], versions = [], forgot = [], sent = [];
   const deps = {
     settings: { enabled },
     domain: D,
@@ -56,12 +56,22 @@ function harness({ original = ORIG, enabled = true, post = { id: 9, md5: "oldmd5
       recorded.push({ id, partition });
     },
     creatorTags: () => ({ tags: ["1girl"], meta: [], characters: [] }),
-    sendMessage: async (room, c) => said.push(c.body),
+    mappedMxcs: async () => mapped || [
+      { room: ROOM, mxc: "mxc://41chan.net/OLD", content: { post_id: 9, tags: ["a"] } },
+      { room: "!other:41chan.net", mxc: "mxc://41chan.net/REPOST", content: { post_id: 9, tags: ["a"] } },
+    ],
+    repoint: async (a) => {
+      repoints.push(a);
+      return { media_ids: a.mediaIds.filter((id) => id !== "BROKEN"), failed: a.mediaIds.includes("BROKEN") ? [{ id: "BROKEN" }] : [] };
+    },
+    forget: forget && (async (ids) => { forgot.push(ids); return forget(ids); }),
+    writeFileVersion: async (room, mxc, content, md5) => versions.push({ room, mxc, md5 }),
+    sendMessage: async (room, c) => { sent.push(c); said.push(c.body); },
     audit: (r) => audits.push(r),
     log: (l) => logs.push(l),
     seen: new Set(),
   };
-  return { deps, said, audits, replaced, recorded, logs };
+  return { deps, said, audits, replaced, recorded, logs, repoints, versions, forgot, sent };
 }
 
 test("pure: an edit is an edit; a picture edit names its original, new content and old-file choice (keep by default)", () => {
@@ -82,7 +92,7 @@ test("the creator's picture edit replaces the post's file with the new upload's 
   assert.deepEqual(h.replaced[0], { id: 9, body: { uploadMediaAssetId: 55, finalSource: "mxc://41chan.net/NEW", onBehalfOf: "@ann:41chan.net", oldFile: "keep" } });
   assert.equal(h.recorded[0].partition.replace_creator, true);
   assert.deepEqual(h.recorded[0].partition.creator, ["1girl"]);
-  assert.match(h.said[0], /post #9 now has the new version \(512x512 -> 2048x2048\)\. The old version is kept on record\./);
+  assert.match(h.said[0], /post #9 now has the new version \(512x512 -> 2048x2048\)\. All \d+ copies of it now show the new version\. The old version is kept on record\./);
   assert.equal(h.audits.at(-1).kind, "replace_done");
 });
 
@@ -175,4 +185,38 @@ test("backfill and catch-up never replay an edit as a picture", () => {
   const chunk = [edit(), { type: "m.room.message", content: ORIG.content }];
   assert.equal(backfillImages(chunk).length, 1);
   assert.equal(catchupImages(chunk).length, 1);
+});
+
+test("reposts are the same picture: every copy is re-pointed, the gate forgets, THEN each room gets the file version", async () => {
+  const h = harness({ booru: { status: 201, data: { id: 41, post_id: 9, md5: "newmd5", old_md5: "oldmd5", mxcs: ["mxc://41chan.net/ELSEWHERE", "mxc://remote.org/X"] } } });
+  await handleReplace(edit(), h.deps);
+  assert.deepEqual(h.repoints[0].mediaIds.sort(), ["ELSEWHERE", "OLD", "OLD", "REPOST"].sort());
+  assert.equal(h.repoints[0].toMediaId, "NEW");
+  assert.equal(h.repoints[0].oldMd5, "oldmd5");
+  assert.equal(h.forgot.length, 1);
+  assert.deepEqual(h.versions.map((v) => v.mxc).sort(), ["mxc://41chan.net/OLD", "mxc://41chan.net/REPOST"]);
+  assert.ok(h.versions.every((v) => v.md5 === "newmd5"));
+  assert.match(h.said[0], /copies of it now show the new version/);
+  assert.deepEqual(h.sent[0]["net.41chan.replacement"], { id: 41, post_id: 9 });
+});
+
+test("the gate not forgetting: NO file version is written (it would pin the old bytes under the new URL), and the reply says so", async () => {
+  const h = harness({ forget: async () => false });
+  await handleReplace(edit(), h.deps);
+  assert.equal(h.repoints.length, 1);
+  assert.equal(h.versions.length, 0);
+  assert.match(h.said[0], /other copies, which switch within a day/);
+});
+
+test("no forget at all (not wired): nothing versioned either", async () => {
+  const h = harness({ forget: null });
+  await handleReplace(edit(), h.deps);
+  assert.equal(h.versions.length, 0);
+});
+
+test("a copy that could not be re-pointed is named, and its room gets no version", async () => {
+  const h = harness({ mapped: [{ room: ROOM, mxc: "mxc://41chan.net/BROKEN", content: { post_id: 9, tags: [] } }] });
+  await handleReplace(edit(), h.deps);
+  assert.equal(h.versions.filter((v) => v.mxc.endsWith("BROKEN")).length, 0);
+  assert.match(h.said[0], /Not yet updated: every copy of the old picture/);
 });
