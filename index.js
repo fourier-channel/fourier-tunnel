@@ -944,7 +944,7 @@ async function handleImageEvent(bridge, event) {
   const autoSet = new Set(autoTags);
   const both = autoTags.filter((t) => creatorSet.has(t));
   const autoOnly = autoTags.filter((t) => !creatorSet.has(t));
-  const creatorOnly = creatorTags.filter((t) => !autoSet.has(t));
+  const creatorOnly = imagePlan.withoutPublicLabels(creatorTags).filter((t) => !autoSet.has(t));
   // The booru's tag_string carries only PUBLIC tags. Creator-ONLY tags (prompt-
   // derived, may leak model names / private notes) never enter it; they travel
   // solely in the provenance partition below, where the booru stores them

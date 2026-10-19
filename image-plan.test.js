@@ -332,3 +332,19 @@ test("publicTagsFor: no_train only when asked -- the Discord path asks, the Matr
   assert.deepEqual(publicTagsFor({ ...base, noTrain: true }), ["1girl", "41chan_alice", NO_TRAIN_TAG]);
   assert.equal(NO_TRAIN_TAG, "no_train", "the tag fourier-sampling puts on archive posts, so one search covers both");
 });
+
+test("public labels are never a creator's private tag: ai-generated and no_train leave every creator list", () => {
+  const { withoutPublicLabels, AI_GENERATED_TAG, NO_TRAIN_TAG } = require("./image-plan");
+  assert.deepEqual(withoutPublicLabels(["1girl", AI_GENERATED_TAG, "solo", NO_TRAIN_TAG]), ["1girl", "solo"]);
+  assert.deepEqual(withoutPublicLabels(undefined), []);
+});
+
+test("every path that builds a creator list passes it through withoutPublicLabels", () => {
+  const fs = require("fs");
+  for (const f of ["index.js", "discordPost.js", "capabilities/rescan.js"]) {
+    const src = fs.readFileSync(require("path").join(__dirname, f), "utf8");
+    const builds = [...src.matchAll(/creator(?:Only)?:? ?=? ?([^\n]*creatorTags[^\n]*)/g)].map((m) => m[1]).filter((l) => /filter\(/.test(l));
+    assert.ok(builds.length > 0, `${f} builds no creator list?`);
+    for (const l of builds) assert.match(l, /withoutPublicLabels\(creatorTags\)/, `${f}: ${l}`);
+  }
+});

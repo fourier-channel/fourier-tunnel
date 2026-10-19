@@ -46,6 +46,16 @@ const AI_GENERATED_TAG = "ai-generated";
 // archive-sourced posts, so one search excludes both from a training set. A
 // claim on the creator tag does not lift it.
 const NO_TRAIN_TAG = "no_train";
+
+// PUBLIC LABELS are posted publicly on purpose (publicTagsFor), so they are
+// never a creator's private tag, whatever a prompt says. Writing a private
+// creator row for one made 250 contradictory (post, tag) pairs by 2026-10-19
+// (measured by the chanbooru session); the booru treats both as public
+// labels shown to everyone. Every creator list passes through this.
+const PUBLIC_LABELS = new Set([AI_GENERATED_TAG, NO_TRAIN_TAG]);
+function withoutPublicLabels(tags) {
+  return (tags || []).filter((t) => !PUBLIC_LABELS.has(t));
+}
 const NO_SCRAPE = Object.freeze({ tags: [], meta: [], characters: [] });
 
 function md5hex(buffer) {
@@ -282,4 +292,5 @@ module.exports = {
   HELD_HIDDEN,
   AI_GENERATED_TAG,
   NO_TRAIN_TAG,
+  withoutPublicLabels,
 };

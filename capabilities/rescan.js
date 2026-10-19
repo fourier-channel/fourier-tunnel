@@ -53,7 +53,7 @@
 // the rescan CLI hand this the same functions, and the tests hand it fakes.
 "use strict";
 
-const { findPostForBytes, generationRecord, generationRefusal, md5hex } = require("../image-plan");
+const { findPostForBytes, generationRecord, generationRefusal, md5hex, withoutPublicLabels } = require("../image-plan");
 const { localpartIfLocal } = require("../poster");
 
 const MD5 = /^[0-9a-f]{32}$/i;
@@ -102,7 +102,7 @@ function creatorPartition(scraped, projection) {
   const autoSet = new Set(autoTags);
   const both = autoTags.filter((x) => creatorSet.has(x));
   const partition = {
-    creator: creatorTags.filter((x) => !autoSet.has(x)),
+    creator: withoutPublicLabels(creatorTags).filter((x) => !autoSet.has(x)),
     auto: autoTags.filter((x) => !creatorSet.has(x)),
     both,
     meta: metaTags,
