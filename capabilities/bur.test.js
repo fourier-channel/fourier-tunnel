@@ -172,3 +172,16 @@ test("scrub: urls, IPv4, host:port gone; clock times and tag names kept", () => 
   assert.equal(scrub("booru.41chan.net:443"), "[address removed]");
   assert.equal(scrub("danbooru-web-1:3000"), "[address removed]");
 });
+
+test("the live contract: no title is sent; a 422's sentence and its per-line reasons are both relayed", async () => {
+  const h = harness({
+    users: { "@voice:41chan.net": 25 },
+    booru: { status: 422, data: { success: false, error: "BulkUpdateRequest::Processor::Error", message: "This request names a tag only an admin may change. Ask an admin to make it", errors: [{ line: 2, text: "update a -> b", reason: "This line names a tag only an admin may change" }] } },
+  });
+  await handleBurCommand(ev(SCRIPT), h.deps);
+  assert.equal(h.filed[0].title, undefined);
+  assert.equal(h.filed[0].forum_topic_id, undefined);
+  const body = h.sent[0].content.body;
+  assert.match(body, /nothing was filed\. This request names a tag only an admin may change\. Ask an admin to make it/);
+  assert.match(body, /- line 2: This line names a tag only an admin may change/);
+});

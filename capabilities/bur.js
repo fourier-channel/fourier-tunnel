@@ -202,9 +202,10 @@ async function handleBurCommand(event, deps) {
   }
 
   const who = localpart(event.sender);
+  // No title (and never forum_topic_id): the forum is retired, and the booru
+  // refuses a request attached to it (chanbooru ca05bee43).
   const body = {
     script: parsed.lines.join("\n"),
-    title: `Matrix request from ${who}`,
     reason: `${parsed.reason}\n\nRequested by ${event.sender} in #botsbotsbots (Matrix event ${event.event_id || "unknown"}).`,
   };
   let res;
@@ -232,11 +233,17 @@ async function handleBurCommand(event, deps) {
   const status = res ? res.status : 0;
   audit({ kind: "bur_refused", sender: event.sender, room, status });
   if (status === 422 || status === 400) {
-    const reasons = refusalReasons(data);
-    log(`[bur] the booru refused the script (${status}): ${JSON.stringify(reasons)}`);
+    // The booru's sentence first, then the lines it names (chanbooru
+    // ca05bee43: 422 {message, errors:[{line, text, reason}]}).
+    const sentence = data && typeof data.message === "string" && data.message.trim() ? scrub(data.message.trim()) : null;
+    const lines = data && Array.isArray(data.errors)
+      ? data.errors.filter((e) => e && typeof e.reason === "string").map((e) => scrub(Number.isInteger(e.line) ? `line ${e.line}: ${e.reason}` : e.reason))
+      : [];
+    const reasons = sentence || lines.length ? lines : refusalReasons(data);
+    log(`[bur] the booru refused the script (${status}): ${JSON.stringify({ sentence, reasons })}`);
     await say(
-      reasons.length
-        ? `The booru refused that BUR, so nothing was filed:\n${reasons.map((r) => `- ${r}`).join("\n")}`
+      sentence || reasons.length
+        ? `The booru refused that BUR, so nothing was filed.${sentence ? ` ${sentence}` : ""}${reasons.length ? `\n${reasons.map((r) => `- ${r}`).join("\n")}` : ""}`
         : "The booru refused that BUR without saying why, so nothing was filed.",
     );
   } else if (status === 429) {
