@@ -786,7 +786,8 @@ async function handleReplaceEdit(bridge, event) {
         stateType: TAG_STATE_TYPE,
         roomIds: () => joinedRoomIds(`@${_reg.sender_localpart}:${config.homeserver.domain}`),
         skipRoom: (roomId) => rooms.isDenied(roomId),
-        select: (e) => e.content.post_id === postId,
+        // Only her own writes: a tag state anyone else sent proves nothing.
+        select: (e) => e.content.post_id === postId && e.sender === `@${_reg.sender_localpart}:${config.homeserver.domain}`,
         onUnreadable: (roomId, err) => console.warn(`[replace] ${roomId}: tag state unread (${err.message}); copies there are not re-pointed`),
         onRoom: (roomId, events) => { for (const e of events) found.push({ room: roomId, mxc: e.state_key, content: e.content }); },
       });

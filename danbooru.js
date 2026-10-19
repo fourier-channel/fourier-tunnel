@@ -397,7 +397,7 @@ class DanbooruClient {
   // Replace a post's file for its creator (capabilities/replace.js): the post
   // is pointed at an upload media asset the booru already holds, so no file
   // travels and no second object is written. Every status comes back.
-  async replacePost(postId, { uploadMediaAssetId, finalSource, onBehalfOf, oldFile }) {
+  async replacePost(postId, { uploadMediaAssetId, finalSource, onBehalfOf, oldFile, expectedMd5 }) {
     const resp = await this._raw().post(
       `/posts/${postId}/replacements.json`,
       {
@@ -406,6 +406,7 @@ class DanbooruClient {
           final_source: finalSource,
           on_behalf_of: onBehalfOf,
           old_file_retention: oldFile,
+          expected_md5: expectedMd5,
         },
       },
       { validateStatus: () => true, maxRedirects: 0 },

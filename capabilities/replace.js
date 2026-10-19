@@ -41,7 +41,7 @@
 // EVERY DEPENDENCY IS INJECTED (see avatar.js for why).
 "use strict";
 
-const { refusalReasons } = require("./bur");
+const { refusalReasons, scrub } = require("./bur");
 const { creatorPartition } = require("./rescan");
 
 const CHOICE_KEY = "net.41chan.replace";
@@ -166,7 +166,9 @@ async function handleReplace(event, deps) {
   // 2. The post, found from the original's bytes.
   let found;
   try {
-    const was = await deps.canonicalize(originalMedia, { poster: original.sender });
+    // No poster is passed: canon files any generation data under the
+    // picture's REAL uploader (Synapse's record), never under whoever asked.
+    const was = await deps.canonicalize(originalMedia, {});
     found = was && was.kind === "canonical" ? await deps.findPost({ rawMd5: was.raw_md5, strippedMd5: was.md5 }) : null;
   } catch (err) {
     log(`[replace] could not resolve the post for ${oc.url}: ${err && err.message}`);
@@ -176,7 +178,8 @@ async function handleReplace(event, deps) {
   }
   // Not on the booru: the edit is just an edit. Nothing to replace, and the
   // new picture is not posted -- an edit is never a new post.
-  if (!found || !found.post) {
+  // A deleted post is no post either (chanbooru, 2026-10-19).
+  if (!found || !found.post || found.post.is_deleted) {
     record("replace_no_post");
     return true;
   }
@@ -185,7 +188,17 @@ async function handleReplace(event, deps) {
   // 3. The new picture, made canonical.
   let canonical, umaId;
   try {
-    canonical = await deps.canonicalize(newMedia, { withBytes: true, poster: event.sender });
+    // NEVER poster: event.sender. The edit can name ANY local mxc, and a
+    // poster passed here would file someone else's prompt under the editor
+    // and, re-pointed, show their picture in rooms it was never posted to
+    // (found by the chanbooru session's design pass, 2026-10-19). Canon files
+    // under the real uploader, and the picture must BE the editor's.
+    canonical = await deps.canonicalize(newMedia, { withBytes: true });
+    if (canonical.kind === "canonical" && canonical.uploader !== event.sender) {
+      record("replace_not_uploader", { post: postId, uploader: canonical.uploader || null });
+      await say(`A picture can only be replaced with one you uploaded yourself, so booru post #${postId} keeps the old version.`);
+      return true;
+    }
     if (canonical.kind === "refused") {
       log(`[replace] new picture ${ask.newContent.url} refused by the stripper: ${canonical.reason}`);
       record("replace_new_refused", { post: postId });
@@ -217,6 +230,9 @@ async function handleReplace(event, deps) {
       finalSource: ask.newContent.url,
       onBehalfOf: event.sender,
       oldFile: ask.oldFile,
+      // The post as it was found: the booru refuses ("stale") if it changed
+      // under its lock since.
+      expectedMd5: found.post.md5,
     });
   } catch (err) {
     log(`[replace] the booru did not answer for post #${postId}: ${err && err.message}`);
@@ -227,20 +243,24 @@ async function handleReplace(event, deps) {
   const status = res ? res.status : 0;
   const data = res && res.data;
   if (!(status >= 200 && status < 300)) {
-    record("replace_refused", { post: postId, status });
-    if (status === 403) {
-      log(`[replace] post #${postId}: the booru refused ${event.sender} as its creator (403) ${JSON.stringify(data && { error: data.error, fix: data.fix })}`);
-      await say(`The booru does not record you as the creator of post #${postId}, so it keeps the old version.`);
+    const reason = data && typeof data.reason === "string" ? data.reason : null;
+    record("replace_refused", { post: postId, status, reason });
+    // 404 is missing, deleted, jailed or quarantined: nothing to say about a
+    // post this account may not name.
+    if (status === 404) return true;
+    // The booru's body is {success:false, error, message, fix, reason}. The
+    // MESSAGE is for the person; the fix is for whoever runs the site, so it
+    // goes to the journal and never into the room.
+    log(`[replace] post #${postId}: refused (${status}${reason ? `, ${reason}` : ""}): ${JSON.stringify(data && { error: data.error, fix: data.fix })}`);
+    const message = data && typeof data.message === "string" && data.message.trim() ? scrub(data.message.trim()) : null;
+    if (message) {
+      await say(`The booru did not take the new version of post #${postId}: ${message}`);
     } else if (status === 422 || status === 400) {
       const reasons = refusalReasons(data);
       await say(reasons.length
         ? `The booru refused the new version of post #${postId}, so it keeps the old one:\n${reasons.map((r) => `- ${r}`).join("\n")}`
         : `The booru refused the new version of post #${postId} without saying why, so it keeps the old one.`);
-    } else if (status === 404) {
-      log("[replace] the booru answered 404 on the replacement route: it does not take creator replacements yet; turn bridge.replace.enabled off until it does");
-      await say(`The booru does not take replacements yet, so post #${postId} keeps the old version.`);
     } else {
-      log(`[replace] unexpected answer from the booru for post #${postId} (${status})`);
       await say(`The booru gave an answer I did not expect, so I cannot say whether post #${postId} has the new version. An admin can check its replacement history.`);
     }
     return true;

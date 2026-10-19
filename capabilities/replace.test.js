@@ -40,7 +40,7 @@ function harness({ original = ORIG, enabled = true, post = { id: 9, md5: "oldmd5
     readEvent: async () => original,
     canonicalize: async (id, opts) => {
       if (id === "OLD") return { kind: "canonical", md5: "oldmd5", raw_md5: "oldraw" };
-      return canonNew || { kind: "canonical", md5: "newmd5", raw_md5: "newraw", media_type: "image/png", removed: { parameters: "1girl" }, booru: { status: "completed", upload_media_asset_id: 55 }, opts };
+      return canonNew || { kind: "canonical", md5: "newmd5", raw_md5: "newraw", media_type: "image/png", uploader: "@ann:41chan.net", removed: { parameters: "1girl" }, booru: { status: "completed", upload_media_asset_id: 55 }, opts };
     },
     uploadMediaAssetFor: async (c) => c.booru.upload_media_asset_id,
     findPost: async ({ strippedMd5 }) => (strippedMd5 === "oldmd5" && post ? { post } : null),
@@ -89,7 +89,7 @@ test("the creator's picture edit replaces the post's file with the new upload's 
   const h = harness();
   assert.equal(await handleReplace(edit(), h.deps), true);
   assert.equal(h.replaced.length, 1);
-  assert.deepEqual(h.replaced[0], { id: 9, body: { uploadMediaAssetId: 55, finalSource: "mxc://41chan.net/NEW", onBehalfOf: "@ann:41chan.net", oldFile: "keep" } });
+  assert.deepEqual(h.replaced[0], { id: 9, body: { uploadMediaAssetId: 55, finalSource: "mxc://41chan.net/NEW", onBehalfOf: "@ann:41chan.net", oldFile: "keep", expectedMd5: "oldmd5" } });
   assert.equal(h.recorded[0].partition.replace_creator, true);
   assert.deepEqual(h.recorded[0].partition.creator, ["1girl"]);
   assert.match(h.said[0], /post #9 now has the new version \(512x512 -> 2048x2048\)\. All \d+ copies of it now show the new version\. The old version is kept on record\./);
@@ -159,19 +159,43 @@ test("the same file as the post already has: nothing to do", async () => {
   assert.equal(h.replaced.length, 0);
 });
 
-test("the booru's refusals, in words: 403 not the creator, 422 reasons, 404 no door yet -- and never an address", async () => {
+test("the booru's refusals: its MESSAGE relayed (never its fix), 422 reasons, a 404 silent -- and never an address", async () => {
   for (const [booru, want] of [
-    [{ status: 403, data: { error: "not the creator", fix: "x" } }, /does not record you as the creator of post #9/],
+    [{ status: 403, data: { success: false, error: "Forbidden", message: "Only the post's creator can replace it.", fix: "ops: check FourierPostCreator", reason: "not_creator" } }, /did not take the new version of post #9: Only the post's creator can replace it\./],
+    [{ status: 422, data: { success: false, message: "The post changed while you were replacing it. Try again.", reason: "stale" } }, /The post changed while you were replacing it/],
     [{ status: 422, data: { errors: [{ reason: "these bytes are already post #12" }] } }, /refused the new version of post #9[\s\S]*already post #12/],
-    [{ status: 404, data: {} }, /does not take replacements yet/],
-    [{ status: 500, data: { message: "boom at danbooru:3000" } }, /did not expect/],
+    [{ status: 500, data: {} }, /did not expect/],
+    [{ status: 403, data: { message: "see http://10.0.0.1:3000" } }, /\[address removed\]/],
   ]) {
     const h = harness({ booru });
     await handleReplace(edit(), h.deps);
     assert.match(h.said[0], want);
+    assert.doesNotMatch(h.said[0], /FourierPostCreator|ops:/);
     assert.doesNotMatch(h.said[0], /https?:\/\/|\d+\.\d+\.\d+\.\d+|[a-z0-9-]+:\d{2,5}\b/i);
     assert.equal(h.recorded.length, 0);
   }
+  const silent = harness({ booru: { status: 404, data: { message: "not found" } } });
+  await handleReplace(edit(), silent.deps);
+  assert.equal(silent.said.length, 0, "a 404 is missing, deleted, jailed or quarantined: nothing is said");
+});
+
+test("SPOOFING: a new picture someone else uploaded is refused, and canon is never told the editor is its poster", async () => {
+  const seen = [];
+  const h = harness({ canonNew: { kind: "canonical", md5: "theirs", raw_md5: "r", uploader: "@bob:41chan.net", booru: { status: "completed", upload_media_asset_id: 7 } } });
+  const canon = h.deps.canonicalize;
+  h.deps.canonicalize = async (id, opts) => { seen.push(opts); return canon(id, opts); };
+  await handleReplace(edit(), h.deps);
+  assert.equal(h.replaced.length, 0);
+  assert.equal(h.repoints.length, 0);
+  assert.match(h.said[0], /only be replaced with one you uploaded yourself/);
+  assert.ok(seen.every((o) => !o || o.poster === undefined), "no poster is ever passed to canon");
+});
+
+test("a deleted post is no post: nothing replaced, nothing said", async () => {
+  const h = harness({ post: { id: 9, md5: "oldmd5", is_deleted: true } });
+  await handleReplace(edit(), h.deps);
+  assert.equal(h.replaced.length, 0);
+  assert.equal(h.said.length, 0);
 });
 
 test("after the swap, a failed follow-up is named in the reply and the replacement still stands", async () => {

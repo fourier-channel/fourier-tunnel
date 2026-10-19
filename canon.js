@@ -918,6 +918,15 @@ function createCanon({ store, mediaInfo, booru, log = () => {}, booruWaitMs = BO
       try {
         const idx = await readIndex(id);
         if (!idx || idx.kind !== "canonical") { skipped.push({ id, why: idx ? idx.kind : "no index" }); continue; }
+        // ONLY A COPY OF THE OLD FILE. "Replaced everywhere" is every copy
+        // that actually carries the old bytes; an id that serves anything else
+        // -- a forged tag state, a different picture -- is never re-pointed,
+        // or it would serve the new picture somewhere it was never posted.
+        // An id already serving the new file is done, not skipped.
+        if (idx.key !== target.key && idx.md5 !== oldMd5 && idx.raw_md5 !== oldMd5) {
+          skipped.push({ id, why: "carries other bytes" });
+          continue;
+        }
         if (idx.key !== target.key) {
           await writeIndex(id, {
             ...target,

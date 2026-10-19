@@ -702,3 +702,18 @@ test("a re-pointed media id reads its prompt from the picture that replaced it, 
   assert.match(JSON.stringify(out.removed), /1girl/);
   assert.doesNotMatch(JSON.stringify(out.removed), /1boy/);
 });
+
+test("repoint: a media id serving anything but the old bytes is never re-pointed (a forged copy would show the new picture where it was never posted)", async () => {
+  const OLD = "1".repeat(32), NEW = "2".repeat(32), OTHER = "3".repeat(32);
+  const idx = (md5, raw = md5) => ({ body: Buffer.from(JSON.stringify({ kind: "canonical", key: `media/${md5}.png`, md5, raw_md5: raw, media_type: "image/png" })), type: "application/json" });
+  const store = fakeStore({
+    [keys.index("copyAAAA")]: idx(OLD),
+    [keys.index("rawcopyB")]: idx("4".repeat(32), OLD),
+    [keys.index("forgedCC")]: idx(OTHER),
+  });
+  const canon = createCanon({ store, mediaInfo: async () => null, booru: fakeBooru() });
+  const rec = await canon.repoint({ mediaIds: ["copyAAAA", "rawcopyB", "forgedCC"], to: { kind: "canonical", key: `media/${NEW}.png`, md5: NEW }, toMediaId: "newpicZZ", postId: 5, oldMd5: OLD });
+  assert.deepEqual(rec.media_ids, ["copyAAAA", "rawcopyB"]);
+  assert.deepEqual(rec.skipped, [{ id: "forgedCC", why: "carries other bytes" }]);
+  assert.equal((await canon.readIndex("forgedCC")).md5, OTHER, "the forged id still serves its own file");
+});
