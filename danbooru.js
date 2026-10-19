@@ -381,6 +381,19 @@ class DanbooruClient {
     await this._client().post("/artists.json", { artist: { name } }, { validateStatus: () => true });
   }
 
+  // File a bulk update request (capabilities/bur.js). Basic auth, so the key
+  // stays out of access logs. Every status comes back to the caller, which
+  // decides what the room is told: a 422 is the booru's verdict on the
+  // script, not a failure of this call.
+  async createBulkUpdateRequest({ script, title, reason }) {
+    const resp = await this._raw().post(
+      "/bulk_update_requests.json",
+      { bulk_update_request: { script, title, reason } },
+      { validateStatus: () => true, maxRedirects: 0 },
+    );
+    return { status: resp.status, data: resp.data };
+  }
+
   async updateTags(postId, newTagString, oldTagString = "") {
     const resp = await this._client().put(`/posts/${postId}.json`, {
       post: {

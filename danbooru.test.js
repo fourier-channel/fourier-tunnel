@@ -423,3 +423,14 @@ test("the create path's tag_sources write: Basic header, no key in the URL, and 
     b.close();
   }
 });
+
+test("createBulkUpdateRequest: Basic auth, the BUR body nested as Rails expects, every status returned rather than thrown", async () => {
+  const { c, sent } = client({ status: 422, data: { errors: { script: ["Unknown line"] } } });
+  const out = await c.createBulkUpdateRequest({ script: "alias a -> b", title: "t", reason: "r" });
+  assert.deepEqual(out, { status: 422, data: { errors: { script: ["Unknown line"] } } });
+  assert.equal(sent[0].method, "POST");
+  assert.equal(sent[0].url, "/bulk_update_requests.json");
+  assert.equal(sent[0].opts.auth, "basic");
+  assert.deepEqual(sent[0].body, { bulk_update_request: { script: "alias a -> b", title: "t", reason: "r" } });
+  assert.equal(sent[0].opts.validateStatus(500), true);
+});

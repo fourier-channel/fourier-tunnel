@@ -11,6 +11,7 @@ const invites = require("./invites");
 const avatarCapability = require("./capabilities/avatar");
 const rooms = require("./rooms");
 const rescanCapability = require("./capabilities/rescan");
+const burCapability = require("./capabilities/bur");
 const listrooms = require("./listrooms");
 const poster = require("./poster");
 const backfill = require("./backfill");
@@ -1314,6 +1315,38 @@ async function handleRescanCommand(bridge, event) {
   return rescanCapability.handleRescanCommand(event, rescanDeps(bridge));
 }
 
+// !bur in the BUR room: file a bulk update request for someone at Voice or
+// higher there (capabilities/bur.js). The power levels are read fresh on every
+// command; the event ids seen are kept so a redelivered transaction files once.
+const burSeen = new Set();
+async function handleBurCommand(bridge, event) {
+  const intent = bridge.getIntent();
+  return burCapability.handleBurCommand(event, {
+    settings: config.bridge.bur,
+    botUserId: `@${_reg.sender_localpart}:${config.homeserver.domain}`,
+    readPowerLevels: (room) => intent.getStateEvent(room, "m.room.power_levels", ""),
+    // format=event, because a v12 room's creator is the create event's SENDER
+    // (unlimited power, never listed in users) and the plain state read
+    // returns content only.
+    readCreate: async (room) => {
+      const base = config.homeserver.url.replace(/\/+$/, "");
+      const botUserId = `@${_reg.sender_localpart}:${config.homeserver.domain}`;
+      const res = await fetch(
+        `${base}/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/m.room.create/?format=event&user_id=${encodeURIComponent(botUserId)}`,
+        { headers: { Authorization: `Bearer ${AS_TOKEN}` } },
+      );
+      if (!res.ok) throw new Error(`m.room.create ${res.status}`);
+      const ev = await res.json();
+      // Older servers ignore format=event and answer with the content alone.
+      return ev && ev.content && ev.type === "m.room.create" ? { content: ev.content, sender: ev.sender } : { content: ev, sender: null };
+    },
+    createBur: (body) => danbooru.createBulkUpdateRequest(body),
+    sendMessage: (room, content) => intent.sendMessage(room, content),
+    audit: invites.audit,
+    seen: burSeen,
+  });
+}
+
 // The bridge bot's !setavatar, through the shared capability.
 //
 // The body used to live here AND again in onboarding.js, and the two had
@@ -1447,6 +1480,7 @@ new Cli({
               if (await handleRoomDenyCommands(bridge, event)) return;
               if (await handleListRoomsCommand(bridge, event)) return;
               if (await handleBackfillCommand(bridge, event)) return;
+              if (await handleBurCommand(bridge, event)) return;
               if (await handleRescanCommand(bridge, event)) return;
               // Avatar-setting flow (admin DM) -- checked before tagging
               if (await handleAvatarFlow(bridge, event)) return;

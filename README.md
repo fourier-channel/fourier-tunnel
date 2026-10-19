@@ -356,6 +356,23 @@ Sender must be in `bridge.admins`.
   uploads, never re-runs the autotagger, never records or changes the post's
   creator (`capabilities/rescan.js`).
 
+### The BUR command
+
+Sender must hold `bridge.bur.power_level` (default 25, Voice -- Technetium's
+`+`) in `bridge.bur.room`, read fresh from that room's power levels on every
+command. Nobody else's list decides it: giving someone a `+` in that room is
+the grant, and taking it away revokes it.
+
+- `!bur <reason>` -- in the BUR room, followed by one booru BUR script line per
+  line (`alias a -> b`, `imply a -> b`, `update a -> b`, ...). She files it on
+  the booru under her own account, with the reason, the requester and the
+  Matrix event id in the BUR's reason, and replies with the BUR's number under
+  `net.41chan.bur` -- a pointer Technetium draws as a live card where an admin
+  approves or rejects it. She never approves anything. The booru's refusal of
+  a script is relayed line by line, scrubbed of anything address-shaped
+  (`capabilities/bur.js`). Absent `bridge.bur.room` the command says it is
+  switched off.
+
 ---
 
 ## Tests
