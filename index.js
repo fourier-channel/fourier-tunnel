@@ -1472,6 +1472,11 @@ new Cli({
       homeserverUrl: config.homeserver.url,
       domain: config.homeserver.domain,
       registration: "tunnel-registration.yaml",
+      // The tunnel keeps its own state (state/, the canon) and never reads the
+      // library's user or room stores. matrix-appservice-bridge 12 removed its
+      // nedb default, so without this every event dies in getBridgeContext
+      // before onEvent sees it. bridge-runtime.test.js holds both halves.
+      disableStores: true,
       controller: {
         onUserQuery: function () {
           return {};

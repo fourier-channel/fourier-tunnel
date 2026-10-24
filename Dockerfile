@@ -1,12 +1,12 @@
-FROM node:22-slim
+FROM node:24-slim
 
 WORKDIR /app
 
-# NODE 22, AND NO HIGHER. Node 20 reached upstream end of life 2026-04-30. Node
-# 23 removed util.isDate, which nedb -- matrix-appservice-bridge's user and room
-# stores -- calls on the first write, so 23 and 24 crash the bridge.
-# package.json `engines` names the range, .npmrc makes npm enforce it during the
-# build below, and nedb-compat.test.js holds this line inside it.
+# NODE 24. Pinned to 22 until 2026-10-24 because nedb, matrix-appservice-bridge
+# 11's store, called util.isDate, which Node 23 removed; bridge 12 dropped nedb
+# and requires Node >=24. package.json `engines` names the range, .npmrc makes
+# npm enforce it during the build below, and bridge-runtime.test.js holds this
+# line inside it.
 
 # Install dependencies first so this layer caches unless package files change.
 # `npm ci`, not `npm install`: exactly the lockfile, or the build fails.

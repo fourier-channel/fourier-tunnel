@@ -3,11 +3,11 @@
      Edit canon and run `coherence hydrate`, never this delivered copy.
      An edit here is drift: hydration will refuse to overwrite it and the
      doc axis reports it edited-in-place until someone promotes or discards it. -->
-# Fourier — BMB (Booru-Matrix Bridge) Dev Log
+# Fourier -- BMB (Booru-Matrix Bridge) Dev Log
 
 **Project:** Fourier (targeted data aggregation, classification, storage)
 **Component:** BMB (Booru-Matrix Bridge)
-**Location:** /opt/fourier/tunnel/  ·  Repo: fourier-channel/fourier-tunnel
+**Location:** /opt/fourier/tunnel/  |  Repo: fourier-channel/fourier-tunnel
 **Status:** Core pipeline built, deployed, and verified end to end.
 
 ---
@@ -43,7 +43,7 @@ Key design decisions:
 
 - No duplicate storage by design. The bridge stores the MXC URI as the link between systems.
   Synapse owns the media (in R2); Danbooru is fed a copy for processing/tagging. Permission
-  enforcement stays with Synapse's authenticated media API — possessing an MXC URI does not
+  enforcement stays with Synapse's authenticated media API -- possessing an MXC URI does not
   grant access to the bytes.
 - Authenticated media confirmed on (enable_authenticated_media: true), so the legacy
   unauthenticated media endpoint is not a leak vector for exposed MXC URIs.
@@ -56,17 +56,17 @@ Key design decisions:
 
 All under /opt/fourier/bmb/:
 
-- index.js — Main bridge: appservice setup, event routing, image pipeline, invite routing,
+- index.js -- Main bridge: appservice setup, event routing, image pipeline, invite routing,
   admin commands, avatar flow.
-- danbooru.js — Danbooru API client: multipart byte upload, poll, create post, read/update tags.
-- invites.js — Invite authorization: strike state, audit log, Fibonacci timeouts, power-level
+- danbooru.js -- Danbooru API client: multipart byte upload, poll, create post, read/update tags.
+- invites.js -- Invite authorization: strike state, audit log, Fibonacci timeouts, power-level
   extraction, rejection messages.
-- config.yaml — Settings, Danbooru credentials, admin list, power-level thresholds, DM toggle.
-- bmb-registration.yaml — Appservice registration (also copied into Synapse's data dir).
-- Dockerfile — Node 20 image build.
-- docker-compose.yaml — Runs as container bmb on synapse_default and danbooru_default networks.
-- strikes.json (runtime) — persistent per-user strike counts.
-- audit.log (runtime) — JSONL audit trail of invite decisions.
+- config.yaml -- Settings, Danbooru credentials, admin list, power-level thresholds, DM toggle.
+- bmb-registration.yaml -- Appservice registration (also copied into Synapse's data dir).
+- Dockerfile -- Node 20 image build.
+- docker-compose.yaml -- Runs as container bmb on synapse_default and danbooru_default networks.
+- strikes.json (runtime) -- persistent per-user strike counts.
+- audit.log (runtime) -- JSONL audit trail of invite decisions.
 
 ---
 
@@ -75,7 +75,7 @@ All under /opt/fourier/bmb/:
 The bot only operates in rooms it is invited to, and self-polices who may invite it.
 
 - Anyone may attempt to invite the bot. The bot reads only the room's m.room.power_levels
-  event to decide — nothing else — preserving privacy.
+  event to decide -- nothing else -- preserving privacy.
 - Required power level to invite: 100 (configurable via invite_power_level).
 - Fast path: the bot reads the inviter's power level from the invite's stripped state
   (invite_room_state), which Synapse includes by default, and decides without joining. So
@@ -104,10 +104,10 @@ All invite decisions are appended to audit.log as JSONL for later abuse analysis
 
 - The bot must be power level 50 in a room to write the net.41chan.media.tags state event
   (Matrix state_default). Current approach: the inviting admin grants the bot PL 50 on invite.
-- Auto-created posts use a default rating of q (questionable) — the most conservative sensible
+- Auto-created posts use a default rating of q (questionable) -- the most conservative sensible
   default for arbitrary uploads; correct later via tag editing.
 - Danbooru's autotagger (danbooru-autotagger-1, reachable as autotagger:5000) runs automatically
-  during Danbooru's own upload processing — the bridge does not call it directly.
+  during Danbooru's own upload processing -- the bridge does not call it directly.
 - Posts created by the bmb Danbooru account (Builder level) land as is_pending: true (moderation
   queue). Worth revisiting if auto-approval is desired.
 
@@ -146,7 +146,7 @@ All invite decisions are appended to audit.log as JSONL for later abuse analysis
   per network and each connection negotiates its own MSS, so the mismatch is benign here.
 - Appservice user provisioning: the bot user @bmb had to be explicitly registered via the
   appservice /register endpoint (m.login.application_service with the as_token) before invites
-  worked — ensureRegistered() reported success from cache without writing a user row, causing
+  worked -- ensureRegistered() reported success from cache without writing a user row, causing
   profile lookups to 404.
 - Image storage permissions: Danbooru's /images bind mount (/mnt/storage/danbooru-images) was
   root-owned; the container runs as uid 1000, so it could not write variant directories. Fixed
@@ -207,20 +207,20 @@ Development log for the Fourier BMB build.
 never been invited to, despite being a member of only one real room.
 
 **Root cause (the actual leak):** `bmb-registration.yaml` had a second `users`
-namespace entry — `{ exclusive: false, regex: "@.*" }` — alongside the intended
+namespace entry -- `{ exclusive: false, regex: "@.*" }` -- alongside the intended
 exclusive `@bmb` claim. Appservice event routing delivers a service all events
 in any room containing a user that matches its user namespace. `@.*` matches
 every user, so every room matched, and Synapse firehosed ALL room events
 homeserver-wide to BMB. The invite gate was never involved because no
-invite/join was needed — events arrived directly. `rooms: []` was correct and
+invite/join was needed -- events arrived directly. `rooms: []` was correct and
 not the cause; the leak was entirely the wildcard user namespace.
 
 **Fix (two layers, defense-in-depth):**
 1. Registration: removed the `@.*` entry, leaving only the exclusive `@bmb`
    claim. Now Synapse only delivers events for rooms the bot is actually in.
-   (This file is gitignored; the fix is not in git history — recorded here.)
+   (This file is gitignored; the fix is not in git history -- recorded here.)
 2. Code (committed): added `botIsJoined()` and an `onEvent` guard that returns
-   early — ACKing the transaction — for any non-invite event from a room the bot
+   early -- ACKing the transaction -- for any non-invite event from a room the bot
    isn't joined to, instead of trying to act/join and erroring. Sits after the
    invite block so invite authorization is unaffected.
 
@@ -264,12 +264,12 @@ misleading startup error.
 
 **Problem:** Re-posting an already-uploaded image produced `[error] onEvent:
 Request failed with status code 500`. Danbooru-side cause (this fork):
-`PG::InFailedSqlTransaction` at `upload.rb:187 process_upload!` — a duplicate
+`PG::InFailedSqlTransaction` at `upload.rb:187 process_upload!` -- a duplicate
 md5 trips a failed statement, and the transaction stays poisoned, returning 500
 rather than a clean duplicate response.
 
 **Fix (BMB side, the correct place):**
-- `danbooru.js`: `findPostByMd5(md5)` — queries `GET /posts.json?tags=md5:<hash>`
+- `danbooru.js`: `findPostByMd5(md5)` -- queries `GET /posts.json?tags=md5:<hash>`
   and returns the existing post or null.
 - `index.js` `handleImageEvent`: after downloading the bytes, compute the md5
   (`crypto`), call `findPostByMd5`. If a post exists, write the room's
@@ -285,7 +285,7 @@ uploads* (Synapse mints a fresh MXC per upload by design). Pre-upload dedup at
 drag time is a planned feature for the custom Matrix client, where the md5 check
 can happen before the bytes reach Synapse and an existing MXC can be reused.
 
-**Verified:** new images tag normally (#19–#21); a re-post of #21 logged
+**Verified:** new images tag normally (#19-#21); a re-post of #21 logged
 `[skip] duplicate md5 ... -> existing post #21` with no 500; md5 granularity
 correctly distinguished a lowres vs highres variant as separate posts.
 
@@ -513,3 +513,28 @@ that qualifier, as the booru reads it, never as a legacy form.
 2026-10-12 correction, tests first: 13 red across prompt-tags, image-plan,
 discordPost, index and rescan, plus a Discord refusal-log test red against
 the old discordPost.js; then green.
+
+## 2026-10-24 -- matrix-appservice-bridge 12; the container moves to Node 24
+
+Dependabot fourier-tunnel#1 and #5 (critical) and #7, #10 (high): underscore
+1.4.4 under nedb, and form-data 2.3.3 under request under bot-sdk 0.8, both
+pinned by bridge 11's own ranges. Bridge 12.0.1 (2026-09-24) removes nedb,
+request and tough-cookie outright and requires Node >=24, which also ends the
+Node 22 ceiling the 2026-10-01 entry above recorded.
+
+One behaviour change, measured before it shipped: bridge 12 has no default
+stores, and a Bridge given none and not told `disableStores` throws "Cannot
+call getBridgeContext before loading databases" from an un-awaited event
+listener. On Node 24 that is an unhandled rejection: the process dies on the
+first event and restarts into the same death. The tunnel never read the
+library's stores, so index.js passes `disableStores: true`.
+bridge-runtime.test.js replaces nedb-compat.test.js (renamed .superseded):
+it holds engines, engine-strict and the Dockerfile together, sends a real
+transaction to a real Bridge and sees onEvent, and in a child shows the
+process dying without the flag. Removing the flag from index.js turns it red.
+
+Still open: #17 ip-address 7.1.0 under ip-cidr 3.1.0, which bridge 12 still
+declares. No ip-cidr release takes a fixed ip-address (4.0.2 wants ^9), and
+an override to 10.7.4 breaks ip-cidr's constructor (bigInteger is gone). The
+library reaches ip-cidr only from its provisioning API, which the tunnel
+does not construct.

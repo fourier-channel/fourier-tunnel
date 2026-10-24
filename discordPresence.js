@@ -23,12 +23,12 @@ const { decide } = require("./discordGateway.js");
 // two mutation checks behind it, and a socket is the one thing that cannot be
 // tested that way.
 //
-// THE WebSocket IS INJECTED. Node 22+ ships a global; this container is pinned
-// to node:20-slim by a transitive dependency, where one may not exist. Injecting
-// it means the deployment picks (`globalThis.WebSocket` or the `ws` package)
-// without this file guessing -- and it is also what lets the whole state machine
-// be driven by a fake socket in tests, which is the only way heartbeats, zombies,
-// resumes and budget exhaustion get exercised deterministically.
+// THE WebSocket IS INJECTED. Node 22+ ships a global and this container runs
+// node:24-slim, but the deployment still picks (`globalThis.WebSocket` or the
+// `ws` package) without this file guessing -- and injecting it is also what
+// lets the whole state machine be driven by a fake socket in tests, which is
+// the only way heartbeats, zombies, resumes and budget exhaustion get
+// exercised deterministically.
 
 const OP_DISPATCH = 0;
 const OP_HEARTBEAT = 1;

@@ -191,14 +191,15 @@ the newest message with `!backfill restart`.
   it nothing is tagged.
 - **Docker** + **Docker Compose**; the bridge must share Docker networks with
   Synapse, the booru and the tagger.
-- Node 22 inside the container, and no higher: nedb (loaded by
-  matrix-appservice-bridge for its user and room stores) calls
-  `util.isDate`, which Node 23 removed, so the bridge crashes on 23 and 24.
-  `package.json` `engines` (`>=22 <23`) with `engine-strict` in `.npmrc`
-  makes npm refuse any other Node, and `nedb-compat.test.js` measures the
-  boundary on every run. A host `npm install` on another Node is refused too:
-  install under Node 22, and `npm run test:image` runs the suite on the
-  Dockerfile's base image.
+- Node 24 inside the container: matrix-appservice-bridge 12 requires it.
+  `package.json` `engines` (`>=24 <25`) with `engine-strict` in `.npmrc`
+  makes npm refuse any other Node, the image build included. A host
+  `npm install` on another Node is refused too: install under Node 24, and
+  `npm run test:image` runs the suite on the Dockerfile's base image.
+  `bridge-runtime.test.js` holds the three together and drives the library
+  with a real transaction: the bridge is built with `disableStores`, because
+  bridge 12 has no default stores and without the flag the first event kills
+  the process.
 
 ---
 
