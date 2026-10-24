@@ -23,5 +23,10 @@
   },
   "devDependencies": {
     "eslint": "^10.10.0"
+  },
+  "overrides": {
+    "ip-cidr": {
+      "ip-address": "^10.7.4"
+    }
   }
 }

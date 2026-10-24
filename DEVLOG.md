@@ -538,3 +538,21 @@ declares. No ip-cidr release takes a fixed ip-address (4.0.2 wants ^9), and
 an override to 10.7.4 breaks ip-cidr's constructor (bigInteger is gone). The
 library reaches ip-cidr only from its provisioning API, which the tunnel
 does not construct.
+
+## 2026-10-24 -- ip-address is overridden under ip-cidr (#17)
+
+Dependabot fourier-tunnel#17 (high, GHSA-mwp4-54f8-5fhr): ip-address <= 10.3.0
+reads a leading-zero IPv4 octet as decimal where resolvers read octal. The
+entry above left it open because an override breaks ip-cidr's constructor.
+That is still true -- every ip-cidr release calls bigInteger(), which
+ip-address 10 renamed to bigInt() on native bigint -- but the constructor is
+code the tunnel never runs: the library builds an IPCIDR only inside
+ProvisioningApi, which it re-exports at load and never constructs, and the
+tunnel has never used it. So package.json `overrides` puts ip-address ^10.7.4
+(10.7.4, 2026-10-11) under ip-cidr; the library still loads.
+
+ip-cidr-override.test.js measures each half: ip-cidr resolves a fixed
+ip-address that refuses "010.0.0.1"; the bridge library loads; IPCIDR cannot be
+constructed (if a release learns the new API, that test says the override is
+now free); and nothing in the tunnel's own source names ProvisioningApi
+(sabotaged with a file that did: red).
