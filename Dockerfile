@@ -13,6 +13,13 @@ WORKDIR /app
 COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev
 
+# The npm CLI is a build tool: the bridge and its operator tools run under
+# `node`, and nothing in the container calls npm. Left in, its bundled
+# packages (brace-expansion, undici) were every High finding in this image's
+# nightly vulnerability scan (2026-10-25), none reachable from the bridge.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+
 # Copy ALL application source. Glob (not an explicit allowlist) so a newly added
 # module can never be silently left out of the image -- that omission crash-looped
 # this bridge before (autotagger.js, then prompt-tags.js). Non-runtime files are
