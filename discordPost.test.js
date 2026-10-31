@@ -202,6 +202,15 @@ test("a booru that cannot be reached holds the message for the next cycle", asyn
   await assert.rejects(deliverer(f.booru).d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() }), acq.Transient);
 });
 
+test("the booru's verdict on the file is final; its failing at the moment is not", async () => {
+  const uploadError = (why) => async () => { throw Object.assign(new Error(`Upload 1 failed: ${why}`), { code: "UPLOAD_ERROR", uploadError: why }); };
+  const wide = fakeBooru({ waitForUpload: uploadError("Image width is too large (width: 46944; max width: 40000)") });
+  const r = await deliverer(wide.booru).d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() });
+  assert.match(r.refused, /width is too large/, "the watermark moves past it instead of stopping the channel for good");
+  const busy = fakeBooru({ waitForUpload: uploadError("PG::ConnectionBad: could not connect to server") });
+  await assert.rejects(deliverer(busy.booru).d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() }), acq.Transient);
+});
+
 test("a hidden duplicate and a named duplicate are both final, never retried", async () => {
   const hidden = fakeBooru({ createPost: async () => { const e = new BooruRefusal("unpostable", 422, {}); e.reason = "unpostable"; throw e; } });
   const r1 = await deliverer(hidden.booru).d.deliver({ channel: CHANNEL, msg: msg(), att: att(), bytes: png() });

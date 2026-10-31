@@ -1,6 +1,6 @@
 "use strict";
 
-const { BooruDuplicate, BooruRefusal } = require("./danbooru");
+const { BooruDuplicate, BooruRefusal, BOORU_VERDICT } = require("./danbooru");
 const { stripGeneration } = require("./strip-generation");
 const imagePlan = require("./image-plan");
 const poster = require("./poster");
@@ -119,6 +119,12 @@ async function postAttachment(deps, { channel, msg, att, bytes }) {
   } catch (err) {
     if (err instanceof BooruRefusal && err.status >= 400 && err.status < 500) {
       return { refused: `the booru refused the upload of ${JSON.stringify(att.filename)}: ${err.message}` };
+    }
+    // The booru took the upload, looked at the file and said no (46944 px
+    // wide, say). Retrying those bytes gets the same answer, and holding the
+    // watermark on it stops the channel for good.
+    if (err && err.code === "UPLOAD_ERROR" && BOORU_VERDICT.test(String(err.uploadError || err.message))) {
+      return { refused: `the booru refused ${JSON.stringify(att.filename)}: ${err.uploadError || err.message}` };
     }
     throw new Transient(`uploading ${JSON.stringify(att.filename)} failed: ${err.message}`);
   }

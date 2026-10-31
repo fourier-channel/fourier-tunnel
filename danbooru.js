@@ -460,6 +460,11 @@ class QuarantineUnreadable extends Error {
   }
 }
 
+// What the booru says about a FILE, as opposed to about itself at the moment:
+// an upload error matching this is its verdict on those bytes and is final.
+// Danbooru's MediaAsset.validate_media_file! and MediaFile's own checks.
+const BOORU_VERDICT = /not an image|not supported|too large|is corrupt|resolution is too large|too long/i;
+
 // A booru answer that is not success, told by its status and, where the booru
 // gives one, its machine-readable `reason`. The message names the endpoint,
 // the status, the reason and the booru's own { error, fix } -- never a field
@@ -523,4 +528,4 @@ function refusal(what, resp) {
   return new BooruRefusal(`${what} -> ${resp.status}${reason}${why ? `: ${why}` : ": the booru gave no reason"}`, resp.status, body);
 }
 
-module.exports = { DanbooruClient, BooruRefusal, BooruDuplicate, QuarantineUnreadable, mxcVerdict, sleep };
+module.exports = { DanbooruClient, BooruRefusal, BooruDuplicate, QuarantineUnreadable, BOORU_VERDICT, mxcVerdict, sleep };

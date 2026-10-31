@@ -30,6 +30,12 @@ const { stripGeneration } = require("./strip-generation.js");
 //     URL is used in the cycle that listed it and NEVER persisted or logged:
 //     a download that fails leaves the watermark behind its message, and the
 //     next cycle re-lists it and gets a new URL.
+//   - An attachment's `size` and `content_type` are NOT the file's
+//     (measured 2026-10-31): they describe Discord's re-encoded copy, the one
+//     `proxy_url` serves, while `url` serves the original, larger and in its
+//     own format. So a download is checked against the CDN's own
+//     Content-Length, never against `size`; comparing the two stopped 116 of
+//     169 channels for days, each on its first re-encoded upload.
 //   - MESSAGE CONTENT gates the HTTP API, not only the gateway. Without it a
 //     human's message arrives with empty content AND empty attachments, which
 //     looks exactly like a channel with nothing in it. Discord never stores an
@@ -278,8 +284,12 @@ class DiscordHttp {
     }
   }
 
-  /** Download an attachment from its signed URL. No credential is sent to the CDN. */
-  async download(url, expectedSize, maxBytes) {
+  /**
+   * Download an attachment from its signed URL. No credential is sent to the CDN.
+   * Truncation is judged against the response's own Content-Length: Discord's
+   * declared `size` describes its re-encode, not these bytes (header above).
+   */
+  async download(url, maxBytes) {
     await this.#wait();
     this.requests++;
     let res;
@@ -291,8 +301,11 @@ class DiscordHttp {
     if (res.status !== 200) throw new Transient(`download of ${redactUrl(url)} answered ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > maxBytes) throw new Transient(`download of ${redactUrl(url)} was ${buf.length} bytes, over the ${maxBytes}-byte cap`);
-    if (Number.isFinite(expectedSize) && expectedSize > 0 && buf.length !== expectedSize) {
-      throw new Transient(`download of ${redactUrl(url)} was ${buf.length} bytes; Discord said ${expectedSize}. Treated as truncated.`);
+    // A content-encoded body's Content-Length counts the encoded bytes, so it
+    // proves nothing about the decoded length; only an identity body is checked.
+    const declared = !res.headers.get("content-encoding") ? Number(res.headers.get("content-length")) : NaN;
+    if (Number.isFinite(declared) && declared > 0 && buf.length !== declared) {
+      throw new Transient(`download of ${redactUrl(url)} was ${buf.length} bytes; the CDN said ${declared}. Treated as truncated.`);
     }
     return buf;
   }
@@ -414,7 +427,7 @@ async function deliverAttachment(ctx, channel, msg, att) {
   if (Number(att.size) > ctx.maxBytes) {
     return { refused: `${JSON.stringify(att.filename)} is ${att.size} bytes, over the ${ctx.maxBytes}-byte cap` };
   }
-  const bytes = await ctx.http.download(att.url, Number(att.size), ctx.maxBytes);
+  const bytes = await ctx.http.download(att.url, ctx.maxBytes);
   return ctx.deliver.deliver({ channel, msg, att, bytes });
 }
 

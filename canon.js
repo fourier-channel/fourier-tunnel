@@ -59,6 +59,7 @@ const {
 } = require("@aws-sdk/client-s3");
 const { stripGeneration } = require("./strip-generation");
 const { findPostForBytes } = require("./image-plan");
+const { BOORU_VERDICT } = require("./danbooru");
 
 // Media types the stripper handles, and the extension the booru gives them.
 // Danbooru names a JPEG ".jpg", and the canonical key must match the key the
@@ -87,9 +88,6 @@ const BOORU_WAIT_MS = 15 * 1000;
 //   refused    the booru looked at the file and said no (a type it does not
 //              take, too large, corrupt): its verdict, not retried
 const BOORU_SETTLED = new Set(["completed", "held", "refused"]);
-// What the booru says about a FILE, as opposed to about itself at the moment.
-// Danbooru's MediaAsset.validate_media_file! and MediaFile's own checks.
-const BOORU_VERDICT = /not an image|not supported|too large|is corrupt|resolution is too large|too long/i;
 
 const keys = {
   source: (mediaId) => `local_content/${shard(mediaId)}`,

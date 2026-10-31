@@ -254,6 +254,26 @@ test("a failed download holds the watermark behind its message, and the next pas
   assert.equal((await r.ready()).length, 3);
 });
 
+test("Discord's declared size is its re-encode's: the original is delivered, and only the CDN's own length can call it truncated", async (t) => {
+  const img = png([chunk("tEXt", Buffer.from(`parameters\0${PROMPT}`, "latin1"))]);
+  // As measured 2026-10-31: `size` and `content_type` describe the smaller
+  // copy proxy_url serves; `url` serves the PNG with its true Content-Length.
+  const reencoded = { ...attachment(1, "p1.png", img), size: Math.floor(img.length / 2), content_type: "image/webp" };
+  const short = attachment(2, "p2.png", img);
+  const msgs = [message(1, { attachments: [reencoded] }), message(2, { attachments: [short] })];
+  const d = fakeDiscord({
+    messages: { [CH]: msgs },
+    route: (u) => (u.pathname === "/attachments/1/p1.png" ? res(200, img, { "content-length": img.length })
+      : u.pathname === "/attachments/2/p2.png" ? res(200, img.subarray(0, 40), { "content-length": img.length }) : null),
+  });
+  const r = await rig(t, d);
+  const out = await r.run();
+  assert.equal(out.results[0].delivered, 1, "the re-encoded one is delivered whole");
+  assert.match(out.results[0].stopped, new RegExp(`40 bytes; the CDN said ${img.length}\\. Treated as truncated`));
+  assert.equal(await r.watermark(), msgs[0].id, "the truncated one holds the watermark");
+  assert.equal((await r.ready())[0].bytes.length < img.length, true, "generation data stripped from the ORIGINAL, which carried it");
+});
+
 test("an unsupported type is refused by name and the walk moves on past it", async (t) => {
   const txt = Buffer.from("hello");
   const msgs = [message(1, { attachments: [attachment(1, "notes.txt", txt, "text/plain")] })];
