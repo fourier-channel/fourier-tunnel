@@ -88,12 +88,22 @@ test("no prompt in the bytes still writes, so the old read is cleared, and says 
   assert.deepEqual(r.written[0][1].auto, ["1girl", "hilda_(pokemon)"], "the autotagger's both row survives as auto");
 });
 
-test("a fetch failure is a sentence, not a throw", async () => {
-  const r = rig({ download: async () => { throw new Error("403 Federation denied"); } });
+test("a fetch failure is a sentence, not a throw -- in words, with the reason logged", async () => {
+  const warned = [];
+  const why = "Failed to parse URL from http://synapse:8008/_synapse/admin/v1/media/x";
+  const r = rig({ download: async () => { throw new Error(why); }, log: { warn: (s) => warned.push(s) } });
   const out = await rescan(MXC, r.deps);
   assert.equal(out.ok, false);
-  assert.match(out.report, /Could not fetch the bytes: 403/);
+  assert.match(out.report, /Could not fetch the bytes/);
+  assert.doesNotMatch(out.report, /http|synapse:8008/, "the report is a chat message: no error text");
+  assert.match(warned.join("\n"), /synapse:8008/, "the reason is in the log");
   assert.equal(r.audited[0].kind, "rescan_fetch_failed");
+});
+
+test("a post whose source is a URL is refused without repeating the URL", async () => {
+  const r = rig({ findPostByMd5: async () => ({ id: 9, source: "https://twitter.com/x" }) });
+  const out = await rescan(MD5, r.deps);
+  assert.doesNotMatch(out.report, /twitter\.com|https?:/);
 });
 
 test("the command: non-admin and non-DM are refused silently and audited; usage on no target", async () => {

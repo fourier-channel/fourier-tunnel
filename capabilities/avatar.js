@@ -30,6 +30,10 @@ const AVATAR_PENDING_MS = 2 * 60 * 1000;
 
 const PROMPT = "Send me an image and I'll use it as my avatar (within 2 minutes).";
 const DONE = "Avatar updated.";
+// Words only. The reason is a library error about an upload to the
+// homeserver, and error text carries addresses (bots-never-post-addresses);
+// it goes to the log and the audit record, not the room.
+const FAILED = "I could not set my avatar to that picture. The reason is in my log.";
 
 /**
  * @param {object} event   the Matrix event, as received
@@ -42,6 +46,7 @@ const DONE = "Avatar updated.";
  *        one bot's half-finished request can never satisfy another's
  * @param {(record: object) => void} deps.audit
  * @param {() => number} [deps.now]
+ * @param {{ warn: (s: string) => void }} [deps.log]  where a failure's reason goes (console)
  * @returns {Promise<boolean>} true when the event was CONSUMED -- the caller
  *          must not go on to treat it as ordinary traffic. An image that
  *          becomes an avatar is not also an image to tag.
@@ -49,6 +54,7 @@ const DONE = "Avatar updated.";
 async function handleAvatarFlow(event, deps) {
   const { setAvatarUrl, sendText, joinedMemberCount, admins, pending, audit } = deps;
   const now = deps.now ?? Date.now;
+  const log = deps.log ?? console;
 
   // Required, not defaulted. An audit sink that quietly defaults to a no-op is
   // how one of these two copies came to leave no evidence while the other did.
@@ -98,7 +104,9 @@ async function handleAvatarFlow(event, deps) {
     } catch (e) {
       // Said in the room, because the person who asked is standing there, AND
       // recorded, because a failure nobody can read later is not a report.
-      await sendText(roomId, "Failed to set avatar: " + e.message);
+      // The room gets the fact; the log and the audit record get why.
+      log.warn(`[avatar] could not set the avatar for ${sender}: ${e.message}`);
+      await sendText(roomId, FAILED);
       audit({ kind: "avatar_failed", admin: sender, room: roomId, error: e.message });
     }
     return true;   // consumed either way: it was an answer to the prompt
@@ -107,4 +115,4 @@ async function handleAvatarFlow(event, deps) {
   return false;
 }
 
-module.exports = { handleAvatarFlow, AVATAR_PENDING_MS, PROMPT, DONE };
+module.exports = { handleAvatarFlow, AVATAR_PENDING_MS, PROMPT, DONE, FAILED };

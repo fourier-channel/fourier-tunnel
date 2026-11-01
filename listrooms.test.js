@@ -31,7 +31,8 @@ test("no rooms and a failed lookup do not read the same", () => {
   const empty = formatBotSection("@fourier:41chan.net", []);
   const failed = formatBotSection("@fourier:41chan.net", [], "joined_rooms 502");
   assert.match(empty, /\(no rooms\)/);
-  assert.match(failed, /could not read: joined_rooms 502/);
+  assert.match(failed, /could not read/);
+  assert.doesNotMatch(failed, /joined_rooms 502/, "the reason goes to the log; a fetch error names the homeserver's address");
   assert.notEqual(empty, failed);
 });
 

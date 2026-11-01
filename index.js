@@ -10,6 +10,7 @@ const imagePlan = require("./image-plan");
 const invites = require("./invites");
 const avatarCapability = require("./capabilities/avatar");
 const rooms = require("./rooms");
+const chatWords = require("./chat-words");
 const rescanCapability = require("./capabilities/rescan");
 const burCapability = require("./capabilities/bur");
 const replaceCapability = require("./capabilities/replace");
@@ -1211,7 +1212,10 @@ async function handleRoomDenyCommands(bridge, event) {
     await intent.leave(arg);
     left = "left";
   } catch (e) {
-    left = `could not leave (${e.message.slice(0, 120)})`;
+    // The reason goes to the log, not the DM: a library error can carry the
+    // homeserver's address (bots-never-post-addresses).
+    console.warn(`[roomdeny] could not leave ${arg}: ${e.message}`);
+    left = "could not leave (the reason is in the bridge log)";
   }
   invites.audit({ kind: "room_denied_by_command", room: arg, by: sender, added, left });
   await intent.sendText(event.room_id,
@@ -1247,8 +1251,11 @@ async function handleListRoomsCommand(bridge, event) {
       sections.push({ userId: id.userId, rooms: await joinedRoomsFor(id.userId) });
     } catch (e) {
       // Reported in the reply rather than swallowed: "no rooms" and "we could
-      // not ask" are different answers and must not look the same.
-      sections.push({ userId: id.userId, rooms: [], error: e.message });
+      // not ask" are different answers and must not look the same. The reply
+      // says THAT it failed; why goes to the log, since a fetch error names
+      // the homeserver's address.
+      console.warn(`[listrooms] could not read the rooms of ${id.userId}: ${e.message}`);
+      sections.push({ userId: id.userId, rooms: [], error: true });
     }
   }
 
@@ -1291,7 +1298,9 @@ async function handleBackfillCommand(bridge, event) {
   const outcome = result.error ? "failed" : result.skipped ? `skipped: ${result.skipped}` : `${result.done}/${result.seen}`;
   invites.audit({ kind: "backfill", admin: sender, room: event.room_id, restart, result: outcome });
   let reply;
-  if (result.error) reply = `Backfill failed: ${result.error}. The next sweep tries again; see the bridge log.`;
+  // The error itself is already in the log (backfillRoomNow); the room gets
+  // the fact, because raw error text can carry an address.
+  if (result.error) reply = "Backfill failed; the reason is in the bridge log. The next sweep tries again.";
   else if (result.skipped) reply = `Backfill not run: ${result.skipped}.`;
   else reply = backfill.summarise(result);
   if (result.tagsBlocked) {
@@ -1610,8 +1619,14 @@ new Cli({
     // matters because the thing being guarded (an automatic re-join inside
     // the library, before reads as well as writes) is invisible at the call
     // site and always will be.
+    //
+    // The same one place carries the words guard (chat-words.js): every room
+    // message the courier sends has its addresses and user agents removed on
+    // the way out, so a raw error interpolated by a call site nobody has read
+    // yet still cannot put one in a room (operator rulings 2026-09-27 and
+    // 2026-11-01; an @tunnel event of 2026-09-11 carries a visitor's agent).
     const rawGetIntent = bridge.getIntent.bind(bridge);
-    bridge.getIntent = (...args) => rooms.guard(rawGetIntent(...args));
+    bridge.getIntent = (...args) => chatWords.guard(rooms.guard(rawGetIntent(...args)));
 
     // The media gate's way to ask for any Matrix original not yet canonical.
     // Built now, not on first image: a tunnel that cannot reach R2 must say so

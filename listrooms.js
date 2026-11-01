@@ -30,8 +30,11 @@ function botIdentities({ domain, senderLocalpart }) {
 }
 
 // One bot's section. `rooms` is [{ roomId, name }]; name may be null.
+// `error` is only whether the lookup failed: its text is never put in the
+// reply, because a fetch error carries the homeserver's address and this is
+// a chat message (bots-never-post-addresses). index.js logs the reason.
 function formatBotSection(userId, rooms, error) {
-  if (error) return `${userId}\n  could not read: ${error}`;
+  if (error) return `${userId}\n  could not read (the reason is in the bridge log)`;
   if (!rooms || rooms.length === 0) return `${userId}\n  (no rooms)`;
 
   const shown = rooms.slice(0, LIST_CAP);

@@ -82,6 +82,10 @@ const USAGE = "Usage: !rescan <mxc://server/media-id | md5>";
  * @param {string} [deps.domain]  this homeserver's name: only an uploader on it
  *   has a localpart an original character may carry
  * @param {(record: object) => void} deps.audit
+ * @param {{ warn: (s: string) => void }} [deps.log]  where a failure's raw
+ *   reason goes (console). The report is a chat message when the DM command
+ *   sends it, so it carries words, never an error's text: a fetch error names
+ *   an address (bots-never-post-addresses). The CLI prints both.
  * @returns {Promise<{ok: boolean, report: string, postId?: number, partition?: object, generation?: string}>}
  */
 /**
@@ -115,6 +119,7 @@ function creatorPartition(scraped, projection) {
 async function rescan(target, deps) {
   const { download, findPostByMd5, findByRawMd5, getTagProjection, recordTagSources, recordGenerationMetadata, extract, strip, audit } = deps;
   const tagsFromRemoved = deps.creatorTags;
+  const log = deps.log || console;
   if (typeof audit !== "function") throw new TypeError("rescan requires an audit sink");
   if (typeof strip !== "function") throw new TypeError("rescan requires strip(): the post is found by its stripped md5");
   if (typeof recordGenerationMetadata !== "function") throw new TypeError("rescan requires recordGenerationMetadata()");
@@ -144,7 +149,8 @@ async function rescan(target, deps) {
       }
       if (!post) return { ok: false, report: `No post on the booru has md5 ${md5}, and no generation record names it as a Matrix original (or the post is deleted and hidden from me). Rescan by the image's mxc url instead: that finds a post under every md5 it could have.` };
       const source = String(post.source || "");
-      if (!source.startsWith("mxc://")) return { ok: false, report: `Post #${post.id} was not posted by me: its source is ${source || "empty"}, not an mxc url, so I have nowhere to fetch its bytes from.` };
+      // The source itself is not repeated: it is a URL, and this is a chat message.
+      if (!source.startsWith("mxc://")) return { ok: false, report: `Post #${post.id} was not posted by me: its source is ${source ? "a link elsewhere" : "empty"}, not an mxc url, so I have nowhere to fetch its bytes from.` };
       ({ buffer, contentType, uploader } = await download(source));
       stripRaw();
       md5 = post.md5 || md5;
@@ -161,7 +167,8 @@ async function rescan(target, deps) {
     }
   } catch (err) {
     audit({ kind: "rescan_fetch_failed", target: t, error: String(err && err.message).slice(0, 300) });
-    return { ok: false, report: `Could not fetch the bytes: ${err && err.message}` };
+    log.warn(`[rescan] ${t}: could not fetch the bytes: ${err && err.message}`);
+    return { ok: false, report: "Could not fetch the bytes; the reason is in the bridge log. Nothing was changed." };
   }
 
   // The prompt, read with the extractor as it is TODAY, from what the strip
@@ -181,7 +188,8 @@ async function rescan(target, deps) {
     recorded = await recordTagSources(post.id, partition);
   } catch (err) {
     audit({ kind: "rescan_write_failed", post_id: post.id, error: String(err && err.message).slice(0, 300) });
-    return { ok: false, report: `Read ${creatorTags.length} creator tag(s) from post #${post.id}, but the booru refused the write: ${err && err.message}`, postId: post.id, partition };
+    log.warn(`[rescan] post #${post.id}: the booru refused the tag-source write: ${err && err.message}`);
+    return { ok: false, report: `Read ${creatorTags.length} creator tag(s) from post #${post.id}, but the booru refused the write; its answer is in the bridge log.`, postId: post.id, partition };
   }
 
   const generation = await resendGeneration({ post, md5, rawMd5: md5hex(buffer), stripped, stripError, deps });

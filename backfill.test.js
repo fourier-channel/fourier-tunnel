@@ -290,8 +290,9 @@ test("a homeserver error mid-walk keeps the pages already walked and says why it
   assert.equal(r.cursor, "p2", "resumes at the page that failed");
   assert.equal(r.error, "messages 502");
   assert.equal(r.reachedStart, false);
-  assert.match(lines.join("\n"), /messages 502/);
-  assert.match(summarise(r), /stopped by an error: messages 502/);
+  assert.match(lines.join("\n"), /messages 502/, "the reason is in the log");
+  assert.match(summarise(r), /stopped by an error/);
+  assert.doesNotMatch(summarise(r), /messages 502/, "and not in the summary, which !backfill posts in the room");
 });
 
 test("a token that never moves is NOT reported as the start of the room", async () => {

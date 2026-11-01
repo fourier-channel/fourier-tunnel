@@ -378,7 +378,10 @@ function summarise(r) {
   } else if (r.reachedStart === true) {
     tail = "; reached the start of the room (or the furthest back the bot may read)";
   } else if (r.reachedStart === false) {
-    const why = r.error ? `stopped by an error: ${r.error}`
+    // The error's text is in the log already (the walk's "history page"
+    // line), and this sentence is also !backfill's reply in the room, where
+    // raw error text can carry the homeserver's address.
+    const why = r.error ? "stopped by an error, named in the bridge log's history page line"
       : r.stalled ? "the homeserver's pagination token stopped moving"
         : r.capped ? "this run's picture cap was reached"
           : `this run's ${r.pages}-page budget was spent`;

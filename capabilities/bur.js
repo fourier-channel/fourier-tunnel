@@ -84,17 +84,12 @@ function senderLevel(powerLevels, createContent, createSender, sender) {
   return Number(pl.users_default) || 0;
 }
 
-// Anything that looks like an address, gone. Booru validation messages name
-// tags and lines, not hosts, but a message is foreign text and the rule is
-// that no bot posts an address, so it is enforced on the way out rather than
-// assumed of the source. A clock time ("01:54") is not a host:port.
-function scrub(text) {
-  return String(text)
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[address removed]")
-    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "[address removed]")
-    .replace(/\b(?=[a-z0-9-]*[a-z])[a-z0-9-]+(?:\.[a-z0-9-]+)+:\d{2,5}\b/gi, "[address removed]")
-    .replace(/\b(?:localhost|[a-z][a-z0-9-]*-\d+):\d{2,5}\b/gi, "[address removed]");
-}
+// Anything that looks like an address or a user agent, gone. Booru validation
+// messages name tags and lines, not hosts, but a message is foreign text and
+// the rule is that no bot posts an address, so it is enforced on the way out
+// rather than assumed of the source. One implementation, chat-words.js, which
+// every room message also passes through on its way out of the intent.
+const { scrub } = require("../chat-words");
 
 /**
  * The booru's reasons for refusing a script, as sentences.

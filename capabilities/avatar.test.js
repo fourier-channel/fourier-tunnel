@@ -9,7 +9,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { handleAvatarFlow, PROMPT, DONE } = require("./avatar");
+const { handleAvatarFlow, PROMPT, DONE, FAILED } = require("./avatar");
 
 const ADMIN = "@saber:41chan.net";
 const ROOM = "!r:41chan.net";
@@ -92,11 +92,16 @@ test("an expired request releases the image rather than eating it", async () => 
   assert.equal(r.audited.at(-1).kind, "avatar_expired");
 });
 
-test("a failure is said in the room AND recorded", async () => {
-  const r = rig({ setAvatarUrl: async () => { throw new Error("boom"); } });
+test("a failure is said in the room in words, and its reason logged AND recorded", async () => {
+  // A real shape: Node's fetch error names the homeserver's address.
+  const why = "fetch failed: connect ECONNREFUSED 172.18.0.4:8008";
+  const warned = [];
+  const r = rig({ setAvatarUrl: async () => { throw new Error(why); }, log: { warn: (s) => warned.push(s) } });
   await handleAvatarFlow(text("!setavatar"), r.deps);
   assert.equal(await handleAvatarFlow(image("mxc://x/1"), r.deps), true);
-  assert.match(r.sent.at(-1)[1], /Failed to set avatar: boom/);
+  assert.equal(r.sent.at(-1)[1], FAILED);
+  assert.doesNotMatch(r.sent.at(-1)[1], /172\.18|8008|ECONNREFUSED/, "no raw error text in the room");
+  assert.match(warned.join("\n"), /ECONNREFUSED/, "the reason is in the log");
   assert.equal(r.audited.at(-1).kind, "avatar_failed");
 });
 
