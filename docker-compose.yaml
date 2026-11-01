@@ -27,6 +27,18 @@ services:
       #   install -d -m 2775 -o root -g fourier /var/lib/fourier-tunnel/discord
       - /var/lib/fourier-tunnel/discord:/discord
     restart: unless-stopped
+    # THE JOURNAL, NOT json-file. The daemon default on 41chan is json-file
+    # 50m x 3 (measured 2026-11-01), bounded by size and not by age, and the
+    # operator's ruling of 2026-11-01 is that anyone's IP address or user
+    # agent lives at most 7 days in EVERY store, logs included. This bridge
+    # logs errors whose text it did not write -- a fetch failure, a booru or
+    # proxy error page -- and the room-message guard (chat-words.js) sends
+    # their detail here on purpose. journald on the box keeps 6 days, so what
+    # lands in stdout ages out with everything else. `docker logs` still reads it.
+    logging:
+      driver: journald
+      options:
+        tag: fourier-tunnel
     networks:
       - synapse_default
       - danbooru_default
