@@ -543,7 +543,7 @@ async function acquireChannel(ctx, channelId) {
  * token or a missing drop directory stops the pass, because neither can be
  * fixed by trying the next channel.
  *
- * Writes discord-status.json after every pass: the "reading" lamp's evidence.
+ * Writes discord-status.json after every channel: the "reading" lamp's evidence.
  * It records the last pass that actually READ each channel, which is the thing
  * a lamp must measure -- arrivals cannot tell a quiet channel from a dead
  * acquirer, and the gateway's presence proves only that a socket is open.
@@ -577,8 +577,39 @@ async function acquireOnce(opts) {
   ctx.deliver = opts.deliver || dropDeliverer({ dropRoot: opts.dropRoot, stateDir: opts.stateDir, namespace: opts.namespace || SOURCE, now: ctx.now });
   await ctx.deliver.prepare();
 
+  // WRITTEN AFTER EVERY CHANNEL, not once at the end. A catch-up pass over a
+  // backlog ran 25 hours on 2026-10-31/11-01, and a file written only at the
+  // end went on reporting the pass before it -- 122 channels stopped by a bug
+  // already fixed and deployed -- for all of that time. A channel this pass
+  // has not reached yet keeps its row from the pass before, marked
+  // `fromPass: "previous"`, so the file always names every channel.
+  const statusFile = path.join(ctx.stateDir, "discord-status.json");
+  const before = await readPreviousRows(statusFile);
+  const passStartedAt = new Date(ctx.now()).toISOString();
   const results = [];
   let fatal = null;
+  const writeStatus = async () => {
+    const rows = results.map((r) => ({
+      channel: r.channel, name: r.name || null, read: !r.stopped, watermark: r.watermark || null,
+      delivered: r.delivered || 0, alreadyQueued: r.alreadyQueued || 0, refused: (r.refused || []).length,
+      stopped: r.stopped || null, fromPass: "this",
+    }));
+    const reached = new Set(rows.map((r) => r.channel));
+    const carried = opts.channels.filter((c) => !reached.has(c) && before.has(c)).map((c) => ({ ...before.get(c), fromPass: "previous" }));
+    const channels = [...rows, ...carried];
+    const status = {
+      at: new Date(ctx.now()).toISOString(),
+      passStartedAt,
+      done: results.length,
+      of: opts.channels.length,
+      deliver: ctx.deliver.name,
+      ok: !fatal && channels.every((r) => !r.stopped),
+      fatal: fatal ? fatal.message : null,
+      channels,
+    };
+    await writeJsonAtomic(statusFile, status);
+    return status;
+  };
   for (const id of opts.channels) {
     try {
       results.push(await acquireChannel(ctx, id));
@@ -586,26 +617,27 @@ async function acquireOnce(opts) {
       if (err instanceof ChannelRefused || err instanceof Transient) {
         results.push({ channel: id, stopped: err.message, refused: [], delivered: 0, alreadyQueued: 0 });
         ctx.log(`channel ${id}: ${err.message}`);
-        continue;
+      } else {
+        fatal = err;
+        break;
       }
-      fatal = err;
-      break;
     }
+    await writeStatus();
   }
-  const status = {
-    at: new Date(ctx.now()).toISOString(),
-    deliver: ctx.deliver.name,
-    ok: !fatal && results.every((r) => !r.stopped),
-    fatal: fatal ? fatal.message : null,
-    channels: results.map((r) => ({
-      channel: r.channel, name: r.name || null, read: !r.stopped, watermark: r.watermark || null,
-      delivered: r.delivered || 0, alreadyQueued: r.alreadyQueued || 0, refused: (r.refused || []).length,
-      stopped: r.stopped || null,
-    })),
-  };
-  await writeJsonAtomic(path.join(ctx.stateDir, "discord-status.json"), status);
+  const status = await writeStatus();
   if (fatal) throw fatal;
   return { results, status };
+}
+
+/** Channel rows of the last status written, keyed by channel. Display only: an unreadable file carries nothing over. */
+async function readPreviousRows(file) {
+  try {
+    const s = JSON.parse(await fs.readFile(file, "utf8"));
+    const rows = Array.isArray(s && s.channels) ? s.channels : [];
+    return new Map(rows.filter((r) => r && isSnowflake(r.channel)).map((r) => [r.channel, r]));
+  } catch {
+    return new Map();
+  }
 }
 
 module.exports = {

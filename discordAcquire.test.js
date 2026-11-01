@@ -218,6 +218,35 @@ test("a channel the bot cannot read is reported, and the next channel is still r
   assert.equal(results[1].delivered, 1);
 });
 
+test("the status file is rewritten after each channel, and a channel not reached yet keeps its last row", async (t) => {
+  const img = png();
+  let r = null;
+  let midPass = null;
+  const d = fakeDiscord({
+    channels: { [CH]: { id: CH, type: 0, name: "general", guild_id: GUILD }, [CH2]: { id: CH2, type: 0, name: "art", guild_id: GUILD } },
+    messages: { [CH]: [message(1, { attachments: [attachment(1, "x.png", img)] })] },
+    cdn: { "/attachments/1/x.png": img },
+    route: (u) => {
+      if (midPass === null && u.pathname.startsWith(`/api/v10/channels/${CH2}`)) {
+        midPass = JSON.parse(require("node:fs").readFileSync(path.join(r.stateDir, "discord-status.json"), "utf8"));
+      }
+      return null;
+    },
+  });
+  r = await rig(t, d);
+  await fs.writeFile(path.join(r.stateDir, "discord-status.json"), JSON.stringify({
+    at: "2026-10-31T19:29:18.011Z", ok: false,
+    channels: [{ channel: CH, read: false, stopped: "truncated" }, { channel: CH2, read: false, stopped: "truncated" }],
+  }));
+  const { status } = await r.run({ channels: [CH, CH2] });
+
+  assert.ok(midPass, "control: the second channel was asked for");
+  assert.deepEqual([midPass.done, midPass.of, midPass.ok], [1, 2, false]);
+  assert.deepEqual(midPass.channels.map((c) => [c.channel, c.fromPass, c.stopped]), [[CH, "this", null], [CH2, "previous", "truncated"]]);
+  assert.deepEqual([status.done, status.of, status.ok], [2, 2, true]);
+  assert.deepEqual(status.channels.map((c) => [c.channel, c.fromPass, c.stopped]), [[CH, "this", null], [CH2, "this", null]]);
+});
+
 test("a 429 waits Discord's own retry_after and then succeeds", async (t) => {
   let limited = false;
   const d = fakeDiscord({
