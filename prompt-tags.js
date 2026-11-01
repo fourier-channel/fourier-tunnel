@@ -257,6 +257,14 @@ function rawPrompt(chunks) {
 // so the UI can tuck them into a de-emphasised, collapsible "quality & meta"
 // section rather than dropping them (separating outright risks breaking a
 // legitimate prompt). Curate this list as prompt fashions evolve.
+//
+// EVERY TERM HERE BECOMES A PUBLIC TAG (image-plan publicTagsFor), so this list
+// is the one place a prompt word reaches the booru's tag_string -- and the
+// flagged-tag quarantine reads tag_string. Realism vernacular (photorealistic,
+// realistic, photorealism...) must never be added, however much it reads like a
+// quality booster: it is the flagged "photorealistic" tag, and operator ruling
+// 2026-11-01 says a prompt word is noise -- only the taggers decide whether an
+// image looks photorealistic and is hidden. Guarded in prompt-tags.test.js.
 const QUALITY_META = new Set([
   "masterpiece", "best_quality", "high_quality", "normal_quality", "low_quality", "worst_quality",
   "amazing_quality", "great_quality", "best_aesthetic", "high_aesthetic", "aesthetic", "very_aesthetic",

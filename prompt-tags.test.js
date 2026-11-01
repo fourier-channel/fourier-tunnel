@@ -56,6 +56,18 @@ test("non-PNG / null bytes -> empty (never throws)", () => {
   assert.deepEqual(extractCreatorTags(null, ""), { tags: [], meta: [], characters: [] });
 });
 
+// Operator ruling 2026-11-01: realism words in a PROMPT are SDXL quality
+// vernacular, never intent. Only the taggers may put "photorealistic" on a post
+// (it is a flagged tag: carrying it hides the post). The meta bucket is the one
+// prompt-derived bucket the tunnel posts PUBLICLY, so these words must stay in
+// the private content bucket.
+test("realism words in a prompt stay private: never in the public meta bucket", () => {
+  const words = ["photorealistic", "realistic", "photorealism", "hyperrealistic", "photo_(medium)", "realism"];
+  const r = promptToTags(`masterpiece, ${words.map((w) => w.replace("_(", " \\(").replace(")", "\\)")).join(", ")}, 1girl`, {});
+  assert.deepEqual(r.meta, ["masterpiece"], "only the quality term is public");
+  for (const w of words) assert.ok(r.tags.includes(w), `${w} is a private creator tag (got ${JSON.stringify(r.tags)})`);
+});
+
 test("promptToTags dedupes content and respects max (meta not counted against max)", () => {
   assert.deepEqual(promptToTags("1girl, 1girl, solo", {}).tags, ["1girl", "solo"]);
   assert.equal(promptToTags("a_tag, b_tag, c_tag", { max: 2 }).tags.length, 2);
