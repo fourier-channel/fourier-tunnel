@@ -247,6 +247,34 @@ test("the status file is rewritten after each channel, and a channel not reached
   assert.deepEqual(status.channels.map((c) => [c.channel, c.fromPass, c.stopped]), [[CH, "this", null], [CH2, "this", null]]);
 });
 
+test("a long channel rewrites the status file while it is still being walked, at most once a minute", async (t) => {
+  const img = png();
+  const msgs = [1, 2, 3, 4, 5, 6].map((i) => message(i, { attachments: [attachment(i, `${i}.png`, img)] }));
+  const cdn = Object.fromEntries(msgs.map((m, i) => [`/attachments/${i + 1}/${i + 1}.png`, img]));
+  let r = null;
+  let clock = 1_790_000_000_000;
+  const seen = [];
+  const d = fakeDiscord({
+    messages: { [CH]: msgs }, cdn,
+    route: (u) => {
+      if (u.pathname.endsWith("/messages")) {
+        clock += 40_000;
+        try { seen.push(JSON.parse(require("node:fs").readFileSync(path.join(r.stateDir, "discord-status.json"), "utf8"))); } catch { seen.push(null); }
+      }
+      return null;
+    },
+  });
+  r = await rig(t, d);
+  await r.run({ now: () => clock });
+
+  const walking = seen.filter((s) => s && s.channels[0] && s.channels[0].walking);
+  assert.ok(walking.length >= 1, "control: a status was written mid-channel");
+  assert.deepEqual([walking[0].done, walking[0].channels[0].read, walking[0].channels[0].channel], [0, null, CH]);
+  // Three full pages, 40 s of clock apiece: written after the first and the
+  // third, skipped after the second (40 s < 60 s since the last write).
+  assert.equal(new Set(walking.map((s) => s.at)).size, 2, "throttled: not one write per page");
+});
+
 test("a 429 waits Discord's own retry_after and then succeeds", async (t) => {
   let limited = false;
   const d = fakeDiscord({

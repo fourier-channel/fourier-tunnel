@@ -67,6 +67,8 @@ const DEFAULT_PAGE = 100;
 const DEFAULT_SPACING_MS = 1000;
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
 const MAX_RETRIES = 5;
+// How often a channel still being walked rewrites discord-status.json.
+const STATUS_EVERY_MS = 60_000;
 /** Text channel, announcement, announcement thread, public thread, private thread. */
 const READABLE_CHANNEL_TYPES = new Set([0, 5, 10, 11, 12]);
 /** The formats strip-generation.js can strip losslessly. Video and documents carry no prompt it can read. */
@@ -442,7 +444,7 @@ async function deliverAttachment(ctx, channel, msg, att) {
  * message, and replay is free: the drop entry id is a pure function of the
  * message and attachment ids.
  */
-async function acquireChannel(ctx, channelId) {
+async function acquireChannel(ctx, channelId, progress = null) {
   const out = {
     channel: channelId, pages: 0, messages: 0, delivered: 0, alreadyQueued: 0, stripped: 0,
     refused: [], watermark: null, stopped: null, enrolled: false,
@@ -529,6 +531,8 @@ async function acquireChannel(ctx, channelId) {
       state.lastMessageAt = msg.timestamp;
       await writeChannelState(ctx.stateDir, channelId, state);
     }
+    out.watermark = state.after;
+    if (progress) await progress(out);
     if (page.length < ctx.pageSize) break;
   }
   out.watermark = state.after;
@@ -577,23 +581,34 @@ async function acquireOnce(opts) {
   ctx.deliver = opts.deliver || dropDeliverer({ dropRoot: opts.dropRoot, stateDir: opts.stateDir, namespace: opts.namespace || SOURCE, now: ctx.now });
   await ctx.deliver.prepare();
 
-  // WRITTEN AFTER EVERY CHANNEL, not once at the end. A catch-up pass over a
-  // backlog ran 25 hours on 2026-10-31/11-01, and a file written only at the
-  // end went on reporting the pass before it -- 122 channels stopped by a bug
-  // already fixed and deployed -- for all of that time. A channel this pass
-  // has not reached yet keeps its row from the pass before, marked
-  // `fromPass: "previous"`, so the file always names every channel.
+  // WRITTEN AS THE PASS GOES, not once at the end. A catch-up pass over a
+  // backlog ran 25 hours on 2026-10-31/11-01 -- one channel's history alone
+  // went back to 2023 -- and a file written only at the end went on reporting
+  // the pass before it, 122 channels stopped by a bug already fixed and
+  // deployed, for all of that time. It is rewritten after every channel and,
+  // at most once a minute, after every page of the channel being walked
+  // (`walking: true`). A channel this pass has not reached yet keeps its row
+  // from the pass before, marked `fromPass: "previous"`, so the file always
+  // names every channel.
   const statusFile = path.join(ctx.stateDir, "discord-status.json");
   const before = await readPreviousRows(statusFile);
   const passStartedAt = new Date(ctx.now()).toISOString();
   const results = [];
   let fatal = null;
-  const writeStatus = async () => {
-    const rows = results.map((r) => ({
-      channel: r.channel, name: r.name || null, read: !r.stopped, watermark: r.watermark || null,
-      delivered: r.delivered || 0, alreadyQueued: r.alreadyQueued || 0, refused: (r.refused || []).length,
-      stopped: r.stopped || null, fromPass: "this",
-    }));
+  const rowOf = (r, walking) => ({
+    channel: r.channel, name: r.name || null, read: walking ? null : !r.stopped, watermark: r.watermark || null,
+    delivered: r.delivered || 0, alreadyQueued: r.alreadyQueued || 0, refused: (r.refused || []).length,
+    stopped: r.stopped || null, fromPass: "this", ...(walking ? { walking: true } : {}),
+  });
+  let lastWrite = -Infinity;
+  const progress = async (current) => {
+    if (ctx.now() - lastWrite < STATUS_EVERY_MS) return;
+    await writeStatus(current);
+  };
+  const writeStatus = async (current = null) => {
+    lastWrite = ctx.now();
+    const rows = results.map((r) => rowOf(r, false));
+    if (current) rows.push(rowOf(current, true));
     const reached = new Set(rows.map((r) => r.channel));
     const carried = opts.channels.filter((c) => !reached.has(c) && before.has(c)).map((c) => ({ ...before.get(c), fromPass: "previous" }));
     const channels = [...rows, ...carried];
@@ -612,7 +627,7 @@ async function acquireOnce(opts) {
   };
   for (const id of opts.channels) {
     try {
-      results.push(await acquireChannel(ctx, id));
+      results.push(await acquireChannel(ctx, id, progress));
     } catch (err) {
       if (err instanceof ChannelRefused || err instanceof Transient) {
         results.push({ channel: id, stopped: err.message, refused: [], delivered: 0, alreadyQueued: 0 });
