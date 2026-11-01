@@ -3,6 +3,10 @@ strikes.json
 # Per-room history-walk progress (backfill-state.js). Lives in the mounted state
 # directory in production; beside the code only on a dev checkout.
 backfill-state.json
+# The production state directory itself (docker-compose.yaml mounts it at
+# /state): quarantine, strikes, aliases, walk progress. Live data, never
+# source; unignored it read as drift on every sweep of the deploy checkout.
+onboarding-state/
 audit.log
 *.tmp
 config.yaml
