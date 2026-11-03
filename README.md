@@ -212,6 +212,11 @@ the newest message with `!backfill restart`.
     cp config.example.yaml config.yaml
     cp tunnel-registration.example.yaml tunnel-registration.yaml
     mkdir -p onboarding-state
+    chown -R 10004:985 onboarding-state config.yaml
+
+The bridge runs as uid 10004, group `fourier` (the Dockerfile says why), so
+what it reads and writes on the host is chowned to it. 985 is `fourier`'s gid
+on 41chan; use the box's own.
 
 `docker-compose.yaml` needs a `.env` and bind-mounts `config.yaml` and
 `onboarding-state/`, mounted at `/state` (`ONBOARDING_STATE_DIR`). Everything

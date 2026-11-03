@@ -39,7 +39,20 @@ COPY capabilities ./capabilities
 # HERE because the URLs in config.yaml are compose-network names: synapse,
 # danbooru and fourier-spectrum resolve on this network and nowhere else.
 COPY tools ./tools
-COPY config.yaml tunnel-registration.yaml ./
+
+# Unprivileged. hostaudit's container-user check named this bridge running as
+# root (2026-11-02). Its own uid, 10004, is no login on the host, so the
+# secrets it reads (these two files, 600) stay readable by it alone. Its group
+# is the host's `fourier` (gid 985 on 41chan): /discord is shared with
+# fourier-sampling's panel, which runs as `fourier`, through a setgid-fourier
+# directory and umask 002 (discordService.js). The host owns the mounted
+# config.yaml and onboarding-state/, so they are chowned to 10004:985 before the
+# first start as this user (README, Setup step 1). On another box, put that
+# box's `getent group fourier` gid here.
+RUN groupadd --system --gid 985 fourier \
+    && useradd --system --no-create-home --uid 10004 --gid fourier tunnel
+COPY --chown=tunnel:fourier config.yaml tunnel-registration.yaml ./
+USER tunnel
 
 # The bridge listens on 8009 for Synapse's appservice traffic
 EXPOSE 8009
