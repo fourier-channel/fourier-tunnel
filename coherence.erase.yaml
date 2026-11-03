@@ -1,0 +1,108 @@
+# What fourier-tunnel (the appservice @tunnel, "Neru-chan") holds about a person,
+# for `coherence erase`.
+#
+# Specification: fourier-basis docs/design/DATA_ERASURE.md section 4; the
+# inventory rows cited are DATA_ERASURE_INVENTORY/fourier.md section 1.2.
+#
+# Uploads that become booru posts are CONTENT in the booru and chanbooru
+# declares them; declared here is only what the tunnel itself holds.
+#
+# Runtime state on 41chan: /opt/fourier/tunnel/onboarding-state, bind-mounted
+# at /state (docker-compose.yaml ONBOARDING_STATE_DIR), under the /opt backup
+# root. The Discord ledger is /var/lib/fourier-tunnel/discord, mounted at
+# /discord, which the nightly backup does NOT read today (ops.67 plans to add
+# it; if it does, add residue: [coherence.backups] to the two Discord stores).
+
+adapter: tools/erase.js
+
+stores:
+  # T1. Invite-strike ledger {mxid: {strikes, until}} (invites.js:10, :116).
+  # Non-decaying by design: erasing it would let an abuser reset by asking.
+  # DATA_ERASURE E7 (RULED): the key is replaced by a salted hash of the
+  # identifier, so the cooldown survives and no person is named.
+  - id: tunnel.strikes
+    where: /opt/fourier/tunnel/onboarding-state/strikes.json on 41chan
+    holds: [mxid]
+    locate: the subject's mxid as a top-level key
+    residue: [coherence.backups]
+    fields:
+      mxid_key:
+        fate: INERT
+        how: key replaced by the salted hash of the mxid (E7); strikes and until stay
+
+  # T2. audit.log: one JSON line per event, with the mxid under inviter, by,
+  # admin, sender or target (invites.js:36-39; index.js:1172-1357). Appended
+  # forever. E8 (RULED) wants rotation at 30 d AND a per-person rewrite at T0;
+  # the rotation is not built (no rotate code in this repo), the rewrite is the
+  # adapter's job, so the erase declares GONE at T0 and the rest is not claimed.
+  - id: tunnel.audit
+    where: /opt/fourier/tunnel/onboarding-state/audit.log on 41chan
+    holds: [mxid, dm_room_ids]
+    locate: every line whose inviter, by, admin, sender or target is the subject's mxid
+    residue: [coherence.backups]
+    fields:
+      inviter: {fate: GONE}
+      sender: {fate: GONE}
+      by: {fate: GONE}
+      admin: {fate: GONE}
+      target: {fate: GONE}
+
+  # T8. Synapse's UNSTRIPPED original of an upload, moved aside to superseded/
+  # with its EXIF and generation data (canon.js:94, :260, :335, :778). Keyed by
+  # media id; it is linked to the uploader only through Synapse's media table,
+  # so `locate` goes through the mxid's uploads. holds is empty because no
+  # subject key appears in the key or the bytes. E9 (RULED): delete the
+  # person's at T0 and add a pruner for everyone (not built). R2 is not in the
+  # restic paths.
+  - id: tunnel.r2-superseded
+    where: R2 bucket $R2_BUCKET (canon.js:136), prefix superseded/
+    holds: []
+    locate: media ids from Synapse local_media_repository.user_id = subject mxid, then superseded/local_content/<shard>
+    fields:
+      object: {fate: GONE}
+
+  # D1. Discord attachment index: one row per attachment with the author's
+  # Discord id, username and display name (discordIndex.js:269-275). Append-only.
+  # Rows are kept (the attachment id keeps the plan and ledger denominators
+  # true); the person's fields are nulled. Linked to a subject through
+  # creators.json, which the sampling panel writes and sampling declares.
+  - id: tunnel.discord-index
+    where: /var/lib/fourier-tunnel/discord/index/<channel>.jsonl on 41chan
+    holds: [discord_id, display_name]
+    locate: rows whose u is one of the subject's Discord ids
+    fields:
+      u: {fate: GONE}
+      un: {fate: GONE}
+      dn: {fate: GONE}
+
+  # D2. What became of each attachment, with the author id (discordAcquire.js:517,
+  # :572). Append-only.
+  - id: tunnel.discord-acquired
+    where: /var/lib/fourier-tunnel/discord/acquired.jsonl on 41chan
+    holds: [discord_id]
+    locate: rows whose u is one of the subject's Discord ids
+    fields:
+      u: {fate: GONE}
+
+logs:
+  # Container stdout, on the journald driver with tag fourier-tunnel
+  # (docker-compose.yaml logging block). It carries room ids, inviter mxids
+  # (invites.js warn) and the text of errors it did not write, which can name a
+  # host or a UA. The 6 d is set by the box's journald, MaxRetentionSec=5day
+  # (fourier-basis ops/hetzner/journald/10-retention.conf). The log is no copy
+  # of its own: docker-compose.yaml:39 writes it into the host journal, which
+  # basis declares as journald.hosts, so the bound is that store's.
+  - id: tunnel.container-log
+    where: journald, tag fourier-tunnel, on 41chan
+    holds: [mxid, ip, user_agent]
+    bound: 0
+    residue: [journald.hosts]
+
+paths:
+  # strikes.json and audit.log live here. quarantine.json, backfill-state.json,
+  # gate3-aliases.json and rooms-denied.json hold no user (rooms-denied.json
+  # names the ADMIN who denied a room: operator data, out of scope). The old
+  # onboarding-state.json there is Fourier-chan's watermark from before she
+  # moved to her own service; not read, see the report.
+  - path: /opt/fourier/tunnel
+    stores: [tunnel.strikes, tunnel.audit]
